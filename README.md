@@ -42,7 +42,7 @@ make
 ```c
 #include <3ds.h>
 #include <citro3d.h>
-#include "gl2citro3d.h"
+#include <NovaGL.h>
 
 int main(void) {
     gfxInitDefault();
