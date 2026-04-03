@@ -1,4 +1,4 @@
-# gl2citro3d
+# NovaGL
 
 OpenGL ES 1.1 → Citro3D translation layer for Nintendo 3DS (PICA200 GPU).
 
@@ -6,7 +6,7 @@ Drop-in replacement for `<GLES/gl.h>` that maps fixed-function GL calls to Citro
 
 ## Features
 
-- 82 GL ES 1.1 functions implemented
+- 85 GL ES 1.1 functions implemented
 - Matrix stacks (projection, modelview, texture)
 - VBO support with linearAlloc-backed GPU memory
 - Texture management with automatic Morton swizzle for PICA200
@@ -29,35 +29,13 @@ make
 cmake -DCMAKE_TOOLCHAIN_FILE=../cmake/DevkitArm3DS.cmake -DGL2CITRO3D_BUILD_EXAMPLES=OFF ..
 make
 ```
-
-## Project Structure
-
-```
-gl2citro3d/
-├── include/
-│   └── gl2citro3d.h          # Public API header (replaces <GLES/gl.h>)
-├── src/
-│   ├── gl2citro3d.c           # Implementation (~1700 lines)
-│   └── CMakeLists.txt         # Builds libgl2citro3d.a
-├── shaders/
-│   └── gl2citro3d_shader.pica # PICA200 vertex shader
-├── cmake/
-│   └── DevkitArm3DS.cmake     # Toolchain file for cross-compilation
-├── examples/
-│   ├── 01_triangle/           # Colored triangle (vertex colors, orthographic)
-│   ├── 02_textured_quad/      # Textured quad (texture loading, UV repeat)
-│   └── 03_rotating_cube/      # Rotating cube (perspective, depth test, transforms)
-├── CMakeLists.txt             # Top-level build
-└── README.md
-```
-
 ## Usage
 
 ### Integration
 
 1. Add as a CMake subdirectory or build separately
-2. Include the header: `#include "gl2citro3d.h"`
-3. Link with CMake: `target_link_libraries(your_app PRIVATE gl2citro3d)`
+2. Include the header: `#include <NovaGL.h>`
+3. Link with CMake: `target_link_libraries(your_app PRIVATE NovaGL)`
 
 ### Initialization
 
@@ -107,17 +85,6 @@ typedef struct {
 - Use `gl2c3d_frame_begin()` / `gl2c3d_frame_end()` instead of swap buffers
 - `gl2c3d_set_render_target(0)` for top screen, `(1)` for bottom screen
 - Max texture size limited by PICA200 (typically 1024x1024)
-
-## Examples
-
-### 01 - Triangle
-Colored triangle with vertex colors. Demonstrates basic initialization, orthographic projection, and vertex array drawing.
-
-### 02 - Textured Quad
-Procedurally generated checkerboard texture on a quad. Shows texture creation, filtering/wrapping parameters, and UV coordinates > 1.0 for texture repeat.
-
-### 03 - Rotating Cube
-Textured cube with per-face colors, perspective projection, depth testing, and real-time rotation via `glRotatef`.
 
 ## License
 
