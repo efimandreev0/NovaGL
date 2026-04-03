@@ -23,7 +23,7 @@
 #define GL2C3D_MATRIX_STACK     32
 #define GL2C3D_DISPLAY_LISTS    512
 #define GL2C3D_DL_MAX_OPS       64
-#define GL2C3D_CMD_BUF_SIZE     (256 * 1024)
+#define GL2C3D_CMD_BUF_SIZE     (1024 * 1024)
 #define GL2C3D_SCREEN_W         400
 #define GL2C3D_SCREEN_H         240
 
@@ -134,6 +134,7 @@ static struct {
         GLenum  type;
         GLsizei stride;
         const void *pointer;
+        GLuint  vbo_id;
     } va_vertex, va_texcoord, va_color, va_normal;
 
     /* GL state flags */
@@ -183,6 +184,12 @@ static struct {
     GLenum     last_error;
 
     int        initialized;
+
+    void *client_array_buf;
+    int client_array_buf_size;
+
+    int tev_dirty;
+    int last_tex_state;
 } g;
 
 
@@ -430,6 +437,11 @@ void gl2c3d_init(void) {
     AttrInfo_AddLoader(&g.attr_info, 2, GPU_UNSIGNED_BYTE, 4); /* color */
     C3D_SetAttrInfo(&g.attr_info);
 
+    C3D_DepthMap(true, 0.5f, 0.5f);
+
+    g.client_array_buf_size = 2 * 1024 * 1024;
+    g.client_array_buf = linearAlloc(g.client_array_buf_size);
+
     /* Default state */
     g.matrix_mode = GL_MODELVIEW;
     Mtx_Identity(&g.proj_stack[0]);
@@ -477,13 +489,14 @@ void gl2c3d_init(void) {
     g.dl_recording = -1;
     g.dl_next_base = 1;
     g.texture_2d_enabled = 1;
+    g.tev_dirty = 1;
 
     g.initialized = 1;
 }
 
 void gl2c3d_fini(void) {
     if (!g.initialized) return;
-
+    if (g.client_array_buf) linearFree(g.client_array_buf);
     /* Free textures */
     for (int i = 0; i < GL2C3D_MAX_TEXTURES; i++) {
         if (g.textures[i].allocated) {
@@ -534,9 +547,19 @@ void gl2c3d_set_render_target(int is_right_eye) {
 
 static void apply_gpu_state(void) {
     /* Upload matrices */
+    /* Upload matrices */
     if (g.matrices_dirty) {
-        if (g.uLoc_projection >= 0)
-            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection, &g.proj_stack[g.proj_sp]);
+        if (g.uLoc_projection >= 0) {
+            C3D_Mtx tilt;
+            Mtx_Identity(&tilt);
+            tilt.r[0].x =  0.0f; tilt.r[0].y = 1.0f;
+            tilt.r[1].x = -1.0f; tilt.r[1].y = 0.0f;
+
+            C3D_Mtx final_proj;
+            Mtx_Multiply(&final_proj, &tilt, &g.proj_stack[g.proj_sp]);
+
+            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection, &final_proj);
+        }
         if (g.uLoc_modelview >= 0)
             C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_modelview, &g.mv_stack[g.mv_sp]);
         g.matrices_dirty = 0;
@@ -631,27 +654,29 @@ static void apply_gpu_state(void) {
      *
      * Stage 1-5: passthrough (disabled)
      */
-    C3D_TexEnv *env0 = C3D_GetTexEnv(0);
-    C3D_TexEnvInit(env0);
+    int current_tex_state = (g.texture_2d_enabled && g.bound_texture > 0);
+    if (g.tev_dirty || g.last_tex_state != current_tex_state) {
+        C3D_TexEnv *env0 = C3D_GetTexEnv(0);
+        C3D_TexEnvInit(env0);
 
-    if (g.texture_2d_enabled && g.bound_texture > 0) {
-        /* Color: texture * vertex_color (modulate) */
-        C3D_TexEnvSrc(env0, C3D_Both,
-                      GPU_TEXTURE0, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0);
-        C3D_TexEnvFunc(env0, C3D_Both, GPU_MODULATE);
-    } else {
-        /* Color: just vertex color */
-        C3D_TexEnvSrc(env0, C3D_Both,
-                      GPU_PRIMARY_COLOR, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
-        C3D_TexEnvFunc(env0, C3D_Both, GPU_REPLACE);
-    }
+        if (current_tex_state) {
+            C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0);
+            C3D_TexEnvFunc(env0, C3D_Both, GPU_MODULATE);
+        } else {
+            C3D_TexEnvSrc(env0, C3D_Both, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+            C3D_TexEnvFunc(env0, C3D_Both, GPU_REPLACE);
+        }
 
-    /* Disable remaining TEV stages */
-    for (int i = 1; i < 6; i++) {
-        C3D_TexEnv *env = C3D_GetTexEnv(i);
-        C3D_TexEnvInit(env);
-        C3D_TexEnvSrc(env, C3D_Both, GPU_PREVIOUS, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
-        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+        // Disable remaining TEV stages
+        for (int i = 1; i < 6; i++) {
+            C3D_TexEnv *env = C3D_GetTexEnv(i);
+            C3D_TexEnvInit(env);
+            C3D_TexEnvSrc(env, C3D_Both, GPU_PREVIOUS, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+            C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+        }
+
+        g.last_tex_state = current_tex_state;
+        g.tev_dirty = 0;
     }
 
     /* Bind current texture */
@@ -695,11 +720,11 @@ void glClear(GLbitfield mask) {
 
     if (mask & GL_COLOR_BUFFER_BIT) {
         bits |= C3D_CLEAR_COLOR;
-        /* ИСПРАВЛЕНО: Правильный порядок RGBA8 для Citro3D */
-        color = ((u32)(g.clear_r * 255.0f) << 24) |
-                ((u32)(g.clear_g * 255.0f) << 16) |
-                ((u32)(g.clear_b * 255.0f) << 8)  |
-                ((u32)(g.clear_a * 255.0f) << 0);
+        /* ПРАВИЛЬНЫЙ ПОРЯДОК ДЛЯ PICA200: A, B, G, R */
+        color = ((u32)(g.clear_a * 255.0f) << 24) |
+                ((u32)(g.clear_b * 255.0f) << 16) |
+                ((u32)(g.clear_g * 255.0f) << 8)  |
+                ((u32)(g.clear_r * 255.0f) << 0);
     }
     if (mask & GL_DEPTH_BUFFER_BIT) {
         bits |= C3D_CLEAR_DEPTH;
@@ -738,7 +763,10 @@ void glEnable(GLenum cap) {
         case GL_BLEND:         g.blend_enabled = 1; break;
         case GL_ALPHA_TEST:    g.alpha_test_enabled = 1; break;
         case GL_CULL_FACE:     g.cull_face_enabled = 1; break;
-        case GL_TEXTURE_2D:    g.texture_2d_enabled = 1; break;
+        case GL_TEXTURE_2D:
+            g.tev_dirty = 1;
+            g.texture_2d_enabled = 1;
+            break;
         case GL_SCISSOR_TEST:  g.scissor_test_enabled = 1; break;
         case GL_FOG:           g.fog_enabled = 1; g.fog_dirty = 1; break;
         case GL_POLYGON_OFFSET_FILL: break;
@@ -756,7 +784,10 @@ void glDisable(GLenum cap) {
         case GL_BLEND:         g.blend_enabled = 0; break;
         case GL_ALPHA_TEST:    g.alpha_test_enabled = 0; break;
         case GL_CULL_FACE:     g.cull_face_enabled = 0; break;
-        case GL_TEXTURE_2D:    g.texture_2d_enabled = 0; break;
+        case GL_TEXTURE_2D:
+            g.tev_dirty = 0;
+            g.texture_2d_enabled = 0;
+            break;
         case GL_SCISSOR_TEST:  g.scissor_test_enabled = 0; break;
         case GL_FOG:           g.fog_enabled = 0; break;
         case GL_POLYGON_OFFSET_FILL: break;
@@ -781,7 +812,8 @@ void glShadeModel(GLenum mode) { (void)mode; }
 void glPolygonOffset(GLfloat factor, GLfloat units) {
     g.polygon_offset_factor = factor;
     g.polygon_offset_units = units;
-    C3D_DepthMap(true, -1.0f + units * 0.0001f, 0.0f);
+    // Оставляем scale=0.5f для маппинга GL->PICA, меняем только offset
+    C3D_DepthMap(true, 0.5f, 0.5f + (units * 0.0001f));
 }
 void glLineWidth(GLfloat width) { (void)width; }
 void glPolygonMode(GLenum face, GLenum mode) { (void)face; (void)mode; }
@@ -815,15 +847,13 @@ void glColor3f(GLfloat r, GLfloat g_, GLfloat b) {
 
 void glFogf(GLenum pname, GLfloat param) {
     switch (pname) {
-        case GL_FOG_MODE:    g.fog_mode = (GLenum)param; break;
-        case GL_FOG_START:   g.fog_start = param; break;
-        case GL_FOG_END:     g.fog_end = param; break;
-        case GL_FOG_DENSITY: g.fog_density = param; break;
+        case GL_FOG_MODE:    if (g.fog_mode != param) { g.fog_mode = param; g.fog_dirty = 1; } break;
+        case GL_FOG_START:   if (g.fog_start != param) { g.fog_start = param; g.fog_dirty = 1; } break;
+        case GL_FOG_END:     if (g.fog_end != param) { g.fog_end = param; g.fog_dirty = 1; } break;
+        case GL_FOG_DENSITY: if (g.fog_density != param) { g.fog_density = param; g.fog_dirty = 1; } break;
         default: break;
     }
-    g.fog_dirty = 1;
 }
-
 void glFogfv(GLenum pname, const GLfloat *params) {
     if (pname == GL_FOG_COLOR && params) {
         g.fog_color[0] = params[0]; g.fog_color[1] = params[1];
@@ -974,10 +1004,15 @@ void glLoadMatrixf(const GLfloat *m) {
     g.matrices_dirty = 1;
 }
 
-void glOrthof(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top,
-              GLfloat near_val, GLfloat far_val) {
+void glOrthof(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloat near_val, GLfloat far_val) {
     C3D_Mtx ortho;
-    Mtx_OrthoTilt(&ortho, left, right, bottom, top, near_val, far_val, false);
+    Mtx_Identity(&ortho);
+    ortho.r[0].x = 2.0f / (right - left);
+    ortho.r[0].w = -(right + left) / (right - left);
+    ortho.r[1].y = 2.0f / (top - bottom);
+    ortho.r[1].w = -(top + bottom) / (top - bottom);
+    ortho.r[2].z = -2.0f / (far_val - near_val);
+    ortho.r[2].w = -(far_val + near_val) / (far_val - near_val);
 
     C3D_Mtx result;
     Mtx_Multiply(&result, cur_mtx(), &ortho);
@@ -1034,7 +1069,7 @@ const GLubyte* glGetString(GLenum name) {
         case GL_VENDOR:     return (const GLubyte*)"gl2citro3d";
         case GL_RENDERER:   return (const GLubyte*)"PICA200 (3DS)";
         case GL_VERSION:    return (const GLubyte*)"OpenGL ES-CM 1.1 gl2citro3d";
-        case GL_EXTENSIONS: return (const GLubyte*)"";
+        case GL_EXTENSIONS: return (const GLubyte*)"GL_OES_vertex_buffer_object GL_OES_matrix_palette";
         default:            return (const GLubyte*)"";
     }
 }
@@ -1331,30 +1366,27 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
 /* ========================================================================= */
 
 void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
-    g.va_vertex.size = size;
-    g.va_vertex.type = type;
-    g.va_vertex.stride = stride;
-    g.va_vertex.pointer = pointer;
+    g.va_vertex.size = size; g.va_vertex.type = type;
+    g.va_vertex.stride = stride; g.va_vertex.pointer = pointer;
+    g.va_vertex.vbo_id = g.bound_vbo; /* Сохраняем VBO! */
 }
 
 void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
-    g.va_texcoord.size = size;
-    g.va_texcoord.type = type;
-    g.va_texcoord.stride = stride;
-    g.va_texcoord.pointer = pointer;
+    g.va_texcoord.size = size; g.va_texcoord.type = type;
+    g.va_texcoord.stride = stride; g.va_texcoord.pointer = pointer;
+    g.va_texcoord.vbo_id = g.bound_vbo;
 }
 
 void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
-    g.va_color.size = size;
-    g.va_color.type = type;
-    g.va_color.stride = stride;
-    g.va_color.pointer = pointer;
+    g.va_color.size = size; g.va_color.type = type;
+    g.va_color.stride = stride; g.va_color.pointer = pointer;
+    g.va_color.vbo_id = g.bound_vbo;
 }
 
 void glNormalPointer(GLenum type, GLsizei stride, const GLvoid *pointer) {
-    g.va_normal.type = type;
-    g.va_normal.stride = stride;
+    g.va_normal.type = type; g.va_normal.stride = stride;
     g.va_normal.pointer = pointer;
+    g.va_normal.vbo_id = g.bound_vbo;
 }
 
 void glEnableClientState(GLenum cap) {
@@ -1388,65 +1420,109 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     C3D_BufInfo *bufInfo = C3D_GetBufInfo();
     BufInfo_Init(bufInfo);
 
-    int use_vbo = (g.bound_vbo > 0 && g.bound_vbo < GL2C3D_MAX_VBOS && g.vbos[g.bound_vbo].allocated);
+    int vbo_id = g.va_vertex.vbo_id;
+    int use_vbo = (g.va_vertex.enabled && vbo_id > 0 && vbo_id < GL2C3D_MAX_VBOS && g.vbos[vbo_id].allocated);
+
     void *temp_client_buf = NULL;
     uint8_t *vbo_base = NULL;
-
-    /* В Minecraft PE вершины всегда лежат в 24-байтном формате:
-     * [Позиция: 12 байт] + [Текстура: 8 байт] + [Цвет: 4 байта] = 24 байта.
-     * Чтобы 3DS не "рвала" геометрию (как в Экзампле 04), мы обязаны кормить её
-     * единым буфером с пермутацией 0x210 (читай все 3 атрибута сразу). */
 
     if (use_vbo) {
         vbo_base = (uint8_t*)g.vbos[g.bound_vbo].data;
         vbo_base += (uintptr_t)g.va_vertex.pointer;
 
-        /* БЫЛО: BufInfo_Add(bufInfo, vbo_base + first * 24, 24, 3, 0x210); */
-        /* СТАЛО: (36 байт вместо 24) */
         BufInfo_Add(bufInfo, vbo_base + first * 24, 24, 3, 0x210);
     } else {
-        /* ========================================== */
-        /* ПУТЬ 2: Клиентские массивы (Экзампл 02)    */
-        /* ========================================== */
-        temp_client_buf = linearAlloc(count * 24);
-        if (!temp_client_buf) return;
+        int req_size = count * 24;
 
-        uint8_t *dst = (uint8_t*)temp_client_buf;
+        if (req_size > g.client_array_buf_size) {
+            if (g.client_array_buf) linearFree(g.client_array_buf);
+            g.client_array_buf_size = req_size + 10240;
+            g.client_array_buf = linearAlloc(g.client_array_buf_size);
+        }
+
+        if (!g.client_array_buf) return;
+
+        uint8_t *dst = (uint8_t*)g.client_array_buf;
 
         int p_str = g.va_vertex.stride ? g.va_vertex.stride : 12;
         int t_str = g.va_texcoord.stride ? g.va_texcoord.stride : 8;
         int c_str = g.va_color.stride ? g.va_color.stride : 4;
 
-        /* Упаковываем разбросанные массивы в идеальный 24-байтный Minecraft-формат */
         for (int i = 0; i < count; i++) {
-            /* 1. Позиция */
-            if (g.va_vertex.enabled && g.va_vertex.pointer) {
-                memcpy(dst, (uint8_t*)g.va_vertex.pointer + (first + i) * p_str, 12);
-            } else memset(dst, 0, 12);
+            /* --- 1. Позиция --- */
+            if (g.va_vertex.enabled) {
+                const uint8_t *src_ptr = NULL;
+                if (g.va_vertex.vbo_id > 0 && g.vbos[g.va_vertex.vbo_id].allocated) {
+                    src_ptr = (const uint8_t*)g.vbos[g.va_vertex.vbo_id].data + (uintptr_t)g.va_vertex.pointer;
+                } else {
+                    src_ptr = (const uint8_t*)g.va_vertex.pointer;
+                }
 
-            /* 2. Текстурные координаты (UV) */
-            if (g.va_texcoord.enabled && g.va_texcoord.pointer) {
-                memcpy(dst + 12, (uint8_t*)g.va_texcoord.pointer + (first + i) * t_str, 8);
-            } else memset(dst + 12, 0, 8);
-
-            /* 3. Цвет */
-            if (g.va_color.enabled && g.va_color.pointer) {
-                memcpy(dst + 20, (uint8_t*)g.va_color.pointer + (first + i) * c_str, 4);
+                if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
+                    // СКОЛЬКО БАЙТ РЕАЛЬНО ЗАПРОСИЛИ (2 или 3 координаты?)
+                    int bytes_to_copy = g.va_vertex.size * sizeof(float);
+                    memcpy(dst, src_ptr + (first + i) * p_str, bytes_to_copy);
+                    // Если это 2D (X, Y), зануляем Z, чтобы полигоны не прыгали
+                    if (bytes_to_copy == 8) {
+                        float zero = 0.0f;
+                        memcpy(dst + 8, &zero, 4);
+                    }
+                } else {
+                    memset(dst, 0, 12);
+                }
             } else {
-                /* Если цвета нет, заливаем текущим glColor4f */
+                memset(dst, 0, 12);
+            }
+
+            /* --- 2. Текстурные координаты (UV) --- */
+            if (g.va_texcoord.enabled) {
+                const uint8_t *src_ptr = NULL;
+                if (g.va_texcoord.vbo_id > 0 && g.vbos[g.va_texcoord.vbo_id].allocated) {
+                    src_ptr = (const uint8_t*)g.vbos[g.va_texcoord.vbo_id].data + (uintptr_t)g.va_texcoord.pointer;
+                } else {
+                    src_ptr = (const uint8_t*)g.va_texcoord.pointer;
+                }
+
+                if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
+                    memcpy(dst + 12, src_ptr + (first + i) * t_str, 8);
+                } else {
+                    memset(dst + 12, 0, 8);
+                }
+            } else {
+                memset(dst + 12, 0, 8);
+            }
+
+            /* --- 3. Цвет --- */
+            if (g.va_color.enabled) {
+                const uint8_t *src_ptr = NULL;
+                if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
+                    if (g.va_color.size == 3) {
+                        memcpy(dst + 20, src_ptr + (first + i) * c_str, 3);
+                        dst[23] = 255;
+                    } else {
+                        memcpy(dst + 20, src_ptr + (first + i) * c_str, 4);
+                    }
+                } else {
+                    dst[20] = dst[21] = dst[22] = dst[23] = 255;
+                }
+
+                if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
+                    memcpy(dst + 20, src_ptr + (first + i) * c_str, 4);
+                } else {
+                    dst[20] = dst[21] = dst[22] = dst[23] = 255;
+                }
+            } else {
                 dst[20] = (uint8_t)(g.cur_color[0] * 255.0f);
                 dst[21] = (uint8_t)(g.cur_color[1] * 255.0f);
                 dst[22] = (uint8_t)(g.cur_color[2] * 255.0f);
                 dst[23] = (uint8_t)(g.cur_color[3] * 255.0f);
             }
+
             dst += 24;
         }
 
-        /* Обязательно сбрасываем кэш, чтобы GPU увидел данные из CPU */
-        GSPGPU_FlushDataCache(temp_client_buf, count * 24);
-
-        /* Отправляем свежеупакованный буфер в GPU */
-        BufInfo_Add(bufInfo, temp_client_buf, 24, 3, 0x210);
+        GSPGPU_FlushDataCache(g.client_array_buf, req_size);
+        BufInfo_Add(bufInfo, g.client_array_buf, 24, 3, 0x210);
     }
 
     /* Рисуем */
@@ -1637,44 +1713,24 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
     if (pixels) memset(pixels, 0, width * height * 4);
 }
 
-void glFrustumf(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top,
-                GLfloat near_val, GLfloat far_val) {
+
+
+void glFrustumf(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloat near_val, GLfloat far_val) {
     C3D_Mtx frustum;
     memset(&frustum, 0, sizeof(C3D_Mtx));
-
     float n = near_val;
     float f = far_val;
 
-    /* 1. X и Y проекция (стандарт OpenGL) */
     frustum.r[0].x = (2.0f * n) / (right - left);
     frustum.r[0].z = (right + left) / (right - left);
-
     frustum.r[1].y = (2.0f * n) / (top - bottom);
     frustum.r[1].z = (top + bottom) / (top - bottom);
-
-    /* 2. ИСПРАВЛЕННЫЙ Z-MAPPING:
-     * Формула выведена специально под ваш C3D_DepthMap(true, -1.0f, 0.0f).
-     * Ближняя плоскость (n) дает Z = 0.
-     * Дальняя плоскость (f) дает Z = -1. */
-    frustum.r[2].z = f / (f - n);
-    frustum.r[2].w = (n * f) / (f - n);
-
-    /* 3. Перспективное деление (W = -Z_eye) */
+    frustum.r[2].z = -(f + n) / (f - n);
+    frustum.r[2].w = -(2.0f * f * n) / (f - n);
     frustum.r[3].z = -1.0f;
 
-    /* 4. Поворот экрана (Tilt) для портретной ориентации экрана 3DS */
-    C3D_Mtx tilt;
-    Mtx_Identity(&tilt);
-    tilt.r[0].x =  0.0f; tilt.r[0].y = 1.0f;
-    tilt.r[1].x = -1.0f; tilt.r[1].y = 0.0f;
-
-    /* Умножаем Tilt на нашу Frustum-матрицу */
-    C3D_Mtx tilted_frustum;
-    Mtx_Multiply(&tilted_frustum, &tilt, &frustum);
-
-    /* Применяем к текущей матрице OpenGL */
     C3D_Mtx result;
-    Mtx_Multiply(&result, cur_mtx(), &tilted_frustum);
+    Mtx_Multiply(&result, cur_mtx(), &frustum);
     Mtx_Copy(cur_mtx(), &result);
     g.matrices_dirty = 1;
 }

@@ -9,10 +9,9 @@ file(MAKE_DIRECTORY "${GENERATED_DIR}")
 # Compile .pica -> .shbin -> embedded .s + .h
 ctr_add_shader_library(NovaGL_shader "${SHADER_SRC}")
 
-# Создаем таргет "shaders", в котором лежит скомпилированный бинарник
 dkp_add_embedded_binary_library(shaders NovaGL_shader)
 
-# Library sources (УБРАЛИ ОТСЮДА SHADER_OBJ)
+# Library sources
 add_library(NovaGL STATIC
         NovaGL.c
 )
@@ -24,11 +23,10 @@ target_include_directories(NovaGL
         "${GENERATED_DIR}"
 )
 
-# ЛИНКУЕМ ШЕЙДЕР СЮДА!
 target_link_libraries(NovaGL
         PUBLIC
         citro3d
         ctru
         m
-        shaders   # <--- Вот она, магия
+        shaders
 )
