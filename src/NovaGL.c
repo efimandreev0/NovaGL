@@ -1,12 +1,8 @@
 /*
- * gl2citro3d.c - OpenGL ES 1.1 -> Citro3D Translation Layer Implementation
- *
- * Full implementation mapping GL ES 1.1 fixed-function calls to Citro3D/PICA200.
- * Designed for Minecraft PE on Nintendo 3DS.
+ * NovaGL.c - OpenGL ES 1.1 -> Citro3D Translation Layer Implementation
  */
 
 #include "NovaGL.h"
-
 #include <3ds.h>
 #include <citro3d.h>
 #include <string.h>
@@ -17,9 +13,8 @@
 /* ========================================================================= */
 /* Configuration                                                             */
 /* ========================================================================= */
-
-#define GL2C3D_MAX_TEXTURES     512
-#define GL2C3D_MAX_VBOS         256
+#define GL2C3D_MAX_TEXTURES     2048
+#define GL2C3D_MAX_VBOS         16384
 #define GL2C3D_MATRIX_STACK     32
 #define GL2C3D_DISPLAY_LISTS    512
 #define GL2C3D_DL_MAX_OPS       64
@@ -27,7 +22,6 @@
 #define GL2C3D_SCREEN_W         400
 #define GL2C3D_SCREEN_H         240
 
-/* Next power of 2 >= x (for texture dimensions) */
 static inline unsigned int next_pow2(unsigned int v) {
     v--;
     v |= v >> 1; v |= v >> 2; v |= v >> 4;
@@ -39,36 +33,23 @@ static inline float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
 
-/* ========================================================================= */
-/* Texture slot                                                              */
-/* ========================================================================= */
-
 typedef struct {
     C3D_Tex     tex;
     int         allocated;
-    int         width, height;       /* original requested size */
-    int         pot_w, pot_h;        /* power-of-two padded size */
+    int         width, height;
+    int         pot_w, pot_h;
     GPU_TEXCOLOR fmt;
-    /* cached params */
     int         min_filter;
     int         mag_filter;
     int         wrap_s;
     int         wrap_t;
 } TexSlot;
 
-/* ========================================================================= */
-/* VBO slot                                                                  */
-/* ========================================================================= */
-
 typedef struct {
     void   *data;
     int     size;
     int     allocated;
 } VBOSlot;
-
-/* ========================================================================= */
-/* Display list entry (for Font rendering compatibility)                     */
-/* ========================================================================= */
 
 typedef enum {
     DL_OP_TRANSLATE,
@@ -87,12 +68,7 @@ typedef struct {
     int  used;
 } DisplayList;
 
-/* ========================================================================= */
-/* Global state                                                              */
-/* ========================================================================= */
-
 static struct {
-    /* Citro3D objects */
     C3D_RenderTarget *render_target_top;
     C3D_RenderTarget *render_target_bot;
     C3D_RenderTarget *current_target;
@@ -103,8 +79,7 @@ static struct {
     int               uLoc_fogparams;
     C3D_AttrInfo      attr_info;
 
-    /* Matrix stacks */
-    int        matrix_mode;  /* GL_MODELVIEW or GL_PROJECTION */
+    int        matrix_mode;
     C3D_Mtx    proj_stack[GL2C3D_MATRIX_STACK];
     int        proj_sp;
     C3D_Mtx    mv_stack[GL2C3D_MATRIX_STACK];
@@ -113,22 +88,18 @@ static struct {
     int        tex_sp;
     int        matrices_dirty;
 
-    /* Current color */
     float      cur_color[4];
 
-    /* Textures */
     TexSlot    textures[GL2C3D_MAX_TEXTURES];
     GLuint     bound_texture;
     int        tex_next_id;
     int        texture_2d_enabled;
 
-    /* VBOs */
     VBOSlot    vbos[GL2C3D_MAX_VBOS];
     GLuint     bound_array_buffer;
     GLuint     bound_element_array_buffer;
     int        vbo_next_id;
 
-    /* Vertex array state */
     struct {
         int     enabled;
         GLint   size;
@@ -138,18 +109,14 @@ static struct {
         GLuint  vbo_id;
     } va_vertex, va_texcoord, va_color, va_normal;
 
-    /* GL state flags */
     int        depth_test_enabled;
     GLenum     depth_func;
     GLboolean  depth_mask;
-
     int        blend_enabled;
     GLenum     blend_src, blend_dst;
-
     int        alpha_test_enabled;
     GLenum     alpha_func;
     float      alpha_ref;
-
     int        cull_face_enabled;
     GLenum     cull_face_mode;
     GLenum     front_face;
@@ -167,34 +134,24 @@ static struct {
 
     float      clear_r, clear_g, clear_b, clear_a;
     float      clear_depth;
-
     GLboolean  color_mask_r, color_mask_g, color_mask_b, color_mask_a;
-
     float      polygon_offset_factor, polygon_offset_units;
 
-    /* Viewport */
     GLint      vp_x, vp_y;
     GLsizei    vp_w, vp_h;
 
-    /* Display lists */
     DisplayList dl_store[GL2C3D_DISPLAY_LISTS];
-    int         dl_recording;    /* currently recording list id, or -1 */
+    int         dl_recording;
     GLuint      dl_next_base;
 
-    /* Error */
     GLenum     last_error;
-
     int        initialized;
-
-    void *client_array_buf;
-    int client_array_buf_size;
-
-    int tev_dirty;
-    int last_tex_state;
+    void      *client_array_buf;
+    int        client_array_buf_size;
+    int        tev_dirty;
+    int        last_tex_state;
 } g;
 
-
-/* Shader binary - linked at compile time via bin2s from picasso output */
 #include "../.dkp-generated/shaders/NovaGL_shader_shbin.h"
 
 #define DISPLAY_TRANSFER_FLAGS \
@@ -204,13 +161,8 @@ static struct {
      GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
      GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
-/* Forward declarations for display list recording */
 static void dl_record_translate(float x, float y, float z);
 static void dl_record_color3f(float r, float g_, float b);
-
-/* ========================================================================= */
-/* Helper: GPU enum conversions                                              */
-/* ========================================================================= */
 
 static GPU_TESTFUNC gl_to_gpu_testfunc(GLenum func) {
     switch (func) {
@@ -283,10 +235,6 @@ static int gpu_texfmt_bpp(GPU_TEXCOLOR fmt) {
     }
 }
 
-/* ========================================================================= */
-/* Helper: Current matrix pointer                                            */
-/* ========================================================================= */
-
 static C3D_Mtx* cur_mtx(void) {
     switch (g.matrix_mode) {
         case GL_PROJECTION: return &g.proj_stack[g.proj_sp];
@@ -311,49 +259,23 @@ static C3D_Mtx* cur_stack(void) {
     }
 }
 
-/* ========================================================================= */
-/* Helper: Texture tile swizzling (Morton / Z-order)                         */
-/* The PICA200 GPU uses morton-swizzled texture layout.                       */
-/* ========================================================================= */
-
 static inline uint32_t morton_interleave(uint32_t x, uint32_t y) {
     static const uint32_t xlut[8] = {0x00,0x01,0x04,0x05,0x10,0x11,0x14,0x15};
     static const uint32_t ylut[8] = {0x00,0x02,0x08,0x0a,0x20,0x22,0x28,0x2a};
     return xlut[x & 7] | ylut[y & 7];
 }
 
-static uint32_t get_morton_offset(uint32_t x, uint32_t y, uint32_t bpp) {
-    /* 8x8 tile blocks, morton-ordered within each tile */
-    uint32_t tile_x = x >> 3;
-    uint32_t tile_y = y >> 3;
-    uint32_t lx = x & 7;
-    uint32_t ly = y & 7;
-    uint32_t coarse = (tile_y * ((next_pow2(x + tile_x * 8) + 7) / 8) + tile_x) * 64;
-    /* simplified: assume pot_w is the stride */
-    return 0; /* will be replaced by proper swizzle below */
-}
-
-/* Swizzle RGBA8 image data into PICA200 morton layout (tile-based).
- * src: linear RGBA8, dst: morton-ordered for C3D_TexUpload
- * width/height must be power-of-2.
- */
-static void swizzle_rgba8(uint32_t *dst, const uint32_t *src,
-                          int src_w, int src_h, int pot_w, int pot_h) {
+static void swizzle_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src_h, int pot_w, int pot_h) {
     for (int y = 0; y < src_h; y++) {
         for (int x = 0; x < src_w; x++) {
-            /* Convert pixel to ABGR for PICA200 */
             uint32_t pixel = src[y * src_w + x];
             uint8_t r = (pixel >>  0) & 0xFF;
             uint8_t g_c = (pixel >>  8) & 0xFF;
             uint8_t b = (pixel >> 16) & 0xFF;
             uint8_t a = (pixel >> 24) & 0xFF;
-            uint32_t out_pixel = ((uint32_t)r << 24) |
-                                 ((uint32_t)g_c << 16) |
-                                 ((uint32_t)b << 8) |
-                                 (uint32_t)a;
+            uint32_t out_pixel = ((uint32_t)r << 24) | ((uint32_t)g_c << 16) | ((uint32_t)b << 8) | (uint32_t)a;
 
-            /* Morton offset within the pot texture */
-            int flipped_y = pot_h - 1 - y; /* GPU expects bottom-up */
+            int flipped_y = pot_h - 1 - y;
             int tile_x = x >> 3;
             int tile_y = flipped_y >> 3;
             int lx = x & 7;
@@ -364,7 +286,6 @@ static void swizzle_rgba8(uint32_t *dst, const uint32_t *src,
             dst[pixel_offset] = out_pixel;
         }
     }
-    /* Clear padding area */
     for (int y = src_h; y < pot_h; y++) {
         for (int x = 0; x < pot_w; x++) {
             int flipped_y = pot_h - 1 - y;
@@ -380,7 +301,6 @@ static void swizzle_rgba8(uint32_t *dst, const uint32_t *src,
     }
 }
 
-/* Convert RGB (3 bytes/pixel) to RGBA (4 bytes/pixel) */
 static uint32_t* rgb_to_rgba(const uint8_t *rgb, int w, int h) {
     uint32_t *out = (uint32_t*)linearAlloc(w * h * 4);
     if (!out) return NULL;
@@ -390,32 +310,24 @@ static uint32_t* rgb_to_rgba(const uint8_t *rgb, int w, int h) {
     return out;
 }
 
-
-/* ========================================================================= */
-/* Initialization / Shutdown                                                 */
-/* ========================================================================= */
 extern const unsigned char NovaGL_shader_shbin[];
 static const void* _force_shader_ref = NovaGL_shader_shbin;
-void gl2c3d_init(void) {
+
+void nova_init(void) {
     memset(&g, 0, sizeof(g));
 
     C3D_Init(GL2C3D_CMD_BUF_SIZE);
 
-    /* Create render targets */
     g.render_target_top = C3D_RenderTargetCreate(GL2C3D_SCREEN_H, GL2C3D_SCREEN_W,
                                                   GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
-    C3D_RenderTargetSetOutput(g.render_target_top, GFX_TOP, GFX_LEFT,
-        DISPLAY_TRANSFER_FLAGS);
+    C3D_RenderTargetSetOutput(g.render_target_top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
     g.current_target = g.render_target_top;
 
     g.render_target_bot = C3D_RenderTargetCreate(240, 320,
                                                   GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
-    C3D_RenderTargetSetOutput(g.render_target_bot, GFX_BOTTOM, GFX_LEFT,
-        DISPLAY_TRANSFER_FLAGS);
+    C3D_RenderTargetSetOutput(g.render_target_bot, GFX_BOTTOM, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
 
-    /* Load embedded shader binary (compiled from NovaGL_shader.pica by picasso) */
-    g.shader_dvlb = DVLB_ParseFile((u32*)NovaGL_shader_shbin,
-                                    NovaGL_shader_shbin_size);
+    g.shader_dvlb = DVLB_ParseFile((u32*)NovaGL_shader_shbin, NovaGL_shader_shbin_size);
 
     if (g.shader_dvlb) {
         shaderProgramInit(&g.shader_program);
@@ -427,18 +339,10 @@ void gl2c3d_init(void) {
         g.uLoc_fogparams  = shaderInstanceGetUniformLocation(g.shader_program.vertexShader, "fogparams");
     }
 
-    /* Configure vertex attributes:
-     * attr 0: position (3 floats)
-     * attr 1: texcoord (2 floats)
-     * attr 2: color    (4 unsigned bytes)
-     *
-     * This matches MCPE's VertexDeclPTC: {float x,y,z; float u,v; uint32 color;}
-     * stride = 24 bytes
-     */
     AttrInfo_Init(&g.attr_info);
-    AttrInfo_AddLoader(&g.attr_info, 0, GPU_FLOAT, 3);  /* position */
-    AttrInfo_AddLoader(&g.attr_info, 1, GPU_FLOAT, 2);  /* texcoord */
-    AttrInfo_AddLoader(&g.attr_info, 2, GPU_UNSIGNED_BYTE, 4); /* color */
+    AttrInfo_AddLoader(&g.attr_info, 0, GPU_FLOAT, 3);
+    AttrInfo_AddLoader(&g.attr_info, 1, GPU_FLOAT, 2);
+    AttrInfo_AddLoader(&g.attr_info, 2, GPU_UNSIGNED_BYTE, 4);
     C3D_SetAttrInfo(&g.attr_info);
 
     C3D_DepthMap(true, 0.5f, 0.5f);
@@ -446,7 +350,6 @@ void gl2c3d_init(void) {
     g.client_array_buf_size = 2 * 1024 * 1024;
     g.client_array_buf = linearAlloc(g.client_array_buf_size);
 
-    /* Default state */
     g.matrix_mode = GL_MODELVIEW;
     Mtx_Identity(&g.proj_stack[0]);
     Mtx_Identity(&g.mv_stack[0]);
@@ -456,35 +359,26 @@ void gl2c3d_init(void) {
     g.tex_sp = 0;
     g.matrices_dirty = 1;
 
-    g.cur_color[0] = 1.0f;
-    g.cur_color[1] = 1.0f;
-    g.cur_color[2] = 1.0f;
-    g.cur_color[3] = 1.0f;
+    g.cur_color[0] = 1.0f; g.cur_color[1] = 1.0f;
+    g.cur_color[2] = 1.0f; g.cur_color[3] = 1.0f;
 
     g.depth_test_enabled = 1;
     g.depth_func = GL_LEQUAL;
     g.depth_mask = GL_TRUE;
     g.clear_depth = 1.0f;
-
     g.blend_src = GL_ONE;
     g.blend_dst = GL_ZERO;
-
     g.alpha_func = GL_ALWAYS;
     g.alpha_ref = 0.0f;
-
     g.cull_face_mode = GL_BACK;
     g.front_face = GL_CCW;
 
     g.fog_mode = GL_LINEAR;
-    g.fog_start = 0.0f;
-    g.fog_end = 1.0f;
-    g.fog_density = 1.0f;
-    g.fog_color[0] = g.fog_color[1] = g.fog_color[2] = 0.0f;
-    g.fog_color[3] = 1.0f;
+    g.fog_start = 0.0f; g.fog_end = 1.0f; g.fog_density = 1.0f;
+    g.fog_color[0] = g.fog_color[1] = g.fog_color[2] = 0.0f; g.fog_color[3] = 1.0f;
 
     g.vp_x = 0; g.vp_y = 0;
-    g.vp_w = GL2C3D_SCREEN_W;
-    g.vp_h = GL2C3D_SCREEN_H;
+    g.vp_w = GL2C3D_SCREEN_W; g.vp_h = GL2C3D_SCREEN_H;
 
     g.color_mask_r = g.color_mask_g = g.color_mask_b = g.color_mask_a = GL_TRUE;
 
@@ -494,64 +388,36 @@ void gl2c3d_init(void) {
     g.dl_next_base = 1;
     g.texture_2d_enabled = 1;
     g.tev_dirty = 1;
-
     g.initialized = 1;
 }
 
-void gl2c3d_fini(void) {
+void nova_fini(void) {
     if (!g.initialized) return;
     if (g.client_array_buf) linearFree(g.client_array_buf);
-    /* Free textures */
     for (int i = 0; i < GL2C3D_MAX_TEXTURES; i++) {
-        if (g.textures[i].allocated) {
-            C3D_TexDelete(&g.textures[i].tex);
-        }
+        if (g.textures[i].allocated) C3D_TexDelete(&g.textures[i].tex);
     }
-
-    /* Free VBOs */
     for (int i = 0; i < GL2C3D_MAX_VBOS; i++) {
-        if (g.vbos[i].allocated && g.vbos[i].data) {
-            linearFree(g.vbos[i].data);
-        }
+        if (g.vbos[i].allocated && g.vbos[i].data) linearFree(g.vbos[i].data);
     }
-
     if (g.shader_dvlb) {
         shaderProgramFree(&g.shader_program);
         DVLB_Free(g.shader_dvlb);
     }
-
     C3D_RenderTargetDelete(g.render_target_top);
     C3D_RenderTargetDelete(g.render_target_bot);
     C3D_Fini();
-
     g.initialized = 0;
 }
 
-/* ========================================================================= */
-/* Frame management                                                          */
-/* ========================================================================= */
-
-void gl2c3d_frame_begin(void) {
-    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
-}
-
-void gl2c3d_frame_end(void) {
-    C3D_FrameEnd(0);
-}
-
-void gl2c3d_set_render_target(int is_right_eye) {
+void nova_frame_begin(void) { C3D_FrameBegin(C3D_FRAME_SYNCDRAW); }
+void nova_frame_end(void) { C3D_FrameEnd(0); }
+void nova_set_render_target(int is_right_eye) {
     C3D_FrameDrawOn(is_right_eye ? g.render_target_bot : g.render_target_top);
     g.current_target = is_right_eye ? g.render_target_bot : g.render_target_top;
 }
 
-
-/* ========================================================================= */
-/* Apply GPU state before draw calls                                         */
-/* ========================================================================= */
-
 static void apply_gpu_state(void) {
-    /* Upload matrices */
-    /* Upload matrices */
     if (g.matrices_dirty) {
         if (g.uLoc_projection >= 0) {
             C3D_Mtx tilt;
@@ -561,7 +427,6 @@ static void apply_gpu_state(void) {
 
             C3D_Mtx final_proj;
             Mtx_Multiply(&final_proj, &tilt, &g.proj_stack[g.proj_sp]);
-
             C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection, &final_proj);
         }
         if (g.uLoc_modelview >= 0)
@@ -569,79 +434,45 @@ static void apply_gpu_state(void) {
         g.matrices_dirty = 0;
     }
 
-    /* Upload fog params */
     if (g.uLoc_fogparams >= 0) {
         float range = g.fog_end - g.fog_start;
         if (range == 0.0f) range = 1.0f;
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams,
-                      g.fog_start, g.fog_end, 1.0f / range,
-                      g.fog_enabled ? 1.0f : 0.0f);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams, g.fog_start, g.fog_end, 1.0f / range, g.fog_enabled ? 1.0f : 0.0f);
     }
 
-    /* Depth test */
     GPU_WRITEMASK writemask = GPU_WRITE_COLOR;
     if (g.depth_mask) writemask |= GPU_WRITE_DEPTH;
-    C3D_DepthTest(g.depth_test_enabled,
-                  gl_to_gpu_testfunc(g.depth_func),
-                  writemask);
+    C3D_DepthTest(g.depth_test_enabled, gl_to_gpu_testfunc(g.depth_func), writemask);
 
-    /* Alpha test */
-    C3D_AlphaTest(g.alpha_test_enabled,
-                  gl_to_gpu_testfunc(g.alpha_func),
-                  (u8)(g.alpha_ref * 255.0f));
+    C3D_AlphaTest(g.alpha_test_enabled, gl_to_gpu_testfunc(g.alpha_func), (u8)(g.alpha_ref * 255.0f));
 
-    /* Blending */
     if (g.blend_enabled) {
-        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
-                       gl_to_gpu_blendfactor(g.blend_src),
-                       gl_to_gpu_blendfactor(g.blend_dst),
-                       gl_to_gpu_blendfactor(g.blend_src),
-                       gl_to_gpu_blendfactor(g.blend_dst));
+        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, gl_to_gpu_blendfactor(g.blend_src), gl_to_gpu_blendfactor(g.blend_dst), gl_to_gpu_blendfactor(g.blend_src), gl_to_gpu_blendfactor(g.blend_dst));
     } else {
-        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
-                       GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
     }
 
-    /* Cull face */
     if (g.cull_face_enabled) {
-        /* PICA200 cull mode is inverted compared to GL because
-         * the 3DS screen is rotated 90 degrees */
         GPU_CULLMODE cull;
-        if (g.cull_face_mode == GL_FRONT)
-            cull = (g.front_face == GL_CCW) ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW;
-        else
-            cull = (g.front_face == GL_CCW) ? GPU_CULL_BACK_CCW : GPU_CULL_FRONT_CCW;
+        if (g.cull_face_mode == GL_FRONT) cull = (g.front_face == GL_CCW) ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW;
+        else cull = (g.front_face == GL_CCW) ? GPU_CULL_BACK_CCW : GPU_CULL_FRONT_CCW;
         C3D_CullFace(cull);
     } else {
         C3D_CullFace(GPU_CULL_NONE);
     }
 
-    /* Scissor test */
     if (g.scissor_test_enabled) {
-        /* GL scissor origin is bottom-left, PICA200 expects screen coords */
-        C3D_SetScissor(GPU_SCISSOR_NORMAL,
-                       g.scissor_x, g.scissor_y,
-                       g.scissor_x + g.scissor_w,
-                       g.scissor_y + g.scissor_h);
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, g.scissor_y, g.scissor_x, g.scissor_y + g.scissor_h, g.scissor_x + g.scissor_w);
     } else {
         C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
     }
 
-    /* Fog */
     if (g.fog_enabled && g.fog_dirty) {
-        u32 fc = ((u8)(g.fog_color[3]*255) << 24) |
-                 ((u8)(g.fog_color[2]*255) << 16) |
-                 ((u8)(g.fog_color[1]*255) << 8) |
-                 ((u8)(g.fog_color[0]*255));
+        u32 fc = ((u8)(g.fog_color[3]*255) << 24) | ((u8)(g.fog_color[2]*255) << 16) | ((u8)(g.fog_color[1]*255) << 8) | ((u8)(g.fog_color[0]*255));
         C3D_FogColor(fc);
-
-        if (g.fog_mode == GL_LINEAR) {
-            FogLut_Exp(&g.fog_lut, 1.0f, g.fog_start, g.fog_end, 0.01f);
-        } else if (g.fog_mode == GL_EXP) {
-            FogLut_Exp(&g.fog_lut, g.fog_density, 0.0f, g.fog_end, 1.0f);
-        } else { /* GL_EXP2 */
-            FogLut_Exp(&g.fog_lut, g.fog_density * g.fog_density, 0.0f, g.fog_end, 2.0f);
-        }
+        if (g.fog_mode == GL_LINEAR) FogLut_Exp(&g.fog_lut, 1.0f, g.fog_start, g.fog_end, 0.01f);
+        else if (g.fog_mode == GL_EXP) FogLut_Exp(&g.fog_lut, g.fog_density, 0.0f, g.fog_end, 1.0f);
+        else FogLut_Exp(&g.fog_lut, g.fog_density * g.fog_density, 0.0f, g.fog_end, 2.0f);
         C3D_FogGasMode(true, false, false);
         C3D_FogLutBind(&g.fog_lut);
         g.fog_dirty = 0;
@@ -649,20 +480,10 @@ static void apply_gpu_state(void) {
         C3D_FogGasMode(false, false, false);
     }
 
-    /* Configure TEV (texture environment) stages.
-     * This is the PICA200's fragment pipeline - replaces fragment shaders.
-     *
-     * Stage 0: Combine texture and vertex color
-     *   If texture enabled:  output = texture_color * vertex_color
-     *   If texture disabled: output = vertex_color
-     *
-     * Stage 1-5: passthrough (disabled)
-     */
     int current_tex_state = (g.texture_2d_enabled && g.bound_texture > 0);
     if (g.tev_dirty || g.last_tex_state != current_tex_state) {
         C3D_TexEnv *env0 = C3D_GetTexEnv(0);
         C3D_TexEnvInit(env0);
-
         if (current_tex_state) {
             C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0);
             C3D_TexEnvFunc(env0, C3D_Both, GPU_MODULATE);
@@ -670,96 +491,52 @@ static void apply_gpu_state(void) {
             C3D_TexEnvSrc(env0, C3D_Both, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
             C3D_TexEnvFunc(env0, C3D_Both, GPU_REPLACE);
         }
-
-        // Disable remaining TEV stages
         for (int i = 1; i < 6; i++) {
             C3D_TexEnv *env = C3D_GetTexEnv(i);
             C3D_TexEnvInit(env);
             C3D_TexEnvSrc(env, C3D_Both, GPU_PREVIOUS, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
             C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
         }
-
         g.last_tex_state = current_tex_state;
         g.tev_dirty = 0;
     }
 
-    /* Bind current texture */
-    if (g.texture_2d_enabled && g.bound_texture > 0 &&
-        g.bound_texture < GL2C3D_MAX_TEXTURES &&
-        g.textures[g.bound_texture].allocated) {
+    if (current_tex_state && g.bound_texture < GL2C3D_MAX_TEXTURES && g.textures[g.bound_texture].allocated) {
         C3D_TexBind(0, &g.textures[g.bound_texture].tex);
     }
 }
 
-
-/* ========================================================================= */
-/* Error                                                                     */
-/* ========================================================================= */
-
-GLenum glGetError(void) {
-    GLenum e = g.last_error;
-    g.last_error = GL_NO_ERROR;
-    return e;
-}
-
-/* ========================================================================= */
-/* Clear                                                                     */
-/* ========================================================================= */
+GLenum glGetError(void) { GLenum e = g.last_error; g.last_error = GL_NO_ERROR; return e; }
 
 void glClearColor(GLclampf r, GLclampf g_, GLclampf b, GLclampf a) {
-    g.clear_r = clampf(r, 0.0f, 1.0f);
-    g.clear_g = clampf(g_, 0.0f, 1.0f);
-    g.clear_b = clampf(b, 0.0f, 1.0f);
-    g.clear_a = clampf(a, 0.0f, 1.0f);
+    g.clear_r = clampf(r, 0.0f, 1.0f); g.clear_g = clampf(g_, 0.0f, 1.0f);
+    g.clear_b = clampf(b, 0.0f, 1.0f); g.clear_a = clampf(a, 0.0f, 1.0f);
 }
 
-void glClearDepthf(GLclampf depth) {
-    g.clear_depth = clampf(depth, 0.0f, 1.0f);
-}
+void glClearDepthf(GLclampf depth) { g.clear_depth = clampf(depth, 0.0f, 1.0f); }
 
 void glClear(GLbitfield mask) {
     C3D_ClearBits bits = 0;
-    u32 color = 0;
-    u32 depth = 0;
-
+    u32 color = 0; u32 depth = 0;
     if (mask & GL_COLOR_BUFFER_BIT) {
         bits |= C3D_CLEAR_COLOR;
-        /* ПРАВИЛЬНЫЙ ПОРЯДОК ДЛЯ PICA200: A, B, G, R */
-        color = ((u32)(g.clear_a * 255.0f) << 24) |
-                ((u32)(g.clear_b * 255.0f) << 16) |
-                ((u32)(g.clear_g * 255.0f) << 8)  |
-                ((u32)(g.clear_r * 255.0f) << 0);
+        color = ((u32)(g.clear_a * 255.0f) << 24) | ((u32)(g.clear_b * 255.0f) << 16) | ((u32)(g.clear_g * 255.0f) << 8) | ((u32)(g.clear_r * 255.0f) << 0);
     }
     if (mask & GL_DEPTH_BUFFER_BIT) {
         bits |= C3D_CLEAR_DEPTH;
         depth = (u32)(g.clear_depth * 0xFFFFFF);
     }
-
-    if (bits && g.current_target) {
-        C3D_RenderTargetClear(g.current_target, bits, color, depth);
-    }
+    if (bits && g.current_target) C3D_RenderTargetClear(g.current_target, bits, color, depth);
 }
 
-/* ========================================================================= */
-/* Viewport & Scissor                                                        */
-/* ========================================================================= */
-
 void glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
-    g.vp_x = x; g.vp_y = y;
-    g.vp_w = width; g.vp_h = height;
+    g.vp_x = x; g.vp_y = y; g.vp_w = width; g.vp_h = height;
     C3D_SetViewport(y, x, height, width);
 }
 
 void glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
-    g.scissor_x = x;
-    g.scissor_y = y;
-    g.scissor_w = width;
-    g.scissor_h = height;
+    g.scissor_x = x; g.scissor_y = y; g.scissor_w = width; g.scissor_h = height;
 }
-
-/* ========================================================================= */
-/* Enable / Disable                                                          */
-/* ========================================================================= */
 
 void glEnable(GLenum cap) {
     switch (cap) {
@@ -767,17 +544,9 @@ void glEnable(GLenum cap) {
         case GL_BLEND:         g.blend_enabled = 1; break;
         case GL_ALPHA_TEST:    g.alpha_test_enabled = 1; break;
         case GL_CULL_FACE:     g.cull_face_enabled = 1; break;
-        case GL_TEXTURE_2D:
-            g.tev_dirty = 1;
-            g.texture_2d_enabled = 1;
-            break;
+        case GL_TEXTURE_2D:    g.tev_dirty = 1; g.texture_2d_enabled = 1; break;
         case GL_SCISSOR_TEST:  g.scissor_test_enabled = 1; break;
         case GL_FOG:           g.fog_enabled = 1; g.fog_dirty = 1; break;
-        case GL_POLYGON_OFFSET_FILL: break;
-        case GL_COLOR_MATERIAL: break;
-        case GL_LIGHTING:      break;
-        case GL_NORMALIZE:     break;
-        case GL_RESCALE_NORMAL: break;
         default: break;
     }
 }
@@ -788,22 +557,12 @@ void glDisable(GLenum cap) {
         case GL_BLEND:         g.blend_enabled = 0; break;
         case GL_ALPHA_TEST:    g.alpha_test_enabled = 0; break;
         case GL_CULL_FACE:     g.cull_face_enabled = 0; break;
-        case GL_TEXTURE_2D:
-            g.tev_dirty = 0;
-            g.texture_2d_enabled = 0;
-            break;
+        case GL_TEXTURE_2D:    g.tev_dirty = 0; g.texture_2d_enabled = 0; break;
         case GL_SCISSOR_TEST:  g.scissor_test_enabled = 0; break;
         case GL_FOG:           g.fog_enabled = 0; break;
-        case GL_POLYGON_OFFSET_FILL: break;
-        case GL_COLOR_MATERIAL: break;
-        case GL_LIGHTING:      break;
         default: break;
     }
 }
-
-/* ========================================================================= */
-/* Depth, Blend, Alpha, Cull                                                 */
-/* ========================================================================= */
 
 void glDepthFunc(GLenum func) { g.depth_func = func; }
 void glDepthMask(GLboolean flag) { g.depth_mask = flag; }
@@ -813,41 +572,22 @@ void glAlphaFunc(GLenum func, GLclampf ref) { g.alpha_func = func; g.alpha_ref =
 void glCullFace(GLenum mode) { g.cull_face_mode = mode; }
 void glFrontFace(GLenum mode) { g.front_face = mode; }
 void glShadeModel(GLenum mode) { (void)mode; }
-void glPolygonOffset(GLfloat factor, GLfloat units) {
-    g.polygon_offset_factor = factor;
-    g.polygon_offset_units = units;
-    // Оставляем scale=0.5f для маппинга GL->PICA, меняем только offset
-    C3D_DepthMap(true, 0.5f, 0.5f + (units * 0.0001f));
-}
+void glPolygonOffset(GLfloat factor, GLfloat units) { g.polygon_offset_factor = factor; g.polygon_offset_units = units; C3D_DepthMap(true, 0.5f, 0.5f + (units * 0.0001f)); }
 void glLineWidth(GLfloat width) { (void)width; }
 void glPolygonMode(GLenum face, GLenum mode) { (void)face; (void)mode; }
 
 void glColorMask(GLboolean r, GLboolean g_, GLboolean b, GLboolean a) {
-    g.color_mask_r = r; g.color_mask_g = g_;
-    g.color_mask_b = b; g.color_mask_a = a;
+    g.color_mask_r = r; g.color_mask_g = g_; g.color_mask_b = b; g.color_mask_a = a;
 }
 
-/* ========================================================================= */
-/* Color                                                                     */
-/* ========================================================================= */
-
 void glColor4f(GLfloat r, GLfloat g_, GLfloat b, GLfloat a) {
-    g.cur_color[0] = r; g.cur_color[1] = g_;
-    g.cur_color[2] = b; g.cur_color[3] = a;
+    g.cur_color[0] = r; g.cur_color[1] = g_; g.cur_color[2] = b; g.cur_color[3] = a;
 }
 
 void glColor3f(GLfloat r, GLfloat g_, GLfloat b) {
-    if (g.dl_recording >= 0) {
-        dl_record_color3f(r, g_, b);
-        return;
-    }
-    g.cur_color[0] = r; g.cur_color[1] = g_;
-    g.cur_color[2] = b; g.cur_color[3] = 1.0f;
+    if (g.dl_recording >= 0) { dl_record_color3f(r, g_, b); return; }
+    g.cur_color[0] = r; g.cur_color[1] = g_; g.cur_color[2] = b; g.cur_color[3] = 1.0f;
 }
-
-/* ========================================================================= */
-/* Fog                                                                       */
-/* ========================================================================= */
 
 void glFogf(GLenum pname, GLfloat param) {
     switch (pname) {
@@ -860,35 +600,14 @@ void glFogf(GLenum pname, GLfloat param) {
 }
 void glFogfv(GLenum pname, const GLfloat *params) {
     if (pname == GL_FOG_COLOR && params) {
-        g.fog_color[0] = params[0]; g.fog_color[1] = params[1];
-        g.fog_color[2] = params[2]; g.fog_color[3] = params[3];
-        g.fog_dirty = 1;
-    } else if (params) {
-        glFogf(pname, params[0]);
-    }
+        g.fog_color[0] = params[0]; g.fog_color[1] = params[1]; g.fog_color[2] = params[2]; g.fog_color[3] = params[3]; g.fog_dirty = 1;
+    } else if (params) { glFogf(pname, params[0]); }
 }
+void glFogx(GLenum pname, GLfixed param) { glFogf(pname, (float)param / 65536.0f); }
+void glNormal3f(GLfloat nx, GLfloat ny, GLfloat nz) { (void)nx; (void)ny; (void)nz; }
 
-void glFogx(GLenum pname, GLfixed param) {
-    glFogf(pname, (float)param / 65536.0f);
-}
-
-void glNormal3f(GLfloat nx, GLfloat ny, GLfloat nz) {
-    (void)nx; (void)ny; (void)nz;
-}
-
-
-/* ========================================================================= */
-/* Matrix operations                                                         */
-/* ========================================================================= */
-
-void glMatrixMode(GLenum mode) {
-    g.matrix_mode = mode;
-}
-
-void glLoadIdentity(void) {
-    Mtx_Identity(cur_mtx());
-    g.matrices_dirty = 1;
-}
+void glMatrixMode(GLenum mode) { g.matrix_mode = mode; }
+void glLoadIdentity(void) { Mtx_Identity(cur_mtx()); g.matrices_dirty = 1; }
 
 void glPushMatrix(void) {
     int *sp = cur_sp();
@@ -901,29 +620,15 @@ void glPushMatrix(void) {
 
 void glPopMatrix(void) {
     int *sp = cur_sp();
-    if (*sp > 0) {
-        (*sp)--;
-    }
+    if (*sp > 0) (*sp)--;
     g.matrices_dirty = 1;
 }
 
 void glTranslatef(GLfloat x, GLfloat y, GLfloat z) {
-    /* Display list recording support */
-    if (g.dl_recording >= 0) {
-        dl_record_translate(x, y, z);
-        return;
-    }
-    C3D_Mtx tmp;
-    Mtx_Identity(&tmp);
-    /* Citro3D matrices are row-major [WZYX]:
-     * row0 = [m[0][3], m[0][2], m[0][1], m[0][0]] = [w, z, y, x]
-     * Translation goes into column 3 (the W component of each row). */
-    tmp.r[0].w = x;
-    tmp.r[1].w = y;
-    tmp.r[2].w = z;
-
-    C3D_Mtx result;
-    Mtx_Multiply(&result, cur_mtx(), &tmp);
+    if (g.dl_recording >= 0) { dl_record_translate(x, y, z); return; }
+    C3D_Mtx tmp; Mtx_Identity(&tmp);
+    tmp.r[0].w = x; tmp.r[1].w = y; tmp.r[2].w = z;
+    C3D_Mtx result; Mtx_Multiply(&result, cur_mtx(), &tmp);
     Mtx_Copy(cur_mtx(), &result);
     g.matrices_dirty = 1;
 }
@@ -933,161 +638,93 @@ void glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z) {
     float len = sqrtf(x*x + y*y + z*z);
     if (len < 0.0001f) return;
     x /= len; y /= len; z /= len;
-
     C3D_Mtx rot;
     if (x == 1.0f && y == 0.0f && z == 0.0f) {
-        Mtx_Identity(&rot);
-        float c = cosf(rad), s = sinf(rad);
-        rot.r[1].y = c;  rot.r[1].z = -s;
-        rot.r[2].y = s;  rot.r[2].z = c;
+        Mtx_Identity(&rot); float c = cosf(rad), s = sinf(rad);
+        rot.r[1].y = c;  rot.r[1].z = -s; rot.r[2].y = s;  rot.r[2].z = c;
     } else if (x == 0.0f && y == 1.0f && z == 0.0f) {
-        Mtx_Identity(&rot);
-        float c = cosf(rad), s = sinf(rad);
-        rot.r[0].x = c;  rot.r[0].z = s;
-        rot.r[2].x = -s; rot.r[2].z = c;
+        Mtx_Identity(&rot); float c = cosf(rad), s = sinf(rad);
+        rot.r[0].x = c;  rot.r[0].z = s; rot.r[2].x = -s; rot.r[2].z = c;
     } else if (x == 0.0f && y == 0.0f && z == 1.0f) {
-        Mtx_Identity(&rot);
-        float c = cosf(rad), s = sinf(rad);
-        rot.r[0].x = c;  rot.r[0].y = -s;
-        rot.r[1].x = s;  rot.r[1].y = c;
+        Mtx_Identity(&rot); float c = cosf(rad), s = sinf(rad);
+        rot.r[0].x = c;  rot.r[0].y = -s; rot.r[1].x = s;  rot.r[1].y = c;
     } else {
-        /* Arbitrary axis rotation */
         float c = cosf(rad), s = sinf(rad), ic = 1.0f - c;
         Mtx_Identity(&rot);
         rot.r[0].x = x*x*ic + c;     rot.r[0].y = x*y*ic - z*s;   rot.r[0].z = x*z*ic + y*s;
         rot.r[1].x = y*x*ic + z*s;   rot.r[1].y = y*y*ic + c;     rot.r[1].z = y*z*ic - x*s;
         rot.r[2].x = z*x*ic - y*s;   rot.r[2].y = z*y*ic + x*s;   rot.r[2].z = z*z*ic + c;
     }
-
-    C3D_Mtx result;
-    Mtx_Multiply(&result, cur_mtx(), &rot);
-    Mtx_Copy(cur_mtx(), &result);
-    g.matrices_dirty = 1;
+    C3D_Mtx result; Mtx_Multiply(&result, cur_mtx(), &rot);
+    Mtx_Copy(cur_mtx(), &result); g.matrices_dirty = 1;
 }
 
 void glScalef(GLfloat x, GLfloat y, GLfloat z) {
-    C3D_Mtx tmp;
-    Mtx_Identity(&tmp);
-    tmp.r[0].x = x;
-    tmp.r[1].y = y;
-    tmp.r[2].z = z;
-
-    C3D_Mtx result;
-    Mtx_Multiply(&result, cur_mtx(), &tmp);
-    Mtx_Copy(cur_mtx(), &result);
-    g.matrices_dirty = 1;
+    C3D_Mtx tmp; Mtx_Identity(&tmp);
+    tmp.r[0].x = x; tmp.r[1].y = y; tmp.r[2].z = z;
+    C3D_Mtx result; Mtx_Multiply(&result, cur_mtx(), &tmp);
+    Mtx_Copy(cur_mtx(), &result); g.matrices_dirty = 1;
 }
 
 void glMultMatrixf(const GLfloat *m) {
-    /* GL uses column-major, Citro3D uses row-major [WZYX].
-     * GL: m[col*4+row], so m[0..3] = col0, m[4..7] = col1, etc.
-     * C3D: r[row].{x,y,z,w} where x=col0, y=col1, z=col2, w=col3
-     * But C3D stores as [w,z,y,x] internally. We use the struct fields. */
     C3D_Mtx tmp;
     for (int r = 0; r < 4; r++) {
-        tmp.r[r].x = m[0*4 + r];  /* col 0 */
-        tmp.r[r].y = m[1*4 + r];  /* col 1 */
-        tmp.r[r].z = m[2*4 + r];  /* col 2 */
-        tmp.r[r].w = m[3*4 + r];  /* col 3 */
+        tmp.r[r].x = m[0*4 + r]; tmp.r[r].y = m[1*4 + r];
+        tmp.r[r].z = m[2*4 + r]; tmp.r[r].w = m[3*4 + r];
     }
-
-    C3D_Mtx result;
-    Mtx_Multiply(&result, cur_mtx(), &tmp);
-    Mtx_Copy(cur_mtx(), &result);
-    g.matrices_dirty = 1;
+    C3D_Mtx result; Mtx_Multiply(&result, cur_mtx(), &tmp);
+    Mtx_Copy(cur_mtx(), &result); g.matrices_dirty = 1;
 }
 
 void glLoadMatrixf(const GLfloat *m) {
     C3D_Mtx *dst = cur_mtx();
     for (int r = 0; r < 4; r++) {
-        dst->r[r].x = m[0*4 + r];
-        dst->r[r].y = m[1*4 + r];
-        dst->r[r].z = m[2*4 + r];
-        dst->r[r].w = m[3*4 + r];
+        dst->r[r].x = m[0*4 + r]; dst->r[r].y = m[1*4 + r];
+        dst->r[r].z = m[2*4 + r]; dst->r[r].w = m[3*4 + r];
     }
     g.matrices_dirty = 1;
 }
 
 void glOrthof(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloat near_val, GLfloat far_val) {
-    C3D_Mtx ortho;
-    Mtx_Identity(&ortho);
-    ortho.r[0].x = 2.0f / (right - left);
-    ortho.r[0].w = -(right + left) / (right - left);
-    ortho.r[1].y = 2.0f / (top - bottom);
-    ortho.r[1].w = -(top + bottom) / (top - bottom);
-    ortho.r[2].z = -2.0f / (far_val - near_val);
-    ortho.r[2].w = -(far_val + near_val) / (far_val - near_val);
-
-    C3D_Mtx result;
-    Mtx_Multiply(&result, cur_mtx(), &ortho);
-    Mtx_Copy(cur_mtx(), &result);
-    g.matrices_dirty = 1;
+    C3D_Mtx ortho; Mtx_Identity(&ortho);
+    ortho.r[0].x = 2.0f / (right - left); ortho.r[0].w = -(right + left) / (right - left);
+    ortho.r[1].y = 2.0f / (top - bottom); ortho.r[1].w = -(top + bottom) / (top - bottom);
+    ortho.r[2].z = -2.0f / (far_val - near_val); ortho.r[2].w = -(far_val + near_val) / (far_val - near_val);
+    C3D_Mtx result; Mtx_Multiply(&result, cur_mtx(), &ortho);
+    Mtx_Copy(cur_mtx(), &result); g.matrices_dirty = 1;
 }
-
-/* ========================================================================= */
-/* Query                                                                     */
-/* ========================================================================= */
 
 void glGetFloatv(GLenum pname, GLfloat *params) {
     C3D_Mtx *src = NULL;
-    switch (pname) {
-        case GL_MODELVIEW_MATRIX:
-            src = &g.mv_stack[g.mv_sp];
-            break;
-        case GL_PROJECTION_MATRIX:
-            src = &g.proj_stack[g.proj_sp];
-            break;
-        case GL_TEXTURE_MATRIX:
-            src = &g.tex_stack[g.tex_sp];
-            break;
-        default:
-            for (int i = 0; i < 16; i++) params[i] = 0.0f;
-            return;
-    }
-    /* Convert back to column-major GL format */
+    if (pname == GL_MODELVIEW_MATRIX) src = &g.mv_stack[g.mv_sp];
+    else if (pname == GL_PROJECTION_MATRIX) src = &g.proj_stack[g.proj_sp];
+    else if (pname == GL_TEXTURE_MATRIX) src = &g.tex_stack[g.tex_sp];
+    else { for (int i = 0; i < 16; i++) params[i] = 0.0f; return; }
     for (int r = 0; r < 4; r++) {
-        params[0*4 + r] = src->r[r].x;
-        params[1*4 + r] = src->r[r].y;
-        params[2*4 + r] = src->r[r].z;
-        params[3*4 + r] = src->r[r].w;
+        params[0*4 + r] = src->r[r].x; params[1*4 + r] = src->r[r].y;
+        params[2*4 + r] = src->r[r].z; params[3*4 + r] = src->r[r].w;
     }
 }
 
 void glGetIntegerv(GLenum pname, GLint *params) {
-    switch (pname) {
-        case GL_VIEWPORT:
-            params[0] = g.vp_x; params[1] = g.vp_y;
-            params[2] = g.vp_w; params[3] = g.vp_h;
-            break;
-        case GL_MAX_TEXTURE_SIZE:
-            params[0] = 1024;
-            break;
-        default:
-            params[0] = 0;
-            break;
-    }
+    if (pname == GL_VIEWPORT) {
+        params[0] = g.vp_x; params[1] = g.vp_y; params[2] = g.vp_w; params[3] = g.vp_h;
+    } else if (pname == GL_MAX_TEXTURE_SIZE) params[0] = 1024;
+    else params[0] = 0;
 }
 
 const GLubyte* glGetString(GLenum name) {
-    switch (name) {
-        case GL_VENDOR:     return (const GLubyte*)"gl2citro3d";
-        case GL_RENDERER:   return (const GLubyte*)"PICA200 (3DS)";
-        case GL_VERSION:    return (const GLubyte*)"OpenGL ES-CM 1.1 gl2citro3d";
-        case GL_EXTENSIONS: return (const GLubyte*)"GL_OES_vertex_buffer_object GL_OES_matrix_palette";
-        default:            return (const GLubyte*)"";
-    }
+    if (name == GL_VENDOR) return (const GLubyte*)"gl2citro3d";
+    if (name == GL_RENDERER) return (const GLubyte*)"PICA200 (3DS)";
+    if (name == GL_VERSION) return (const GLubyte*)"OpenGL ES-CM 1.1 gl2citro3d";
+    if (name == GL_EXTENSIONS) return (const GLubyte*)"GL_OES_vertex_buffer_object GL_OES_matrix_palette";
+    return (const GLubyte*)"";
 }
-
-
-/* ========================================================================= */
-/* Texture management                                                        */
-/* ========================================================================= */
 
 void glGenTextures(GLsizei n, GLuint *textures) {
     for (GLsizei i = 0; i < n; i++) {
         textures[i] = g.tex_next_id++;
-        if (g.tex_next_id >= GL2C3D_MAX_TEXTURES)
-            g.tex_next_id = 1;  /* wrap around, reuse old slots */
+        if (g.tex_next_id >= GL2C3D_MAX_TEXTURES) g.tex_next_id = 1;
     }
 }
 
@@ -1097,83 +734,42 @@ void glDeleteTextures(GLsizei n, const GLuint *textures) {
         if (id > 0 && id < GL2C3D_MAX_TEXTURES && g.textures[id].allocated) {
             C3D_TexDelete(&g.textures[id].tex);
             g.textures[id].allocated = 0;
-            if (g.bound_texture == id)
-                g.bound_texture = 0;
+            if (g.bound_texture == id) g.bound_texture = 0;
         }
     }
 }
 
-void glBindTexture(GLenum target, GLuint texture) {
-    (void)target;
-    g.bound_texture = texture;
-}
+void glBindTexture(GLenum target, GLuint texture) { (void)target; g.bound_texture = texture; }
 
-void glTexImage2D(GLenum target, GLint level, GLint internalformat,
-                  GLsizei width, GLsizei height, GLint border,
-                  GLenum format, GLenum type, const GLvoid *pixels) {
-    (void)target; (void)level; (void)border;
-
+void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels) {
+    (void)target; (void)level; (void)border; (void)internalformat;
     if (g.bound_texture == 0 || g.bound_texture >= GL2C3D_MAX_TEXTURES) return;
     TexSlot *slot = &g.textures[g.bound_texture];
 
-    /* Delete old texture if re-uploading */
-    if (slot->allocated) {
-        C3D_TexDelete(&slot->tex);
-        slot->allocated = 0;
-    }
-
+    if (slot->allocated) { C3D_TexDelete(&slot->tex); slot->allocated = 0; }
     GPU_TEXCOLOR gpu_fmt = gl_to_gpu_texfmt(format, type);
-    int pot_w = next_pow2(width);
-    int pot_h = next_pow2(height);
+    int pot_w = next_pow2(width); int pot_h = next_pow2(height);
+    if (pot_w < 8) pot_w = 8; if (pot_h < 8) pot_h = 8;
+    if (pot_w > 1024) pot_w = 1024; if (pot_h > 1024) pot_h = 1024;
 
-    /* Minimum texture size for PICA200 is 8x8 */
-    if (pot_w < 8) pot_w = 8;
-    if (pot_h < 8) pot_h = 8;
-    /* Maximum texture size is 1024x1024 */
-    if (pot_w > 1024) pot_w = 1024;
-    if (pot_h > 1024) pot_h = 1024;
-
-    if (!C3D_TexInit(&slot->tex, pot_w, pot_h, gpu_fmt)) {
-        g.last_error = GL_OUT_OF_MEMORY;
-        return;
-    }
-
-    slot->allocated = 1;
-    slot->width = width;
-    slot->height = height;
-    slot->pot_w = pot_w;
-    slot->pot_h = pot_h;
-    slot->fmt = gpu_fmt;
-    slot->min_filter = GL_NEAREST;
-    slot->mag_filter = GL_NEAREST;
-    slot->wrap_s = GL_REPEAT;
-    slot->wrap_t = GL_REPEAT;
-
-    /* Set default filter/wrap */
+    if (!C3D_TexInit(&slot->tex, pot_w, pot_h, gpu_fmt)) { g.last_error = GL_OUT_OF_MEMORY; return; }
+    slot->allocated = 1; slot->width = width; slot->height = height; slot->pot_w = pot_w; slot->pot_h = pot_h; slot->fmt = gpu_fmt;
     C3D_TexSetFilter(&slot->tex, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&slot->tex, GPU_REPEAT, GPU_REPEAT);
 
     if (pixels) {
-        /* Upload pixel data, converting format if needed */
         if (gpu_fmt == GPU_RGBA8) {
-            const uint8_t *src_bytes = (const uint8_t*)pixels;
-            uint32_t *rgba_data;
+            uint32_t *rgba_data = NULL;
             int needs_free = 0;
-
             if (format == GL_RGB && type == GL_UNSIGNED_BYTE) {
-                rgba_data = rgb_to_rgba(src_bytes, width, height);
-                needs_free = 1;
-            } else {
-                rgba_data = (uint32_t*)pixels;
-            }
+                rgba_data = rgb_to_rgba((const uint8_t*)pixels, width, height); needs_free = 1;
+            } else { rgba_data = (uint32_t*)pixels; }
 
             if (rgba_data) {
-                /* Swizzle into morton layout */
                 uint32_t *swizzled = (uint32_t*)linearAlloc(pot_w * pot_h * 4);
                 if (swizzled) {
                     memset(swizzled, 0, pot_w * pot_h * 4);
                     swizzle_rgba8(swizzled, rgba_data, width, height, pot_w, pot_h);
-                    /* Copy to texture memory */
                     memcpy(slot->tex.data, swizzled, pot_w * pot_h * 4);
                     C3D_TexFlush(&slot->tex);
                     linearFree(swizzled);
@@ -1181,74 +777,41 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat,
                 if (needs_free) linearFree(rgba_data);
             }
         } else {
-            /* For non-RGBA8 formats, do a simple copy (TODO: may need swizzle) */
-            int bpp = gpu_texfmt_bpp(gpu_fmt);
-            memcpy(slot->tex.data, pixels, width * height * bpp);
+            memcpy(slot->tex.data, pixels, width * height * gpu_texfmt_bpp(gpu_fmt));
             C3D_TexFlush(&slot->tex);
         }
     }
 }
 
-void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
-                     GLsizei width, GLsizei height, GLenum format,
-                     GLenum type, const GLvoid *pixels) {
+void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels) {
     (void)target; (void)level;
-
     if (g.bound_texture == 0 || g.bound_texture >= GL2C3D_MAX_TEXTURES) return;
     TexSlot *slot = &g.textures[g.bound_texture];
     if (!slot->allocated || !pixels) return;
 
-    /* For sub-image update, we need to write into the morton-ordered texture.
-     * This is the hot path for dynamic textures (water/lava animation). */
     if (slot->fmt == GPU_RGBA8) {
-        const uint32_t *src;
+        const uint32_t *src = NULL;
         uint32_t *temp_rgba = NULL;
         int needs_free = 0;
-
-        if (format == GL_RGBA && type == GL_UNSIGNED_BYTE) {
-            src = (const uint32_t*)pixels;
-        } else if (format == GL_RGB && type == GL_UNSIGNED_BYTE) {
-            temp_rgba = rgb_to_rgba((const uint8_t*)pixels, width, height);
-            src = temp_rgba;
-            needs_free = 1;
-        } else {
-            return;
-        }
-
+        if ((format == GL_RGBA || format == GL_RGBA8_OES) && type == GL_UNSIGNED_BYTE) { src = (const uint32_t*)pixels; }
+        else if (format == GL_RGB && type == GL_UNSIGNED_BYTE) { temp_rgba = rgb_to_rgba((const uint8_t*)pixels, width, height); src = temp_rgba; needs_free = 1; }
         if (!src) return;
 
         uint32_t *tex_data = (uint32_t*)slot->tex.data;
-        int pot_w = slot->pot_w;
-        int pot_h = slot->pot_h;
-
+        int pot_w = slot->pot_w; int pot_h = slot->pot_h;
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
-                int dx = xoffset + x;
-                int dy = yoffset + y;
+                int dx = xoffset + x; int dy = yoffset + y;
                 if (dx >= pot_w || dy >= pot_h) continue;
-
                 uint32_t pixel = src[y * width + x];
-                uint8_t r = (pixel >>  0) & 0xFF;
-                uint8_t gc = (pixel >>  8) & 0xFF;
-                uint8_t b = (pixel >> 16) & 0xFF;
-                uint8_t a = (pixel >> 24) & 0xFF;
-                uint32_t out_pixel = ((uint32_t)r << 24) |
-                                     ((uint32_t)gc << 16) |
-                                     ((uint32_t)b << 8) |
-                                     (uint32_t)a;
-
+                uint8_t r = (pixel >> 0) & 0xFF, gc = (pixel >> 8) & 0xFF, b = (pixel >> 16) & 0xFF, a = (pixel >> 24) & 0xFF;
+                uint32_t out_pixel = ((uint32_t)r << 24) | ((uint32_t)gc << 16) | ((uint32_t)b << 8) | (uint32_t)a;
                 int fy = pot_h - 1 - dy;
-                int tile_x = dx >> 3;
-                int tile_y = fy >> 3;
-                int lx = dx & 7;
-                int ly = fy & 7;
-                int tiles_per_row = pot_w >> 3;
-                int tile_offset = (tile_y * tiles_per_row + tile_x) * 64;
-                int pixel_offset = tile_offset + morton_interleave(lx, ly);
+                int tile_x = dx >> 3; int tile_y = fy >> 3; int lx = dx & 7; int ly = fy & 7;
+                int pixel_offset = (tile_y * (pot_w >> 3) + tile_x) * 64 + morton_interleave(lx, ly);
                 tex_data[pixel_offset] = out_pixel;
             }
         }
-
         C3D_TexFlush(&slot->tex);
         if (needs_free && temp_rgba) linearFree(temp_rgba);
     }
@@ -1259,65 +822,35 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) {
     if (g.bound_texture == 0 || g.bound_texture >= GL2C3D_MAX_TEXTURES) return;
     TexSlot *slot = &g.textures[g.bound_texture];
     if (!slot->allocated) return;
-
-    GPU_TEXTURE_FILTER_PARAM filt;
-    GPU_TEXTURE_WRAP_PARAM wrap;
-
-    switch (pname) {
-        case GL_TEXTURE_MIN_FILTER:
-            slot->min_filter = param;
-            filt = (param == GL_LINEAR || param == GL_LINEAR_MIPMAP_LINEAR ||
-                    param == GL_LINEAR_MIPMAP_NEAREST) ? GPU_LINEAR : GPU_NEAREST;
-            C3D_TexSetFilter(&slot->tex,
-                (slot->mag_filter == GL_LINEAR) ? GPU_LINEAR : GPU_NEAREST, filt);
-            break;
-        case GL_TEXTURE_MAG_FILTER:
-            slot->mag_filter = param;
-            filt = (param == GL_LINEAR) ? GPU_LINEAR : GPU_NEAREST;
-            C3D_TexSetFilter(&slot->tex, filt,
-                (slot->min_filter == GL_LINEAR || slot->min_filter == GL_LINEAR_MIPMAP_LINEAR) ?
-                GPU_LINEAR : GPU_NEAREST);
-            break;
-        case GL_TEXTURE_WRAP_S:
-            slot->wrap_s = param;
-            wrap = (param == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE :
-                   (param == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT;
-            C3D_TexSetWrap(&slot->tex, wrap,
-                (slot->wrap_t == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE :
-                (slot->wrap_t == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
-            break;
-        case GL_TEXTURE_WRAP_T:
-            slot->wrap_t = param;
-            wrap = (param == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE :
-                   (param == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT;
-            C3D_TexSetWrap(&slot->tex,
-                (slot->wrap_s == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE :
-                (slot->wrap_s == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT,
-                wrap);
-            break;
-        default: break;
+    GPU_TEXTURE_FILTER_PARAM filt; GPU_TEXTURE_WRAP_PARAM wrap;
+    if (pname == GL_TEXTURE_MIN_FILTER) {
+        slot->min_filter = param;
+        filt = (param == GL_LINEAR || param == GL_LINEAR_MIPMAP_LINEAR || param == GL_LINEAR_MIPMAP_NEAREST) ? GPU_LINEAR : GPU_NEAREST;
+        C3D_TexSetFilter(&slot->tex, (slot->mag_filter == GL_LINEAR) ? GPU_LINEAR : GPU_NEAREST, filt);
+    } else if (pname == GL_TEXTURE_MAG_FILTER) {
+        slot->mag_filter = param;
+        filt = (param == GL_LINEAR) ? GPU_LINEAR : GPU_NEAREST;
+        C3D_TexSetFilter(&slot->tex, filt, (slot->min_filter == GL_LINEAR || slot->min_filter == GL_LINEAR_MIPMAP_LINEAR) ? GPU_LINEAR : GPU_NEAREST);
+    } else if (pname == GL_TEXTURE_WRAP_S) {
+        slot->wrap_s = param;
+        wrap = (param == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE : GPU_REPEAT;
+        C3D_TexSetWrap(&slot->tex, wrap, (slot->wrap_t == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE : GPU_REPEAT);
+    } else if (pname == GL_TEXTURE_WRAP_T) {
+        slot->wrap_t = param;
+        wrap = (param == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE : GPU_REPEAT;
+        C3D_TexSetWrap(&slot->tex, (slot->wrap_s == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE : GPU_REPEAT, wrap);
     }
 }
 
-void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat,
-                            GLsizei width, GLsizei height, GLint border,
-                            GLsizei imageSize, const GLvoid *data) {
-    /* PVRTC not supported on 3DS - create a blank RGBA8 texture instead */
+void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const GLvoid *data) {
     (void)data; (void)imageSize; (void)internalformat;
-    glTexImage2D(target, level, GL_RGBA, width, height, border,
-                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexImage2D(target, level, GL_RGBA, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
 }
-
-
-/* ========================================================================= */
-/* VBO management                                                            */
-/* ========================================================================= */
 
 void glGenBuffers(GLsizei n, GLuint *buffers) {
     for (GLsizei i = 0; i < n; i++) {
         buffers[i] = g.vbo_next_id++;
-        if (g.vbo_next_id >= GL2C3D_MAX_VBOS)
-            g.vbo_next_id = 1;
+        if (g.vbo_next_id >= GL2C3D_MAX_VBOS) g.vbo_next_id = 1;
     }
 }
 
@@ -1326,9 +859,7 @@ void glDeleteBuffers(GLsizei n, const GLuint *buffers) {
         GLuint id = buffers[i];
         if (id > 0 && id < GL2C3D_MAX_VBOS && g.vbos[id].allocated) {
             if (g.vbos[id].data) linearFree(g.vbos[id].data);
-            g.vbos[id].data = NULL;
-            g.vbos[id].size = 0;
-            g.vbos[id].allocated = 0;
+            g.vbos[id].data = NULL; g.vbos[id].size = 0; g.vbos[id].allocated = 0;
             if (g.bound_array_buffer == id) g.bound_array_buffer = 0;
             if (g.bound_element_array_buffer == id) g.bound_element_array_buffer = 0;
         }
@@ -1336,38 +867,30 @@ void glDeleteBuffers(GLsizei n, const GLuint *buffers) {
 }
 
 void glBindBuffer(GLenum target, GLuint buffer) {
-    if (target == GL_ARRAY_BUFFER) {
-        g.bound_array_buffer = buffer;
-    } else if (target == GL_ELEMENT_ARRAY_BUFFER) {
-        g.bound_element_array_buffer = buffer;
-    }
+    if (target == GL_ARRAY_BUFFER) g.bound_array_buffer = buffer;
+    else if (target == GL_ELEMENT_ARRAY_BUFFER) g.bound_element_array_buffer = buffer;
 }
 
 void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usage) {
     (void)usage;
     GLuint bound = 0;
-    if (target == GL_ARRAY_BUFFER) {
-        bound = g.bound_array_buffer;
-    } else if (target == GL_ELEMENT_ARRAY_BUFFER) {
-        bound = g.bound_element_array_buffer;
-    }
-    if (bound == 0 || bound >= GL2C3D_MAX_VBOS) return;
+    if (target == GL_ARRAY_BUFFER) bound = g.bound_array_buffer;
+    else if (target == GL_ELEMENT_ARRAY_BUFFER) bound = g.bound_element_array_buffer;
 
+    if (bound == 0 || bound >= GL2C3D_MAX_VBOS) {
+        if(bound >= GL2C3D_MAX_VBOS) printf("[NovaGL] Error: VBO ID %d out of bounds!\n", bound);
+        return;
+    }
     VBOSlot *slot = &g.vbos[bound];
 
-    /* Realloc if size changed */
     if (slot->allocated && slot->size < (int)size) {
         if (slot->data) linearFree(slot->data);
-        slot->data = NULL;
-        slot->allocated = 0;
+        slot->data = NULL; slot->allocated = 0;
     }
 
     if (!slot->allocated) {
         slot->data = linearAlloc(size);
-        if (!slot->data) {
-            g.last_error = GL_OUT_OF_MEMORY;
-            return;
-        }
+        if (!slot->data) { g.last_error = GL_OUT_OF_MEMORY; return; }
         slot->allocated = 1;
     }
     slot->size = (int)size;
@@ -1378,60 +901,35 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
     }
 }
 
-/* ========================================================================= */
-/* Vertex arrays                                                             */
-/* ========================================================================= */
-
 void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
-    g.va_vertex.size = size; g.va_vertex.type = type;
-    g.va_vertex.stride = stride; g.va_vertex.pointer = pointer;
-    g.va_vertex.vbo_id = g.bound_array_buffer;
+    g.va_vertex.size = size; g.va_vertex.type = type; g.va_vertex.stride = stride; g.va_vertex.pointer = pointer; g.va_vertex.vbo_id = g.bound_array_buffer;
 }
-
 void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
-    g.va_texcoord.size = size; g.va_texcoord.type = type;
-    g.va_texcoord.stride = stride; g.va_texcoord.pointer = pointer;
-    g.va_texcoord.vbo_id = g.bound_array_buffer;
+    g.va_texcoord.size = size; g.va_texcoord.type = type; g.va_texcoord.stride = stride; g.va_texcoord.pointer = pointer; g.va_texcoord.vbo_id = g.bound_array_buffer;
 }
-
 void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
-    g.va_color.size = size; g.va_color.type = type;
-    g.va_color.stride = stride; g.va_color.pointer = pointer;
-    g.va_color.vbo_id = g.bound_array_buffer;
+    g.va_color.size = size; g.va_color.type = type; g.va_color.stride = stride; g.va_color.pointer = pointer; g.va_color.vbo_id = g.bound_array_buffer;
 }
-
 void glNormalPointer(GLenum type, GLsizei stride, const GLvoid *pointer) {
-    g.va_normal.type = type; g.va_normal.stride = stride;
-    g.va_normal.pointer = pointer;
-    g.va_normal.vbo_id = g.bound_array_buffer;
+    g.va_normal.type = type; g.va_normal.stride = stride; g.va_normal.pointer = pointer; g.va_normal.vbo_id = g.bound_array_buffer;
 }
 
 void glEnableClientState(GLenum cap) {
-    switch (cap) {
-        case GL_VERTEX_ARRAY:        g.va_vertex.enabled = 1; break;
-        case GL_TEXTURE_COORD_ARRAY: g.va_texcoord.enabled = 1; break;
-        case GL_COLOR_ARRAY:         g.va_color.enabled = 1; break;
-        case GL_NORMAL_ARRAY:        g.va_normal.enabled = 1; break;
-        default: break;
-    }
+    if (cap == GL_VERTEX_ARRAY) g.va_vertex.enabled = 1;
+    else if (cap == GL_TEXTURE_COORD_ARRAY) g.va_texcoord.enabled = 1;
+    else if (cap == GL_COLOR_ARRAY) g.va_color.enabled = 1;
+    else if (cap == GL_NORMAL_ARRAY) g.va_normal.enabled = 1;
 }
 
 void glDisableClientState(GLenum cap) {
-    switch (cap) {
-        case GL_VERTEX_ARRAY:        g.va_vertex.enabled = 0; break;
-        case GL_TEXTURE_COORD_ARRAY: g.va_texcoord.enabled = 0; break;
-        case GL_COLOR_ARRAY:         g.va_color.enabled = 0; break;
-        case GL_NORMAL_ARRAY:        g.va_normal.enabled = 0; break;
-        default: break;
-    }
+    if (cap == GL_VERTEX_ARRAY) g.va_vertex.enabled = 0;
+    else if (cap == GL_TEXTURE_COORD_ARRAY) g.va_texcoord.enabled = 0;
+    else if (cap == GL_COLOR_ARRAY) g.va_color.enabled = 0;
+    else if (cap == GL_NORMAL_ARRAY) g.va_normal.enabled = 0;
 }
 
-/* ========================================================================= */
-/* Drawing - the core                                                        */
-/* ========================================================================= */
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     if (count <= 0) return;
-
     apply_gpu_state();
 
     C3D_BufInfo *bufInfo = C3D_GetBufInfo();
@@ -1440,138 +938,80 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     int vbo_id = g.va_vertex.vbo_id;
     int use_vbo = (g.va_vertex.enabled && vbo_id > 0 && vbo_id < GL2C3D_MAX_VBOS && g.vbos[vbo_id].allocated);
 
-    void *temp_client_buf = NULL;
-    uint8_t *vbo_base = NULL;
-
     if (use_vbo) {
-        vbo_base = (uint8_t*)g.vbos[vbo_id].data;
-        vbo_base += (uintptr_t)g.va_vertex.pointer;
-
+        uint8_t *vbo_base = (uint8_t*)g.vbos[vbo_id].data + (uintptr_t)g.va_vertex.pointer;
         BufInfo_Add(bufInfo, vbo_base + first * 24, 24, 3, 0x210);
     } else {
         int req_size = count * 24;
-
         if (req_size > g.client_array_buf_size) {
             if (g.client_array_buf) linearFree(g.client_array_buf);
             g.client_array_buf_size = req_size + 10240;
             g.client_array_buf = linearAlloc(g.client_array_buf_size);
         }
-
         if (!g.client_array_buf) return;
 
         uint8_t *dst = (uint8_t*)g.client_array_buf;
-
         int p_str = g.va_vertex.stride ? g.va_vertex.stride : 12;
         int t_str = g.va_texcoord.stride ? g.va_texcoord.stride : 8;
         int c_str = g.va_color.stride ? g.va_color.stride : 4;
 
         for (int i = 0; i < count; i++) {
-            /* --- 1. Позиция --- */
             if (g.va_vertex.enabled) {
-                const uint8_t *src_ptr = NULL;
-                if (g.va_vertex.vbo_id > 0 && g.vbos[g.va_vertex.vbo_id].allocated) {
-                    src_ptr = (const uint8_t*)g.vbos[g.va_vertex.vbo_id].data + (uintptr_t)g.va_vertex.pointer;
-                } else {
-                    src_ptr = (const uint8_t*)g.va_vertex.pointer;
-                }
-
+                const uint8_t *src_ptr = (g.va_vertex.vbo_id > 0 && g.vbos[g.va_vertex.vbo_id].allocated) ?
+                    (const uint8_t*)g.vbos[g.va_vertex.vbo_id].data + (uintptr_t)g.va_vertex.pointer : (const uint8_t*)g.va_vertex.pointer;
                 if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
-                    // СКОЛЬКО БАЙТ РЕАЛЬНО ЗАПРОСИЛИ (2 или 3 координаты?)
                     int bytes_to_copy = g.va_vertex.size * sizeof(float);
                     memcpy(dst, src_ptr + (first + i) * p_str, bytes_to_copy);
-                    // Если это 2D (X, Y), зануляем Z, чтобы полигоны не прыгали
-                    if (bytes_to_copy == 8) {
-                        float zero = 0.0f;
-                        memcpy(dst + 8, &zero, 4);
-                    }
-                } else {
-                    memset(dst, 0, 12);
-                }
-            } else {
-                memset(dst, 0, 12);
-            }
+                    if (bytes_to_copy == 8) { float zero = 0.0f; memcpy(dst + 8, &zero, 4); }
+                } else { memset(dst, 0, 12); }
+            } else { memset(dst, 0, 12); }
 
-            /* --- 2. Текстурные координаты (UV) --- */
             if (g.va_texcoord.enabled) {
-                const uint8_t *src_ptr = NULL;
-                if (g.va_texcoord.vbo_id > 0 && g.vbos[g.va_texcoord.vbo_id].allocated) {
-                    src_ptr = (const uint8_t*)g.vbos[g.va_texcoord.vbo_id].data + (uintptr_t)g.va_texcoord.pointer;
-                } else {
-                    src_ptr = (const uint8_t*)g.va_texcoord.pointer;
-                }
+                const uint8_t *src_ptr = (g.va_texcoord.vbo_id > 0 && g.vbos[g.va_texcoord.vbo_id].allocated) ?
+                    (const uint8_t*)g.vbos[g.va_texcoord.vbo_id].data + (uintptr_t)g.va_texcoord.pointer : (const uint8_t*)g.va_texcoord.pointer;
+                if (src_ptr && (uintptr_t)src_ptr > 0x1000) memcpy(dst + 12, src_ptr + (first + i) * t_str, 8);
+                else memset(dst + 12, 0, 8);
+            } else { memset(dst + 12, 0, 8); }
 
-                if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
-                    memcpy(dst + 12, src_ptr + (first + i) * t_str, 8);
-                } else {
-                    memset(dst + 12, 0, 8);
-                }
-            } else {
-                memset(dst + 12, 0, 8);
-            }
-
-            /* --- 3. Цвет --- */
             if (g.va_color.enabled) {
-                const uint8_t *src_ptr = NULL;
-                if (g.va_color.vbo_id > 0 && g.vbos[g.va_color.vbo_id].allocated) {
-                    src_ptr = (const uint8_t*)g.vbos[g.va_color.vbo_id].data + (uintptr_t)g.va_color.pointer;
-                } else {
-                    src_ptr = (const uint8_t*)g.va_color.pointer;
-                }
+                const uint8_t *src_ptr = (g.va_color.vbo_id > 0 && g.vbos[g.va_color.vbo_id].allocated) ?
+                    (const uint8_t*)g.vbos[g.va_color.vbo_id].data + (uintptr_t)g.va_color.pointer : (const uint8_t*)g.va_color.pointer;
                 if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
-                    if (g.va_color.size == 3) {
-                        memcpy(dst + 20, src_ptr + (first + i) * c_str, 3);
-                        dst[23] = 255;
-                    } else {
-                        memcpy(dst + 20, src_ptr + (first + i) * c_str, 4);
-                    }
-                } else {
-                    dst[20] = dst[21] = dst[22] = dst[23] = 255;
-                }
+                    if (g.va_color.size == 3) { memcpy(dst + 20, src_ptr + (first + i) * c_str, 3); dst[23] = 255; }
+                    else memcpy(dst + 20, src_ptr + (first + i) * c_str, 4);
+                } else { dst[20] = dst[21] = dst[22] = dst[23] = 255; }
             } else {
-                dst[20] = (uint8_t)(g.cur_color[0] * 255.0f);
-                dst[21] = (uint8_t)(g.cur_color[1] * 255.0f);
-                dst[22] = (uint8_t)(g.cur_color[2] * 255.0f);
-                dst[23] = (uint8_t)(g.cur_color[3] * 255.0f);
+                dst[20] = (uint8_t)(g.cur_color[0] * 255.0f); dst[21] = (uint8_t)(g.cur_color[1] * 255.0f);
+                dst[22] = (uint8_t)(g.cur_color[2] * 255.0f); dst[23] = (uint8_t)(g.cur_color[3] * 255.0f);
             }
-
             dst += 24;
         }
-
         GSPGPU_FlushDataCache(g.client_array_buf, req_size);
         BufInfo_Add(bufInfo, g.client_array_buf, 24, 3, 0x210);
     }
 
-    /* Рисуем */
     GPU_Primitive_t prim = gl_to_gpu_primitive(mode);
     if (mode == GL_LINES || mode == GL_LINE_STRIP) prim = GPU_TRIANGLES;
-
     C3D_DrawArrays(prim, 0, count);
-
-    /* Очищаем временную память, если она выделялась */
-    if (temp_client_buf) {
-        linearFree(temp_client_buf);
-    }
 }
+
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices) {
     if (count <= 0) return;
-    if (type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_BYTE) {
-        g.last_error = GL_INVALID_ENUM;
-        return;
-    }
+    if (type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_BYTE) { g.last_error = GL_INVALID_ENUM; return; }
 
     const uint8_t *idx_src = NULL;
-    if (g.bound_element_array_buffer > 0 &&
-        g.bound_element_array_buffer < GL2C3D_MAX_VBOS &&
-        g.vbos[g.bound_element_array_buffer].allocated &&
-        g.vbos[g.bound_element_array_buffer].data) {
+    int is_vbo_index = 0;
+
+    if (g.bound_element_array_buffer > 0 && g.bound_element_array_buffer < GL2C3D_MAX_VBOS &&
+        g.vbos[g.bound_element_array_buffer].allocated && g.vbos[g.bound_element_array_buffer].data) {
         idx_src = (const uint8_t*)g.vbos[g.bound_element_array_buffer].data + (uintptr_t)indices;
+        is_vbo_index = 1;
     } else {
         idx_src = (const uint8_t*)indices;
     }
     if (!idx_src) return;
 
     apply_gpu_state();
-
     C3D_BufInfo *bufInfo = C3D_GetBufInfo();
     BufInfo_Init(bufInfo);
 
@@ -1580,25 +1020,24 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
     if (mode == GL_LINES || mode == GL_LINE_STRIP) prim = GPU_TRIANGLES;
 
     int vbo_id = g.va_vertex.vbo_id;
-    int use_vbo = (g.va_vertex.enabled && vbo_id > 0 &&
-                   vbo_id < GL2C3D_MAX_VBOS && g.vbos[vbo_id].allocated);
+    int use_vbo = (g.va_vertex.enabled && vbo_id > 0 && vbo_id < GL2C3D_MAX_VBOS && g.vbos[vbo_id].allocated);
 
     if (use_vbo) {
         uint8_t *vbo_base = (uint8_t*)g.vbos[vbo_id].data + (uintptr_t)g.va_vertex.pointer;
         BufInfo_Add(bufInfo, vbo_base, 24, 3, 0x210);
 
-        void *idx_copy = linearAlloc(count * idx_size);
-        if (!idx_copy) {
-            g.last_error = GL_OUT_OF_MEMORY;
-            return;
-        }
-        memcpy(idx_copy, idx_src, count * idx_size);
-        GSPGPU_FlushDataCache(idx_copy, count * idx_size);
+        //this may get some boost, but i really dk
+        if (is_vbo_index) {
+            C3D_DrawElements(prim, count, (type == GL_UNSIGNED_SHORT) ? C3D_UNSIGNED_SHORT : C3D_UNSIGNED_BYTE, (void*)idx_src);
+        } else {
+            void *idx_copy = linearAlloc(count * idx_size);
+            if (!idx_copy) { g.last_error = GL_OUT_OF_MEMORY; return; }
+            memcpy(idx_copy, idx_src, count * idx_size);
+            GSPGPU_FlushDataCache(idx_copy, count * idx_size);
 
-        C3D_DrawElements(prim, count,
-                         (type == GL_UNSIGNED_SHORT) ? C3D_UNSIGNED_SHORT : C3D_UNSIGNED_BYTE,
-                         idx_copy);
-        linearFree(idx_copy);
+            C3D_DrawElements(prim, count, (type == GL_UNSIGNED_SHORT) ? C3D_UNSIGNED_SHORT : C3D_UNSIGNED_BYTE, idx_copy);
+            linearFree(idx_copy);
+        }
         return;
     }
 
@@ -1608,10 +1047,7 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
         g.client_array_buf_size = req_size + 10240;
         g.client_array_buf = linearAlloc(g.client_array_buf_size);
     }
-    if (!g.client_array_buf) {
-        g.last_error = GL_OUT_OF_MEMORY;
-        return;
-    }
+    if (!g.client_array_buf) { g.last_error = GL_OUT_OF_MEMORY; return; }
 
     uint8_t *dst = (uint8_t*)g.client_array_buf;
     int p_str = g.va_vertex.stride ? g.va_vertex.stride : 12;
@@ -1619,71 +1055,36 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
     int c_str = g.va_color.stride ? g.va_color.stride : 4;
 
     for (int i = 0; i < count; i++) {
-        int src_index = (type == GL_UNSIGNED_SHORT)
-                        ? ((const uint16_t*)idx_src)[i]
-                        : ((const uint8_t*)idx_src)[i];
+        int src_index = (type == GL_UNSIGNED_SHORT) ? ((const uint16_t*)idx_src)[i] : ((const uint8_t*)idx_src)[i];
 
         if (g.va_vertex.enabled) {
-            const uint8_t *src_ptr = NULL;
-            if (g.va_vertex.vbo_id > 0 && g.vbos[g.va_vertex.vbo_id].allocated) {
-                src_ptr = (const uint8_t*)g.vbos[g.va_vertex.vbo_id].data + (uintptr_t)g.va_vertex.pointer;
-            } else {
-                src_ptr = (const uint8_t*)g.va_vertex.pointer;
-            }
+            const uint8_t *src_ptr = (g.va_vertex.vbo_id > 0 && g.vbos[g.va_vertex.vbo_id].allocated) ?
+                (const uint8_t*)g.vbos[g.va_vertex.vbo_id].data + (uintptr_t)g.va_vertex.pointer : (const uint8_t*)g.va_vertex.pointer;
             if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
                 int bytes_to_copy = g.va_vertex.size * sizeof(float);
                 memcpy(dst, src_ptr + src_index * p_str, bytes_to_copy);
-                if (bytes_to_copy == 8) {
-                    float zero = 0.0f;
-                    memcpy(dst + 8, &zero, 4);
-                }
-            } else {
-                memset(dst, 0, 12);
-            }
-        } else {
-            memset(dst, 0, 12);
-        }
+                if (bytes_to_copy == 8) { float zero = 0.0f; memcpy(dst + 8, &zero, 4); }
+            } else memset(dst, 0, 12);
+        } else memset(dst, 0, 12);
 
         if (g.va_texcoord.enabled) {
-            const uint8_t *src_ptr = NULL;
-            if (g.va_texcoord.vbo_id > 0 && g.vbos[g.va_texcoord.vbo_id].allocated) {
-                src_ptr = (const uint8_t*)g.vbos[g.va_texcoord.vbo_id].data + (uintptr_t)g.va_texcoord.pointer;
-            } else {
-                src_ptr = (const uint8_t*)g.va_texcoord.pointer;
-            }
-            if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
-                memcpy(dst + 12, src_ptr + src_index * t_str, 8);
-            } else {
-                memset(dst + 12, 0, 8);
-            }
-        } else {
-            memset(dst + 12, 0, 8);
-        }
+            const uint8_t *src_ptr = (g.va_texcoord.vbo_id > 0 && g.vbos[g.va_texcoord.vbo_id].allocated) ?
+                (const uint8_t*)g.vbos[g.va_texcoord.vbo_id].data + (uintptr_t)g.va_texcoord.pointer : (const uint8_t*)g.va_texcoord.pointer;
+            if (src_ptr && (uintptr_t)src_ptr > 0x1000) memcpy(dst + 12, src_ptr + src_index * t_str, 8);
+            else memset(dst + 12, 0, 8);
+        } else memset(dst + 12, 0, 8);
 
         if (g.va_color.enabled) {
-            const uint8_t *src_ptr = NULL;
-            if (g.va_color.vbo_id > 0 && g.vbos[g.va_color.vbo_id].allocated) {
-                src_ptr = (const uint8_t*)g.vbos[g.va_color.vbo_id].data + (uintptr_t)g.va_color.pointer;
-            } else {
-                src_ptr = (const uint8_t*)g.va_color.pointer;
-            }
+            const uint8_t *src_ptr = (g.va_color.vbo_id > 0 && g.vbos[g.va_color.vbo_id].allocated) ?
+                (const uint8_t*)g.vbos[g.va_color.vbo_id].data + (uintptr_t)g.va_color.pointer : (const uint8_t*)g.va_color.pointer;
             if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
-                if (g.va_color.size == 3) {
-                    memcpy(dst + 20, src_ptr + src_index * c_str, 3);
-                    dst[23] = 255;
-                } else {
-                    memcpy(dst + 20, src_ptr + src_index * c_str, 4);
-                }
-            } else {
-                dst[20] = dst[21] = dst[22] = dst[23] = 255;
-            }
+                if (g.va_color.size == 3) { memcpy(dst + 20, src_ptr + src_index * c_str, 3); dst[23] = 255; }
+                else memcpy(dst + 20, src_ptr + src_index * c_str, 4);
+            } else { dst[20] = dst[21] = dst[22] = dst[23] = 255; }
         } else {
-            dst[20] = (uint8_t)(g.cur_color[0] * 255.0f);
-            dst[21] = (uint8_t)(g.cur_color[1] * 255.0f);
-            dst[22] = (uint8_t)(g.cur_color[2] * 255.0f);
-            dst[23] = (uint8_t)(g.cur_color[3] * 255.0f);
+            dst[20] = (uint8_t)(g.cur_color[0] * 255.0f); dst[21] = (uint8_t)(g.cur_color[1] * 255.0f);
+            dst[22] = (uint8_t)(g.cur_color[2] * 255.0f); dst[23] = (uint8_t)(g.cur_color[3] * 255.0f);
         }
-
         dst += 24;
     }
 
@@ -1692,47 +1093,29 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
     C3D_DrawArrays(prim, 0, count);
 }
 
-
-/* ========================================================================= */
-/* Display lists (for Font rendering compatibility)                          */
-/* MCPE uses display lists only for font rendering:                          */
-/*   glGenLists -> glNewList -> glTranslatef/glColor3f -> glEndList           */
-/*   glCallLists to render text                                              */
-/* ========================================================================= */
-
 GLuint glGenLists(GLsizei range) {
     GLuint base = g.dl_next_base;
     g.dl_next_base += range;
-    if (g.dl_next_base >= GL2C3D_DISPLAY_LISTS)
-        g.dl_next_base = 1;
-    /* Init all lists in range */
+    if (g.dl_next_base >= GL2C3D_DISPLAY_LISTS) g.dl_next_base = 1;
     for (GLsizei i = 0; i < range && (base + i) < GL2C3D_DISPLAY_LISTS; i++) {
-        g.dl_store[base + i].count = 0;
-        g.dl_store[base + i].used = 1;
+        g.dl_store[base + i].count = 0; g.dl_store[base + i].used = 1;
     }
     return base;
 }
 
 void glNewList(GLuint list, GLenum mode) {
     (void)mode;
-    if (list < GL2C3D_DISPLAY_LISTS) {
-        g.dl_recording = list;
-        g.dl_store[list].count = 0;
-    }
+    if (list < GL2C3D_DISPLAY_LISTS) { g.dl_recording = list; g.dl_store[list].count = 0; }
 }
 
-void glEndList(void) {
-    g.dl_recording = -1;
-}
+void glEndList(void) { g.dl_recording = -1; }
 
-/* Record an op if we're recording, otherwise execute immediately */
 static void dl_record_translate(float x, float y, float z) {
     if (g.dl_recording >= 0 && g.dl_recording < GL2C3D_DISPLAY_LISTS) {
         DisplayList *dl = &g.dl_store[g.dl_recording];
         if (dl->count < GL2C3D_DL_MAX_OPS) {
             DLOp *op = &dl->ops[dl->count++];
-            op->type = DL_OP_TRANSLATE;
-            op->args[0] = x; op->args[1] = y; op->args[2] = z;
+            op->type = DL_OP_TRANSLATE; op->args[0] = x; op->args[1] = y; op->args[2] = z;
         }
     }
 }
@@ -1742,8 +1125,7 @@ static void dl_record_color3f(float r, float g_, float b) {
         DisplayList *dl = &g.dl_store[g.dl_recording];
         if (dl->count < GL2C3D_DL_MAX_OPS) {
             DLOp *op = &dl->ops[dl->count++];
-            op->type = DL_OP_COLOR3F;
-            op->args[0] = r; op->args[1] = g_; op->args[2] = b;
+            op->type = DL_OP_COLOR3F; op->args[0] = r; op->args[1] = g_; op->args[2] = b;
         }
     }
 }
@@ -1752,109 +1134,59 @@ static void dl_execute(GLuint list) {
     if (list >= GL2C3D_DISPLAY_LISTS) return;
     DisplayList *dl = &g.dl_store[list];
     if (!dl->used) return;
-
     for (int i = 0; i < dl->count; i++) {
         DLOp *op = &dl->ops[i];
-        switch (op->type) {
-            case DL_OP_TRANSLATE:
-                glTranslatef(op->args[0], op->args[1], op->args[2]);
-                break;
-            case DL_OP_COLOR3F:
-                glColor3f(op->args[0], op->args[1], op->args[2]);
-                break;
-            default:
-                break;
-        }
+        if (op->type == DL_OP_TRANSLATE) glTranslatef(op->args[0], op->args[1], op->args[2]);
+        else if (op->type == DL_OP_COLOR3F) glColor3f(op->args[0], op->args[1], op->args[2]);
     }
 }
 
-void glCallList(GLuint list) {
-    dl_execute(list);
-}
+void glCallList(GLuint list) { dl_execute(list); }
 
 void glCallLists(GLsizei n, GLenum type, const GLvoid *lists) {
     for (GLsizei i = 0; i < n; i++) {
-        GLuint id;
-        switch (type) {
-            case GL_UNSIGNED_INT:
-                id = ((const GLuint*)lists)[i];
-                break;
-            case GL_UNSIGNED_BYTE:
-                id = ((const GLubyte*)lists)[i];
-                break;
-            case GL_UNSIGNED_SHORT:
-                id = ((const GLushort*)lists)[i];
-                break;
-            default:
-                id = ((const GLuint*)lists)[i];
-                break;
-        }
+        GLuint id = 0;
+        if (type == GL_UNSIGNED_INT) id = ((const GLuint*)lists)[i];
+        else if (type == GL_UNSIGNED_BYTE) id = ((const GLubyte*)lists)[i];
+        else if (type == GL_UNSIGNED_SHORT) id = ((const GLushort*)lists)[i];
         dl_execute(id);
     }
 }
 
 void glDeleteLists(GLuint list, GLsizei range) {
     for (GLsizei i = 0; i < range && (list + i) < GL2C3D_DISPLAY_LISTS; i++) {
-        g.dl_store[list + i].used = 0;
-        g.dl_store[list + i].count = 0;
+        g.dl_store[list + i].used = 0; g.dl_store[list + i].count = 0;
     }
 }
 
-/* ========================================================================= */
-/* Framebuffer stubs (handled by main_ctr initialization, not by GL layer)   */
-/* ========================================================================= */
-
-void glGenFramebuffers(GLsizei n, GLuint *ids) {
-    for (GLsizei i = 0; i < n; i++) ids[i] = i + 1;
-}
+void glGenFramebuffers(GLsizei n, GLuint *ids) { for (GLsizei i = 0; i < n; i++) ids[i] = i + 1; }
 void glDeleteFramebuffers(GLsizei n, const GLuint *ids) { (void)n; (void)ids; }
 void glBindFramebuffer(GLenum target, GLuint framebuffer) {
     (void)target;
-    /* In the new architecture, the main loop calls gl2c3d_set_render_target instead */
     if (framebuffer == 0 || framebuffer == 1) {
         C3D_FrameDrawOn(g.render_target_top);
         g.current_target = g.render_target_top;
     }
 }
-void glGenRenderbuffers(GLsizei n, GLuint *ids) {
-    for (GLsizei i = 0; i < n; i++) ids[i] = i + 1;
-}
+void glGenRenderbuffers(GLsizei n, GLuint *ids) { for (GLsizei i = 0; i < n; i++) ids[i] = i + 1; }
 void glDeleteRenderbuffers(GLsizei n, const GLuint *ids) { (void)n; (void)ids; }
 void glBindRenderbuffer(GLenum target, GLuint renderbuffer) { (void)target; (void)renderbuffer; }
-void glRenderbufferStorage(GLenum target, GLenum internalformat,
-                           GLsizei width, GLsizei height) {
-    (void)target; (void)internalformat; (void)width; (void)height;
-}
-void glFramebufferRenderbuffer(GLenum target, GLenum attachment,
-                               GLenum renderbuffertarget, GLuint renderbuffer) {
-    (void)target; (void)attachment; (void)renderbuffertarget; (void)renderbuffer;
-}
-
-/* ========================================================================= */
-/* Misc stubs                                                                */
-/* ========================================================================= */
+void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height) { (void)target; (void)internalformat; (void)width; (void)height; }
+void glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) { (void)target; (void)attachment; (void)renderbuffertarget; (void)renderbuffer; }
 
 void glHint(GLenum target, GLenum mode) { (void)target; (void)mode; }
 void glFlush(void) { }
 void glFinish(void) { }
 void glPixelStorei(GLenum pname, GLint param) { (void)pname; (void)param; }
 
-void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
-                  GLenum format, GLenum type, GLvoid *pixels) {
-    (void)x; (void)y; (void)width; (void)height;
-    (void)format; (void)type;
-    /* Not supported on 3DS - zero fill */
+void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *pixels) {
+    (void)x; (void)y; (void)width; (void)height; (void)format; (void)type;
     if (pixels) memset(pixels, 0, width * height * 4);
 }
 
-
-
 void glFrustumf(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloat near_val, GLfloat far_val) {
-    C3D_Mtx frustum;
-    memset(&frustum, 0, sizeof(C3D_Mtx));
-    float n = near_val;
-    float f = far_val;
-
+    C3D_Mtx frustum; memset(&frustum, 0, sizeof(C3D_Mtx));
+    float n = near_val; float f = far_val;
     frustum.r[0].x = (2.0f * n) / (right - left);
     frustum.r[0].z = (right + left) / (right - left);
     frustum.r[1].y = (2.0f * n) / (top - bottom);
@@ -1862,67 +1194,14 @@ void glFrustumf(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloa
     frustum.r[2].z = -(f + n) / (f - n);
     frustum.r[2].w = -(2.0f * f * n) / (f - n);
     frustum.r[3].z = -1.0f;
-
-    C3D_Mtx result;
-    Mtx_Multiply(&result, cur_mtx(), &frustum);
-    Mtx_Copy(cur_mtx(), &result);
-    g.matrices_dirty = 1;
+    C3D_Mtx result; Mtx_Multiply(&result, cur_mtx(), &frustum);
+    Mtx_Copy(cur_mtx(), &result); g.matrices_dirty = 1;
 }
 
-void glFrustum(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top,
-               GLdouble near_val, GLdouble far_val) {
-    glFrustumf((GLfloat)left, (GLfloat)right, (GLfloat)bottom, (GLfloat)top,
-               (GLfloat)near_val, (GLfloat)far_val);
+void glFrustum(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble near_val, GLdouble far_val) {
+    glFrustumf((GLfloat)left, (GLfloat)right, (GLfloat)bottom, (GLfloat)top, (GLfloat)near_val, (GLfloat)far_val);
 }
 
-void glFrustumx(GLfixed left, GLfixed right, GLfixed bottom, GLfixed top,
-                GLfixed near_val, GLfixed far_val) {
-    glFrustumf(left / 65536.0f, right / 65536.0f, bottom / 65536.0f, top / 65536.0f,
-               near_val / 65536.0f, far_val / 65536.0f);
+void glFrustumx(GLfixed left, GLfixed right, GLfixed bottom, GLfixed top, GLfixed near_val, GLfixed far_val) {
+    glFrustumf(left / 65536.0f, right / 65536.0f, bottom / 65536.0f, top / 65536.0f, near_val / 65536.0f, far_val / 65536.0f);
 }
-/* ========================================================================= */
-/* Hook into display list recording for glTranslatef/glColor3f               */
-/* These are called during glNewList recording by MCPE Font code.            */
-/* The real glTranslatef/glColor4f above don't record. We need to            */
-/* intercept at a higher level. The approach: check g.dl_recording in        */
-/* the actual functions.                                                     */
-/* ========================================================================= */
-
-/* We already defined glTranslatef, glColor3f, glColor4f above.
- * Modify them to also record if in recording mode.
- * Since C doesn't allow redefining, we handle it by adding recording
- * checks directly in the implementations. Let's patch them. */
-
-/* The cleanest way: rewrite glTranslatef to check dl_recording.
- * But we already wrote it. Instead, MCPE Font.cpp calls glTranslatef2
- * which maps to glTranslatef. Our glTranslatef already does the matrix op.
- * During recording, Font.cpp calls:
- *   glNewList(id, GL_COMPILE);
- *   ... glTranslatef2(charWidth, 0, 0); glColor3f(r,g,b); ...
- *   glEndList();
- * Then later glCallLists() to execute them.
- *
- * GL_COMPILE means "don't execute, just record." We need to support this.
- * Solution: in glTranslatef/glColor3f/etc, if dl_recording >= 0, record
- * the op instead of executing it. But we must not break normal calls.
- *
- * Actually, looking at Font.cpp more carefully:
- *   glNewList(listPos + i, GL_COMPILE);
- *   ... (draws a character quad via Tesselator) ...
- *   glTranslatef2((GLfloat)charWidths[i], 0.0f, 0.0f);
- *   glEndList();
- *
- * The Tesselator::draw() inside the display list can't be recorded
- * (it's too complex). The font rendering is the main challenge.
- *
- * For now, display lists will just record translate and color ops
- * (the only ones called between glNewList/glEndList in Font.cpp).
- * The actual character drawing is done via Tesselator which doesn't
- * use display lists for the GPU submission itself.
- *
- * The practical approach: MCPE's Font code on 3DS will need to be
- * adapted to not use display lists. For now, we provide the stubs
- * so compilation works. The glCallLists for font will execute the
- * recorded translate/color ops which advances the text cursor.
- */
-
