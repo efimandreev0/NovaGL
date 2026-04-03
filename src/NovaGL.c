@@ -124,7 +124,8 @@ static struct {
 
     /* VBOs */
     VBOSlot    vbos[GL2C3D_MAX_VBOS];
-    GLuint     bound_vbo;
+    GLuint     bound_array_buffer;
+    GLuint     bound_element_array_buffer;
     int        vbo_next_id;
 
     /* Vertex array state */
@@ -346,7 +347,10 @@ static void swizzle_rgba8(uint32_t *dst, const uint32_t *src,
             uint8_t g_c = (pixel >>  8) & 0xFF;
             uint8_t b = (pixel >> 16) & 0xFF;
             uint8_t a = (pixel >> 24) & 0xFF;
-            uint32_t out_pixel = (a << 24) | (b << 16) | (g_c << 8) | r;
+            uint32_t out_pixel = ((uint32_t)r << 24) |
+                                 ((uint32_t)g_c << 16) |
+                                 ((uint32_t)b << 8) |
+                                 (uint32_t)a;
 
             /* Morton offset within the pot texture */
             int flipped_y = pot_h - 1 - y; /* GPU expects bottom-up */
@@ -1228,7 +1232,10 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
                 uint8_t gc = (pixel >>  8) & 0xFF;
                 uint8_t b = (pixel >> 16) & 0xFF;
                 uint8_t a = (pixel >> 24) & 0xFF;
-                uint32_t out_pixel = (a << 24) | (b << 16) | (gc << 8) | r;
+                uint32_t out_pixel = ((uint32_t)r << 24) |
+                                     ((uint32_t)gc << 16) |
+                                     ((uint32_t)b << 8) |
+                                     (uint32_t)a;
 
                 int fy = pot_h - 1 - dy;
                 int tile_x = dx >> 3;
@@ -1322,21 +1329,31 @@ void glDeleteBuffers(GLsizei n, const GLuint *buffers) {
             g.vbos[id].data = NULL;
             g.vbos[id].size = 0;
             g.vbos[id].allocated = 0;
-            if (g.bound_vbo == id) g.bound_vbo = 0;
+            if (g.bound_array_buffer == id) g.bound_array_buffer = 0;
+            if (g.bound_element_array_buffer == id) g.bound_element_array_buffer = 0;
         }
     }
 }
 
 void glBindBuffer(GLenum target, GLuint buffer) {
-    (void)target;
-    g.bound_vbo = buffer;
+    if (target == GL_ARRAY_BUFFER) {
+        g.bound_array_buffer = buffer;
+    } else if (target == GL_ELEMENT_ARRAY_BUFFER) {
+        g.bound_element_array_buffer = buffer;
+    }
 }
 
 void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usage) {
-    (void)target; (void)usage;
-    if (g.bound_vbo == 0 || g.bound_vbo >= GL2C3D_MAX_VBOS) return;
+    (void)usage;
+    GLuint bound = 0;
+    if (target == GL_ARRAY_BUFFER) {
+        bound = g.bound_array_buffer;
+    } else if (target == GL_ELEMENT_ARRAY_BUFFER) {
+        bound = g.bound_element_array_buffer;
+    }
+    if (bound == 0 || bound >= GL2C3D_MAX_VBOS) return;
 
-    VBOSlot *slot = &g.vbos[g.bound_vbo];
+    VBOSlot *slot = &g.vbos[bound];
 
     /* Realloc if size changed */
     if (slot->allocated && slot->size < (int)size) {
@@ -1368,25 +1385,25 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
 void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
     g.va_vertex.size = size; g.va_vertex.type = type;
     g.va_vertex.stride = stride; g.va_vertex.pointer = pointer;
-    g.va_vertex.vbo_id = g.bound_vbo; /* Сохраняем VBO! */
+    g.va_vertex.vbo_id = g.bound_array_buffer;
 }
 
 void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
     g.va_texcoord.size = size; g.va_texcoord.type = type;
     g.va_texcoord.stride = stride; g.va_texcoord.pointer = pointer;
-    g.va_texcoord.vbo_id = g.bound_vbo;
+    g.va_texcoord.vbo_id = g.bound_array_buffer;
 }
 
 void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
     g.va_color.size = size; g.va_color.type = type;
     g.va_color.stride = stride; g.va_color.pointer = pointer;
-    g.va_color.vbo_id = g.bound_vbo;
+    g.va_color.vbo_id = g.bound_array_buffer;
 }
 
 void glNormalPointer(GLenum type, GLsizei stride, const GLvoid *pointer) {
     g.va_normal.type = type; g.va_normal.stride = stride;
     g.va_normal.pointer = pointer;
-    g.va_normal.vbo_id = g.bound_vbo;
+    g.va_normal.vbo_id = g.bound_array_buffer;
 }
 
 void glEnableClientState(GLenum cap) {
@@ -1427,7 +1444,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     uint8_t *vbo_base = NULL;
 
     if (use_vbo) {
-        vbo_base = (uint8_t*)g.vbos[g.bound_vbo].data;
+        vbo_base = (uint8_t*)g.vbos[vbo_id].data;
         vbo_base += (uintptr_t)g.va_vertex.pointer;
 
         BufInfo_Add(bufInfo, vbo_base + first * 24, 24, 3, 0x210);
@@ -1495,6 +1512,11 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             /* --- 3. Цвет --- */
             if (g.va_color.enabled) {
                 const uint8_t *src_ptr = NULL;
+                if (g.va_color.vbo_id > 0 && g.vbos[g.va_color.vbo_id].allocated) {
+                    src_ptr = (const uint8_t*)g.vbos[g.va_color.vbo_id].data + (uintptr_t)g.va_color.pointer;
+                } else {
+                    src_ptr = (const uint8_t*)g.va_color.pointer;
+                }
                 if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
                     if (g.va_color.size == 3) {
                         memcpy(dst + 20, src_ptr + (first + i) * c_str, 3);
@@ -1502,12 +1524,6 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
                     } else {
                         memcpy(dst + 20, src_ptr + (first + i) * c_str, 4);
                     }
-                } else {
-                    dst[20] = dst[21] = dst[22] = dst[23] = 255;
-                }
-
-                if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
-                    memcpy(dst + 20, src_ptr + (first + i) * c_str, 4);
                 } else {
                     dst[20] = dst[21] = dst[22] = dst[23] = 255;
                 }
@@ -1537,25 +1553,143 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     }
 }
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices) {
-    /* MCPE doesn't use glDrawElements much - basic implementation */
-    if (count <= 0 || !indices) return;
+    if (count <= 0) return;
+    if (type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_BYTE) {
+        g.last_error = GL_INVALID_ENUM;
+        return;
+    }
+
+    const uint8_t *idx_src = NULL;
+    if (g.bound_element_array_buffer > 0 &&
+        g.bound_element_array_buffer < GL2C3D_MAX_VBOS &&
+        g.vbos[g.bound_element_array_buffer].allocated &&
+        g.vbos[g.bound_element_array_buffer].data) {
+        idx_src = (const uint8_t*)g.vbos[g.bound_element_array_buffer].data + (uintptr_t)indices;
+    } else {
+        idx_src = (const uint8_t*)indices;
+    }
+    if (!idx_src) return;
 
     apply_gpu_state();
 
+    C3D_BufInfo *bufInfo = C3D_GetBufInfo();
+    BufInfo_Init(bufInfo);
+
+    int idx_size = (type == GL_UNSIGNED_SHORT) ? 2 : 1;
     GPU_Primitive_t prim = gl_to_gpu_primitive(mode);
+    if (mode == GL_LINES || mode == GL_LINE_STRIP) prim = GPU_TRIANGLES;
 
-    /* C3D_DrawElements expects indices in linear memory */
-    int idx_size = (type == GL_UNSIGNED_SHORT) ? 2 : 4;
-    void *idx_copy = linearAlloc(count * idx_size);
-    if (!idx_copy) return;
-    memcpy(idx_copy, indices, count * idx_size);
-    GSPGPU_FlushDataCache(idx_copy, count * idx_size);
+    int vbo_id = g.va_vertex.vbo_id;
+    int use_vbo = (g.va_vertex.enabled && vbo_id > 0 &&
+                   vbo_id < GL2C3D_MAX_VBOS && g.vbos[vbo_id].allocated);
 
-    C3D_DrawElements(prim, count,
-                     (type == GL_UNSIGNED_SHORT) ? C3D_UNSIGNED_SHORT : C3D_UNSIGNED_BYTE,
-                     idx_copy);
+    if (use_vbo) {
+        uint8_t *vbo_base = (uint8_t*)g.vbos[vbo_id].data + (uintptr_t)g.va_vertex.pointer;
+        BufInfo_Add(bufInfo, vbo_base, 24, 3, 0x210);
 
-    linearFree(idx_copy);
+        void *idx_copy = linearAlloc(count * idx_size);
+        if (!idx_copy) {
+            g.last_error = GL_OUT_OF_MEMORY;
+            return;
+        }
+        memcpy(idx_copy, idx_src, count * idx_size);
+        GSPGPU_FlushDataCache(idx_copy, count * idx_size);
+
+        C3D_DrawElements(prim, count,
+                         (type == GL_UNSIGNED_SHORT) ? C3D_UNSIGNED_SHORT : C3D_UNSIGNED_BYTE,
+                         idx_copy);
+        linearFree(idx_copy);
+        return;
+    }
+
+    int req_size = count * 24;
+    if (req_size > g.client_array_buf_size) {
+        if (g.client_array_buf) linearFree(g.client_array_buf);
+        g.client_array_buf_size = req_size + 10240;
+        g.client_array_buf = linearAlloc(g.client_array_buf_size);
+    }
+    if (!g.client_array_buf) {
+        g.last_error = GL_OUT_OF_MEMORY;
+        return;
+    }
+
+    uint8_t *dst = (uint8_t*)g.client_array_buf;
+    int p_str = g.va_vertex.stride ? g.va_vertex.stride : 12;
+    int t_str = g.va_texcoord.stride ? g.va_texcoord.stride : 8;
+    int c_str = g.va_color.stride ? g.va_color.stride : 4;
+
+    for (int i = 0; i < count; i++) {
+        int src_index = (type == GL_UNSIGNED_SHORT)
+                        ? ((const uint16_t*)idx_src)[i]
+                        : ((const uint8_t*)idx_src)[i];
+
+        if (g.va_vertex.enabled) {
+            const uint8_t *src_ptr = NULL;
+            if (g.va_vertex.vbo_id > 0 && g.vbos[g.va_vertex.vbo_id].allocated) {
+                src_ptr = (const uint8_t*)g.vbos[g.va_vertex.vbo_id].data + (uintptr_t)g.va_vertex.pointer;
+            } else {
+                src_ptr = (const uint8_t*)g.va_vertex.pointer;
+            }
+            if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
+                int bytes_to_copy = g.va_vertex.size * sizeof(float);
+                memcpy(dst, src_ptr + src_index * p_str, bytes_to_copy);
+                if (bytes_to_copy == 8) {
+                    float zero = 0.0f;
+                    memcpy(dst + 8, &zero, 4);
+                }
+            } else {
+                memset(dst, 0, 12);
+            }
+        } else {
+            memset(dst, 0, 12);
+        }
+
+        if (g.va_texcoord.enabled) {
+            const uint8_t *src_ptr = NULL;
+            if (g.va_texcoord.vbo_id > 0 && g.vbos[g.va_texcoord.vbo_id].allocated) {
+                src_ptr = (const uint8_t*)g.vbos[g.va_texcoord.vbo_id].data + (uintptr_t)g.va_texcoord.pointer;
+            } else {
+                src_ptr = (const uint8_t*)g.va_texcoord.pointer;
+            }
+            if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
+                memcpy(dst + 12, src_ptr + src_index * t_str, 8);
+            } else {
+                memset(dst + 12, 0, 8);
+            }
+        } else {
+            memset(dst + 12, 0, 8);
+        }
+
+        if (g.va_color.enabled) {
+            const uint8_t *src_ptr = NULL;
+            if (g.va_color.vbo_id > 0 && g.vbos[g.va_color.vbo_id].allocated) {
+                src_ptr = (const uint8_t*)g.vbos[g.va_color.vbo_id].data + (uintptr_t)g.va_color.pointer;
+            } else {
+                src_ptr = (const uint8_t*)g.va_color.pointer;
+            }
+            if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
+                if (g.va_color.size == 3) {
+                    memcpy(dst + 20, src_ptr + src_index * c_str, 3);
+                    dst[23] = 255;
+                } else {
+                    memcpy(dst + 20, src_ptr + src_index * c_str, 4);
+                }
+            } else {
+                dst[20] = dst[21] = dst[22] = dst[23] = 255;
+            }
+        } else {
+            dst[20] = (uint8_t)(g.cur_color[0] * 255.0f);
+            dst[21] = (uint8_t)(g.cur_color[1] * 255.0f);
+            dst[22] = (uint8_t)(g.cur_color[2] * 255.0f);
+            dst[23] = (uint8_t)(g.cur_color[3] * 255.0f);
+        }
+
+        dst += 24;
+    }
+
+    GSPGPU_FlushDataCache(g.client_array_buf, req_size);
+    BufInfo_Add(bufInfo, g.client_array_buf, 24, 3, 0x210);
+    C3D_DrawArrays(prim, 0, count);
 }
 
 
