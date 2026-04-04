@@ -148,10 +148,15 @@ static struct {
     int        initialized;
     void      *client_array_buf;
     int        client_array_buf_size;
+    int        client_array_buf_offset;
+
     void      *index_buf;
     int        index_buf_size;
+    int        index_buf_offset;
+
     int        tev_dirty;
     int        last_tex_state;
+    GLint      tex_env_mode;
 } g;
 
 #include "../.dkp-generated/shaders/NovaGL_shader_shbin.h"
@@ -296,7 +301,35 @@ static inline uint32_t morton_interleave(uint32_t x, uint32_t y) {
     static const uint32_t ylut[8] = {0x00,0x02,0x08,0x0a,0x20,0x22,0x28,0x2a};
     return xlut[x & 7] | ylut[y & 7];
 }
-
+static void swizzle_16bit(uint16_t *dst, const uint16_t *src, int src_w, int src_h, int pot_w, int pot_h) {
+    for (int y = 0; y < src_h; y++) {
+        for (int x = 0; x < src_w; x++) {
+            int flipped_y = pot_h - 1 - y;
+            int tile_x = x >> 3;
+            int tile_y = flipped_y >> 3;
+            int lx = x & 7;
+            int ly = flipped_y & 7;
+            int tiles_per_row = pot_w >> 3;
+            int tile_offset = (tile_y * tiles_per_row + tile_x) * 64;
+            int pixel_offset = tile_offset + morton_interleave(lx, ly);
+            dst[pixel_offset] = src[y * src_w + x];
+        }
+    }
+    // Заполняем пустоты (padding) нулями (прозрачным цветом)
+    for (int y = src_h; y < pot_h; y++) {
+        for (int x = 0; x < pot_w; x++) {
+            int flipped_y = pot_h - 1 - y;
+            int tile_x = x >> 3;
+            int tile_y = flipped_y >> 3;
+            int lx = x & 7;
+            int ly = flipped_y & 7;
+            int tiles_per_row = pot_w >> 3;
+            int tile_offset = (tile_y * tiles_per_row + tile_x) * 64;
+            int pixel_offset = tile_offset + morton_interleave(lx, ly);
+            dst[pixel_offset] = 0;
+        }
+    }
+}
 static void swizzle_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src_h, int pot_w, int pot_h) {
     for (int y = 0; y < src_h; y++) {
         for (int x = 0; x < src_w; x++) {
@@ -448,7 +481,11 @@ void nova_fini(void) {
     g.initialized = 0;
 }
 
-void nova_frame_begin(void) { C3D_FrameBegin(C3D_FRAME_SYNCDRAW); }
+void nova_frame_begin(void) {
+    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    g.client_array_buf_offset = 0;
+    g.index_buf_offset = 0;
+}
 void nova_frame_end(void) { C3D_FrameEnd(0); }
 void nova_set_render_target(int is_right_eye) {
     C3D_FrameDrawOn(is_right_eye ? g.render_target_bot : g.render_target_top);
@@ -458,9 +495,6 @@ void nova_set_render_target(int is_right_eye) {
 static void apply_gpu_state(void) {
     if (g.matrices_dirty) {
         if (g.uLoc_projection >= 0) {
-            // Remap z from OpenGL [-1,+1] to PICA200 [-0.9999, -0.0001]:
-            // new_z = old_z * 0.4999 - 0.5
-            // Both boundaries safely inside PICA200 clip range [-1, 0]
             C3D_Mtx adj_proj = g.proj_stack[g.proj_sp];
             adj_proj.r[2].x = adj_proj.r[2].x * 0.4999f - adj_proj.r[3].x * 0.5f;
             adj_proj.r[2].y = adj_proj.r[2].y * 0.4999f - adj_proj.r[3].y * 0.5f;
@@ -488,7 +522,7 @@ static void apply_gpu_state(void) {
     }
 
     GPU_WRITEMASK writemask = GPU_WRITE_COLOR;
-    if (g.depth_mask) writemask |= GPU_WRITE_DEPTH;
+    if (g.depth_mask && g.depth_test_enabled) writemask |= GPU_WRITE_DEPTH;
     C3D_DepthTest(g.depth_test_enabled, gl_to_gpu_testfunc(g.depth_func), writemask);
 
     C3D_AlphaTest(g.alpha_test_enabled, gl_to_gpu_testfunc(g.alpha_func), (u8)(g.alpha_ref * 255.0f));
@@ -540,8 +574,27 @@ static void apply_gpu_state(void) {
         C3D_TexEnv *env0 = C3D_GetTexEnv(0);
         C3D_TexEnvInit(env0);
         if (current_tex_state) {
-            C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0);
-            C3D_TexEnvFunc(env0, C3D_Both, GPU_MODULATE);
+            switch (g.tex_env_mode) {
+                case GL_REPLACE:
+                    C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+                    C3D_TexEnvFunc(env0, C3D_Both, GPU_REPLACE);
+                    break;
+                case GL_DECAL:
+                    C3D_TexEnvSrc(env0, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_TEXTURE0);
+                    C3D_TexEnvFunc(env0, C3D_RGB, GPU_INTERPOLATE);
+                    C3D_TexEnvSrc(env0, C3D_Alpha, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+                    C3D_TexEnvFunc(env0, C3D_Alpha, GPU_REPLACE);
+                    break;
+                case GL_ADD:
+                    C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0);
+                    C3D_TexEnvFunc(env0, C3D_Both, GPU_ADD);
+                    break;
+                case GL_MODULATE:
+                default:
+                    C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0);
+                    C3D_TexEnvFunc(env0, C3D_Both, GPU_MODULATE);
+                    break;
+            }
         } else {
             C3D_TexEnvSrc(env0, C3D_Both, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
             C3D_TexEnvFunc(env0, C3D_Both, GPU_REPLACE);
@@ -1044,7 +1097,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     C3D_BufInfo *bufInfo = C3D_GetBufInfo();
     BufInfo_Init(bufInfo);
 
-    // VBO fast path: if all arrays come from the same VBO with matching {float3, float2, ubyte4} layout
+    // VBO fast path
     if (g.va_vertex.enabled && g.va_vertex.vbo_id > 0 &&
         g.va_vertex.vbo_id < GL2C3D_MAX_VBOS && g.vbos[g.va_vertex.vbo_id].allocated &&
         g.va_vertex.size == 3 && g.va_vertex.type == GL_FLOAT && g.va_vertex.stride == 24 &&
@@ -1065,20 +1118,22 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             int num_quads = count / 4;
             int idx_count = num_quads * 6;
             int idx_bytes = idx_count * 2;
-            if (idx_bytes > g.index_buf_size) {
-                if (g.index_buf) linearFree(g.index_buf);
-                g.index_buf_size = idx_bytes + 4096;
-                g.index_buf = linearAlloc(g.index_buf_size);
+
+            g.index_buf_offset = (g.index_buf_offset + 7) & ~7;
+            if (g.index_buf_offset + idx_bytes > g.index_buf_size) {
+                C3D_FrameSplit(0);
+                g.index_buf_offset = 0;
             }
-            if (!g.index_buf) { g.last_error = GL_OUT_OF_MEMORY; return; }
-            uint16_t *idx = (uint16_t*)g.index_buf;
+
+            uint16_t *idx = (uint16_t*)((uint8_t*)g.index_buf + g.index_buf_offset);
             for (int q = 0; q < num_quads; q++) {
                 uint16_t base = q * 4;
                 idx[q*6+0] = base+0; idx[q*6+1] = base+1; idx[q*6+2] = base+2;
                 idx[q*6+3] = base+0; idx[q*6+4] = base+2; idx[q*6+5] = base+3;
             }
-            GSPGPU_FlushDataCache(g.index_buf, idx_bytes);
-            C3D_DrawElements(GPU_TRIANGLES, idx_count, C3D_UNSIGNED_SHORT, g.index_buf);
+            GSPGPU_FlushDataCache(idx, idx_bytes);
+            C3D_DrawElements(GPU_TRIANGLES, idx_count, C3D_UNSIGNED_SHORT, idx);
+            g.index_buf_offset += idx_bytes;
         } else {
             C3D_DrawArrays(gl_to_gpu_primitive(mode), 0, count);
         }
@@ -1088,14 +1143,15 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     // Slow path: assemble interleaved vertices from separate arrays
     {
         int req_size = count * 24;
-        if (req_size > g.client_array_buf_size) {
-            if (g.client_array_buf) linearFree(g.client_array_buf);
-            g.client_array_buf_size = req_size + 10240;
-            g.client_array_buf = linearAlloc(g.client_array_buf_size);
-        }
-        if (!g.client_array_buf) return;
 
-        uint8_t *dst = (uint8_t*)g.client_array_buf;
+        g.client_array_buf_offset = (g.client_array_buf_offset + 7) & ~7;
+        if (g.client_array_buf_offset + req_size > g.client_array_buf_size) {
+            C3D_FrameSplit(0);
+            g.client_array_buf_offset = 0;
+        }
+
+        uint8_t *dst = (uint8_t*)g.client_array_buf + g.client_array_buf_offset;
+        uint8_t *dst_start = dst;
         int p_str = calc_stride(g.va_vertex.stride, g.va_vertex.size, g.va_vertex.type);
         int t_str = calc_stride(g.va_texcoord.stride, g.va_texcoord.size, g.va_texcoord.type);
         int c_str = calc_stride(g.va_color.stride, g.va_color.size, g.va_color.type);
@@ -1145,35 +1201,37 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             }
             dst += 24;
         }
-        GSPGPU_FlushDataCache(g.client_array_buf, req_size);
-        BufInfo_Add(bufInfo, g.client_array_buf, 24, 3, 0x210);
+        GSPGPU_FlushDataCache(dst_start, req_size);
+        BufInfo_Add(bufInfo, dst_start, 24, 3, 0x210);
+        g.client_array_buf_offset += req_size;
     }
 
     if (mode == GL_QUADS) {
         int num_quads = count / 4;
         int idx_count = num_quads * 6;
         int idx_bytes = idx_count * 2;
-        if (idx_bytes > g.index_buf_size) {
-            if (g.index_buf) linearFree(g.index_buf);
-            g.index_buf_size = idx_bytes + 4096;
-            g.index_buf = linearAlloc(g.index_buf_size);
+
+        g.index_buf_offset = (g.index_buf_offset + 7) & ~7;
+        if (g.index_buf_offset + idx_bytes > g.index_buf_size) {
+            C3D_FrameSplit(0);
+            g.index_buf_offset = 0;
         }
-        if (!g.index_buf) { g.last_error = GL_OUT_OF_MEMORY; return; }
-        uint16_t *idx = (uint16_t*)g.index_buf;
+
+        uint16_t *idx = (uint16_t*)((uint8_t*)g.index_buf + g.index_buf_offset);
         for (int q = 0; q < num_quads; q++) {
             uint16_t base = q * 4;
             idx[q*6+0] = base+0; idx[q*6+1] = base+1; idx[q*6+2] = base+2;
             idx[q*6+3] = base+0; idx[q*6+4] = base+2; idx[q*6+5] = base+3;
         }
-        GSPGPU_FlushDataCache(g.index_buf, idx_bytes);
-        C3D_DrawElements(GPU_TRIANGLES, idx_count, C3D_UNSIGNED_SHORT, g.index_buf);
+        GSPGPU_FlushDataCache(idx, idx_bytes);
+        C3D_DrawElements(GPU_TRIANGLES, idx_count, C3D_UNSIGNED_SHORT, idx);
+        g.index_buf_offset += idx_bytes;
     } else {
         GPU_Primitive_t prim = gl_to_gpu_primitive(mode);
         if (mode == GL_LINES || mode == GL_LINE_STRIP) prim = GPU_TRIANGLES;
         C3D_DrawArrays(prim, 0, count);
     }
 }
-
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices) {
     if (count <= 0) return;
     if (type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_BYTE) { g.last_error = GL_INVALID_ENUM; return; }
@@ -1195,7 +1253,7 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
     GPU_Primitive_t prim = gl_to_gpu_primitive(mode);
     if (mode == GL_LINES || mode == GL_LINE_STRIP) prim = GPU_TRIANGLES;
 
-    // VBO fast path for indexed drawing with matching layout
+    // VBO fast path
     if (g.va_vertex.enabled && g.va_vertex.vbo_id > 0 &&
         g.va_vertex.vbo_id < GL2C3D_MAX_VBOS && g.vbos[g.va_vertex.vbo_id].allocated &&
         g.va_vertex.size == 3 && g.va_vertex.type == GL_FLOAT && g.va_vertex.stride == 24 &&
@@ -1211,35 +1269,37 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
         GSPGPU_FlushDataCache(vbo->data, vbo->size);
         BufInfo_Add(bufInfo, vbo->data, 24, 3, 0x210);
 
-        // Copy indices to linear memory
         int idx_bytes = count * 2;
-        if (idx_bytes > g.index_buf_size) {
-            if (g.index_buf) linearFree(g.index_buf);
-            g.index_buf_size = idx_bytes + 4096;
-            g.index_buf = linearAlloc(g.index_buf_size);
+
+        g.index_buf_offset = (g.index_buf_offset + 7) & ~7;
+        if (g.index_buf_offset + idx_bytes > g.index_buf_size) {
+            C3D_FrameSplit(0);
+            g.index_buf_offset = 0;
         }
-        if (!g.index_buf) { g.last_error = GL_OUT_OF_MEMORY; return; }
-        uint16_t *dst_idx = (uint16_t*)g.index_buf;
+
+        uint16_t *dst_idx = (uint16_t*)((uint8_t*)g.index_buf + g.index_buf_offset);
         if (type == GL_UNSIGNED_SHORT) {
             memcpy(dst_idx, idx_src, count * 2);
         } else {
             for (int i = 0; i < count; i++) dst_idx[i] = idx_src[i];
         }
-        GSPGPU_FlushDataCache(g.index_buf, idx_bytes);
-        C3D_DrawElements(prim, count, C3D_UNSIGNED_SHORT, g.index_buf);
+        GSPGPU_FlushDataCache(dst_idx, idx_bytes);
+        C3D_DrawElements(prim, count, C3D_UNSIGNED_SHORT, dst_idx);
+        g.index_buf_offset += idx_bytes;
         return;
     }
 
     // Slow path
     int req_size = count * 24;
-    if (req_size > g.client_array_buf_size) {
-        if (g.client_array_buf) linearFree(g.client_array_buf);
-        g.client_array_buf_size = req_size + 10240;
-        g.client_array_buf = linearAlloc(g.client_array_buf_size);
-    }
-    if (!g.client_array_buf) { g.last_error = GL_OUT_OF_MEMORY; return; }
 
-    uint8_t *dst = (uint8_t*)g.client_array_buf;
+    g.client_array_buf_offset = (g.client_array_buf_offset + 7) & ~7;
+    if (g.client_array_buf_offset + req_size > g.client_array_buf_size) {
+        C3D_FrameSplit(0);
+        g.client_array_buf_offset = 0;
+    }
+
+    uint8_t *dst = (uint8_t*)g.client_array_buf + g.client_array_buf_offset;
+    uint8_t *dst_start = dst;
     int p_str = calc_stride(g.va_vertex.stride, g.va_vertex.size, g.va_vertex.type);
     int t_str = calc_stride(g.va_texcoord.stride, g.va_texcoord.size, g.va_texcoord.type);
     int c_str = calc_stride(g.va_color.stride, g.va_color.size, g.va_color.type);
@@ -1292,32 +1352,34 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
         dst += 24;
     }
 
-    GSPGPU_FlushDataCache(g.client_array_buf, req_size);
-    BufInfo_Add(bufInfo, g.client_array_buf, 24, 3, 0x210);
+    GSPGPU_FlushDataCache(dst_start, req_size);
+    BufInfo_Add(bufInfo, dst_start, 24, 3, 0x210);
+    g.client_array_buf_offset += req_size;
 
     if (mode == GL_QUADS) {
         int num_quads = count / 4;
         int idx_count = num_quads * 6;
         int idx_bytes = idx_count * 2;
-        if (idx_bytes > g.index_buf_size) {
-            if (g.index_buf) linearFree(g.index_buf);
-            g.index_buf_size = idx_bytes + 4096;
-            g.index_buf = linearAlloc(g.index_buf_size);
+
+        g.index_buf_offset = (g.index_buf_offset + 7) & ~7;
+        if (g.index_buf_offset + idx_bytes > g.index_buf_size) {
+            C3D_FrameSplit(0);
+            g.index_buf_offset = 0;
         }
-        if (!g.index_buf) { g.last_error = GL_OUT_OF_MEMORY; return; }
-        uint16_t *idx = (uint16_t*)g.index_buf;
+
+        uint16_t *idx = (uint16_t*)((uint8_t*)g.index_buf + g.index_buf_offset);
         for (int q = 0; q < num_quads; q++) {
             uint16_t base = q * 4;
             idx[q*6+0] = base+0; idx[q*6+1] = base+1; idx[q*6+2] = base+2;
             idx[q*6+3] = base+0; idx[q*6+4] = base+2; idx[q*6+5] = base+3;
         }
-        GSPGPU_FlushDataCache(g.index_buf, idx_bytes);
-        C3D_DrawElements(GPU_TRIANGLES, idx_count, C3D_UNSIGNED_SHORT, g.index_buf);
+        GSPGPU_FlushDataCache(idx, idx_bytes);
+        C3D_DrawElements(GPU_TRIANGLES, idx_count, C3D_UNSIGNED_SHORT, idx);
+        g.index_buf_offset += idx_bytes;
     } else {
         C3D_DrawArrays(prim, 0, count);
     }
 }
-
 GLuint glGenLists(GLsizei range) {
     GLuint base = g.dl_next_base;
     g.dl_next_base += range;
@@ -1448,35 +1510,13 @@ void glMultiTexCoord4f(GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q
 void glTexEnvi(GLenum target, GLenum pname, GLint param) {
     (void)target;
     if (pname == GL_TEXTURE_ENV_MODE) {
-        g.tev_dirty = 1;
-        C3D_TexEnv *env0 = C3D_GetTexEnv(0);
-        C3D_TexEnvInit(env0);
-        switch (param) {
-            case GL_MODULATE:
-                C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0);
-                C3D_TexEnvFunc(env0, C3D_Both, GPU_MODULATE);
-                break;
-            case GL_REPLACE:
-                C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
-                C3D_TexEnvFunc(env0, C3D_Both, GPU_REPLACE);
-                break;
-            case GL_DECAL:
-                C3D_TexEnvSrc(env0, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_TEXTURE0);
-                C3D_TexEnvFunc(env0, C3D_RGB, GPU_INTERPOLATE);
-                C3D_TexEnvSrc(env0, C3D_Alpha, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
-                C3D_TexEnvFunc(env0, C3D_Alpha, GPU_REPLACE);
-                break;
-            case GL_ADD:
-                C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0);
-                C3D_TexEnvFunc(env0, C3D_Both, GPU_ADD);
-                break;
-            default:
-                C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0);
-                C3D_TexEnvFunc(env0, C3D_Both, GPU_MODULATE);
-                break;
+        if (g.tex_env_mode != param) {
+            g.tex_env_mode = param;
+            g.tev_dirty = 1;
         }
     }
 }
+
 
 void glTexEnvf(GLenum target, GLenum pname, GLfloat param) {
     glTexEnvi(target, pname, (GLint)param);
