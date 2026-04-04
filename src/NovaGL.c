@@ -570,9 +570,8 @@ static void apply_gpu_state(void) {
     }
 
     if (g.uLoc_fogparams >= 0) {
-        float range = g.fog_end - g.fog_start;
-        if (range == 0.0f) range = 1.0f;
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams, g.fog_start, g.fog_end, 1.0f / range, g.fog_enabled ? 1.0f : 0.0f);
+        float end_val = g.fog_end > 0.001f ? g.fog_end : 0.001f;
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams, 1.0f / end_val, 0.0f, 0.0f, 0.0f);
     }
 
     GPU_WRITEMASK writemask = GPU_WRITE_COLOR;
@@ -602,25 +601,52 @@ static void apply_gpu_state(void) {
         C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
     }
 
-    if (g.fog_enabled && g.fog_dirty) {
-        u32 fc = ((u8)(g.fog_color[0]*255) << 24) | ((u8)(g.fog_color[1]*255) << 16) | ((u8)(g.fog_color[2]*255) << 8) | ((u8)(g.fog_color[3]*255));
-        C3D_FogColor(fc);
-        if (g.fog_mode == GL_LINEAR) {
-            float range = g.fog_end - g.fog_start;
-            if (range < 0.001f) range = 0.001f;
-            for (int i = 0; i < 128; i++) {
-                float depth = (float)i / 127.0f * g.fog_end;
-                float f = (depth <= g.fog_start) ? 0.0f : (depth >= g.fog_end) ? 1.0f : (depth - g.fog_start) / range;
-                g.fog_lut.data[i] = (u32)(clampf(f, 0.0f, 1.0f) * 0x7FF) & 0xFFF;
+    if (g.fog_dirty) {
+        float data[256];
+        float range = g.fog_end - g.fog_start;
+        if (range < 0.001f) range = 0.001f;
+
+        for (int i = 0; i <= 128; i++) {
+            float x = (float)i / 128.0f; // Нормализованная координата (0.0 -> 1.0)
+            float depth = x * g.fog_end; // Физическая дистанция
+            float f = 1.0f;              // 1.0 = нет тумана, 0.0 = сплошной туман
+
+            // Математика тумана по стандарту OpenGL
+            if (g.fog_mode == GL_LINEAR) {
+                f = (g.fog_end - depth) / range;
+            } else if (g.fog_mode == GL_EXP) {
+                f = expf(-g.fog_density * depth);
+            } else { // GL_EXP2
+                f = expf(-(g.fog_density * depth) * (g.fog_density * depth));
             }
+
+            f = clampf(f, 0.0f, 1.0f);
+
+            // Сохраняем значения и разницу (как того требует Citro3D)
+            if (i < 128)
+                data[i] = f;
+            if (i > 0)
+                data[i + 127] = f - data[i - 1];
         }
-        else if (g.fog_mode == GL_EXP) FogLut_Exp(&g.fog_lut, g.fog_density, 0.0f, g.fog_end, 1.0f);
-        else FogLut_Exp(&g.fog_lut, g.fog_density * g.fog_density, 0.0f, g.fog_end, 2.0f);
-        C3D_FogGasMode(true, false, false);
+
+        // Запекаем массив через родную функцию Citro3D
+        FogLut_FromArray(&g.fog_lut, data);
+        g.fog_dirty = 0; // Сбрасываем флаг обновления
+    }
+
+    // 3. Аппаратно включаем или выключаем туман в текущем кадре
+    if (g.fog_enabled) {
+        u32 fc = ((u8)(g.fog_color[0]*255) << 24) |
+                 ((u8)(g.fog_color[1]*255) << 16) |
+                 ((u8)(g.fog_color[2]*255) << 8)  |
+                 ((u8)(g.fog_color[3]*255));
+
+        C3D_FogColor(fc);
         C3D_FogLutBind(&g.fog_lut);
-        g.fog_dirty = 0;
-    } else if (!g.fog_enabled) {
-        C3D_FogGasMode(false, false, false);
+        C3D_FogGasMode(GPU_FOG, GPU_PLAIN_DENSITY, false);
+    } else {
+        C3D_FogLutBind(NULL);
+        C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
     }
 
     int current_tex_state = (g.texture_2d_enabled && g.bound_texture > 0);
@@ -707,7 +733,6 @@ void glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
 void glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
     g.scissor_x = x; g.scissor_y = y; g.scissor_w = width; g.scissor_h = height;
 }
-
 void glEnable(GLenum cap) {
     switch (cap) {
         case GL_DEPTH_TEST:    g.depth_test_enabled = 1; break;
@@ -716,7 +741,10 @@ void glEnable(GLenum cap) {
         case GL_CULL_FACE:     g.cull_face_enabled = 1; break;
         case GL_TEXTURE_2D:    g.tev_dirty = 1; g.texture_2d_enabled = 1; break;
         case GL_SCISSOR_TEST:  g.scissor_test_enabled = 1; break;
-        case GL_FOG:           g.fog_enabled = 1; g.fog_dirty = 1; break;
+
+            //TODO: fix this fcking fog.
+        case GL_FOG:           /*g.fog_enabled = 1; g.fog_dirty = 1;*/ break;
+
         case GL_POLYGON_OFFSET_FILL:
             g.polygon_offset_fill_enabled = 1;
             apply_depth_map();
@@ -733,7 +761,9 @@ void glDisable(GLenum cap) {
         case GL_CULL_FACE:     g.cull_face_enabled = 0; break;
         case GL_TEXTURE_2D:    g.tev_dirty = 1; g.texture_2d_enabled = 0; break;
         case GL_SCISSOR_TEST:  g.scissor_test_enabled = 0; break;
+
         case GL_FOG:           g.fog_enabled = 0; break;
+
         case GL_POLYGON_OFFSET_FILL:
             g.polygon_offset_fill_enabled = 0;
             apply_depth_map();
@@ -741,7 +771,6 @@ void glDisable(GLenum cap) {
         default: break;
     }
 }
-
 void glDepthFunc(GLenum func) { g.depth_func = func; }
 void glDepthMask(GLboolean flag) { g.depth_mask = flag; }
 
