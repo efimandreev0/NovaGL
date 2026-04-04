@@ -194,6 +194,20 @@ typedef float           GLdouble;
 #define GL_COMPILE                  0x1300
 #define GL_COMPILE_AND_EXECUTE      0x1301
 
+#define GL_TEXTURE_ENV              0x2300
+#define GL_TEXTURE_ENV_MODE         0x2200
+#define GL_TEXTURE_ENV_COLOR        0x2201
+#define GL_MODULATE                 0x2100
+#define GL_DECAL                    0x2101
+#define GL_ADD                      0x0104
+#define GL_REPLACE                  0x1E01
+
+#define GL_TEXTURE0                 0x84C0
+#define GL_TEXTURE1                 0x84C1
+#define GL_TEXTURE2                 0x84C2
+#define GL_TEXTURE3                 0x84C3
+#define GL_MAX_TEXTURE_UNITS        0x84E2
+
 /* ========================================================================= */
 /* API Declarations                                                          */
 /* ========================================================================= */
@@ -220,6 +234,8 @@ void glCullFace(GLenum mode);
 void glFrontFace(GLenum mode);
 void glColor4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a);
 void glColor3f(GLfloat r, GLfloat g, GLfloat b);
+void glColor4ub(GLubyte r, GLubyte g, GLubyte b, GLubyte a);
+void glColor3ub(GLubyte r, GLubyte g, GLubyte b);
 void glColorMask(GLboolean r, GLboolean g, GLboolean b, GLboolean a);
 void glShadeModel(GLenum mode);
 void glMatrixMode(GLenum mode);
@@ -243,6 +259,7 @@ void glGenBuffers(GLsizei n, GLuint *buffers);
 void glDeleteBuffers(GLsizei n, const GLuint *buffers);
 void glBindBuffer(GLenum target, GLuint buffer);
 void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usage);
+void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvoid *data);
 void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer);
 void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer);
 void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer);
@@ -283,6 +300,14 @@ void glDeleteLists(GLuint list, GLsizei range);
 void glFrustumf(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloat near_val, GLfloat far_val);
 void glFrustum(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble near_val, GLdouble far_val);
 void glFrustumx(GLfixed left, GLfixed right, GLfixed bottom, GLfixed top, GLfixed near_val, GLfixed far_val);
+void glActiveTexture(GLenum texture);
+void glClientActiveTexture(GLenum texture);
+void glMultiTexCoord4f(GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q);
+void glTexEnvi(GLenum target, GLenum pname, GLint param);
+void glTexEnvf(GLenum target, GLenum pname, GLfloat param);
+void glTexEnvfv(GLenum target, GLenum pname, const GLfloat *params);
+GLboolean glIsEnabled(GLenum cap);
+GLboolean glIsTexture(GLuint texture);
 
 #ifdef __cplusplus
 }

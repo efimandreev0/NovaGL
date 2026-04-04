@@ -30,3 +30,19 @@ target_link_libraries(NovaGL
         m
         shaders
 )
+
+# Auto-install to portlibs after build
+if(DEFINED ENV{DEVKITPRO})
+    set(PORTLIBS_DIR "$ENV{DEVKITPRO}/portlibs/3ds")
+    add_custom_command(TARGET NovaGL POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${PORTLIBS_DIR}/include"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${PORTLIBS_DIR}/lib"
+            COMMAND ${CMAKE_COMMAND} -E copy
+                "${CMAKE_CURRENT_SOURCE_DIR}/../include/NovaGL.h"
+                "${PORTLIBS_DIR}/include/NovaGL.h"
+            COMMAND ${CMAKE_COMMAND} -E copy
+                "$<TARGET_FILE:NovaGL>"
+                "${PORTLIBS_DIR}/lib/libNovaGL.a"
+            COMMENT "Installing NovaGL to ${PORTLIBS_DIR}"
+    )
+endif()

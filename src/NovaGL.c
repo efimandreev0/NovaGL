@@ -14,7 +14,7 @@
 /* Configuration                                                             */
 /* ========================================================================= */
 #define GL2C3D_MAX_TEXTURES     2048
-#define GL2C3D_MAX_VBOS         16384
+#define GL2C3D_INITIAL_VBOS     4096
 #define GL2C3D_MATRIX_STACK     32
 #define GL2C3D_DISPLAY_LISTS    512
 #define GL2C3D_DL_MAX_OPS       64
@@ -95,7 +95,8 @@ static struct {
     int        tex_next_id;
     int        texture_2d_enabled;
 
-    VBOSlot    vbos[GL2C3D_MAX_VBOS];
+    VBOSlot   *vbos;
+    int        vbo_capacity;
     GLuint     bound_array_buffer;
     GLuint     bound_element_array_buffer;
     int        vbo_next_id;
@@ -148,6 +149,8 @@ static struct {
     int        initialized;
     void      *client_array_buf;
     int        client_array_buf_size;
+    void      *index_buf;
+    int        index_buf_size;
     int        tev_dirty;
     int        last_tex_state;
 } g;
@@ -163,6 +166,18 @@ static struct {
 
 static void dl_record_translate(float x, float y, float z);
 static void dl_record_color3f(float r, float g_, float b);
+
+static int vbo_ensure_capacity(GLuint id) {
+    if ((int)id < g.vbo_capacity) return 1;
+    int new_cap = g.vbo_capacity ? g.vbo_capacity : GL2C3D_INITIAL_VBOS;
+    while (new_cap <= (int)id) new_cap *= 2;
+    VBOSlot *new_vbos = (VBOSlot*)realloc(g.vbos, new_cap * sizeof(VBOSlot));
+    if (!new_vbos) return 0;
+    memset(new_vbos + g.vbo_capacity, 0, (new_cap - g.vbo_capacity) * sizeof(VBOSlot));
+    g.vbos = new_vbos;
+    g.vbo_capacity = new_cap;
+    return 1;
+}
 
 static GPU_TESTFUNC gl_to_gpu_testfunc(GLenum func) {
     switch (func) {
@@ -192,6 +207,36 @@ static GPU_BLENDFACTOR gl_to_gpu_blendfactor(GLenum factor) {
         case GL_ONE_MINUS_DST_ALPHA: return GPU_ONE_MINUS_DST_ALPHA;
         case GL_SRC_ALPHA_SATURATE:  return GPU_SRC_ALPHA_SATURATE;
         default:                     return GPU_ONE;
+    }
+}
+
+static int gl_type_size(GLenum type) {
+    switch (type) {
+        case GL_BYTE:           case GL_UNSIGNED_BYTE:  return 1;
+        case GL_SHORT:          case GL_UNSIGNED_SHORT: return 2;
+        case GL_FLOAT:          case GL_INT:            case GL_UNSIGNED_INT: return 4;
+        default:                return 4;
+    }
+}
+
+static int calc_stride(GLsizei stride, GLint size, GLenum type) {
+    return stride ? stride : size * gl_type_size(type);
+}
+
+static void read_vertex_attrib_float(float *dst, const uint8_t *src, GLint size, GLenum type) {
+    switch (type) {
+        case GL_FLOAT:
+            memcpy(dst, src, size * sizeof(float));
+            break;
+        case GL_SHORT:
+            for (int j = 0; j < size; j++) dst[j] = (float)((const int16_t*)src)[j];
+            break;
+        case GL_BYTE:
+            for (int j = 0; j < size; j++) dst[j] = (float)((const int8_t*)src)[j];
+            break;
+        default:
+            memcpy(dst, src, size * sizeof(float));
+            break;
     }
 }
 
@@ -345,10 +390,12 @@ void nova_init(void) {
     AttrInfo_AddLoader(&g.attr_info, 2, GPU_UNSIGNED_BYTE, 4);
     C3D_SetAttrInfo(&g.attr_info);
 
-    C3D_DepthMap(true, 0.5f, 0.5f);
+    C3D_DepthMap(false, 1.0f, 1.0f);
 
     g.client_array_buf_size = 2 * 1024 * 1024;
     g.client_array_buf = linearAlloc(g.client_array_buf_size);
+    g.index_buf_size = 256 * 1024;
+    g.index_buf = linearAlloc(g.index_buf_size);
 
     g.matrix_mode = GL_MODELVIEW;
     Mtx_Identity(&g.proj_stack[0]);
@@ -383,10 +430,12 @@ void nova_init(void) {
     g.color_mask_r = g.color_mask_g = g.color_mask_b = g.color_mask_a = GL_TRUE;
 
     g.tex_next_id = 1;
+    g.vbos = (VBOSlot*)calloc(GL2C3D_INITIAL_VBOS, sizeof(VBOSlot));
+    g.vbo_capacity = GL2C3D_INITIAL_VBOS;
     g.vbo_next_id = 1;
     g.dl_recording = -1;
     g.dl_next_base = 1;
-    g.texture_2d_enabled = 1;
+    g.texture_2d_enabled = 0;
     g.tev_dirty = 1;
     g.initialized = 1;
 }
@@ -394,12 +443,14 @@ void nova_init(void) {
 void nova_fini(void) {
     if (!g.initialized) return;
     if (g.client_array_buf) linearFree(g.client_array_buf);
+    if (g.index_buf) linearFree(g.index_buf);
     for (int i = 0; i < GL2C3D_MAX_TEXTURES; i++) {
         if (g.textures[i].allocated) C3D_TexDelete(&g.textures[i].tex);
     }
-    for (int i = 0; i < GL2C3D_MAX_VBOS; i++) {
+    for (int i = 0; i < g.vbo_capacity; i++) {
         if (g.vbos[i].allocated && g.vbos[i].data) linearFree(g.vbos[i].data);
     }
+    free(g.vbos); g.vbos = NULL; g.vbo_capacity = 0;
     if (g.shader_dvlb) {
         shaderProgramFree(&g.shader_program);
         DVLB_Free(g.shader_dvlb);
@@ -420,13 +471,21 @@ void nova_set_render_target(int is_right_eye) {
 static void apply_gpu_state(void) {
     if (g.matrices_dirty) {
         if (g.uLoc_projection >= 0) {
+            // Remap z from OpenGL [-1,+1] to PICA200 [-1,0]:
+            // new_row2 = row2 * 0.5 - row3 * 0.5
+            C3D_Mtx adj_proj = g.proj_stack[g.proj_sp];
+            adj_proj.r[2].x = adj_proj.r[2].x * 0.5f - adj_proj.r[3].x * 0.5f;
+            adj_proj.r[2].y = adj_proj.r[2].y * 0.5f - adj_proj.r[3].y * 0.5f;
+            adj_proj.r[2].z = adj_proj.r[2].z * 0.5f - adj_proj.r[3].z * 0.5f;
+            adj_proj.r[2].w = adj_proj.r[2].w * 0.5f - adj_proj.r[3].w * 0.5f;
+
             C3D_Mtx tilt;
             Mtx_Identity(&tilt);
             tilt.r[0].x =  0.0f; tilt.r[0].y = 1.0f;
             tilt.r[1].x = -1.0f; tilt.r[1].y = 0.0f;
 
             C3D_Mtx final_proj;
-            Mtx_Multiply(&final_proj, &tilt, &g.proj_stack[g.proj_sp]);
+            Mtx_Multiply(&final_proj, &tilt, &adj_proj);
             C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection, &final_proj);
         }
         if (g.uLoc_modelview >= 0)
@@ -468,9 +527,17 @@ static void apply_gpu_state(void) {
     }
 
     if (g.fog_enabled && g.fog_dirty) {
-        u32 fc = ((u8)(g.fog_color[3]*255) << 24) | ((u8)(g.fog_color[2]*255) << 16) | ((u8)(g.fog_color[1]*255) << 8) | ((u8)(g.fog_color[0]*255));
+        u32 fc = ((u8)(g.fog_color[0]*255) << 24) | ((u8)(g.fog_color[1]*255) << 16) | ((u8)(g.fog_color[2]*255) << 8) | ((u8)(g.fog_color[3]*255));
         C3D_FogColor(fc);
-        if (g.fog_mode == GL_LINEAR) FogLut_Exp(&g.fog_lut, 1.0f, g.fog_start, g.fog_end, 0.01f);
+        if (g.fog_mode == GL_LINEAR) {
+            float range = g.fog_end - g.fog_start;
+            if (range < 0.001f) range = 0.001f;
+            for (int i = 0; i < 128; i++) {
+                float depth = (float)i / 127.0f * g.fog_end;
+                float f = (depth <= g.fog_start) ? 0.0f : (depth >= g.fog_end) ? 1.0f : (depth - g.fog_start) / range;
+                g.fog_lut.data[i] = (u32)(clampf(f, 0.0f, 1.0f) * 0x7FF) & 0xFFF;
+            }
+        }
         else if (g.fog_mode == GL_EXP) FogLut_Exp(&g.fog_lut, g.fog_density, 0.0f, g.fog_end, 1.0f);
         else FogLut_Exp(&g.fog_lut, g.fog_density * g.fog_density, 0.0f, g.fog_end, 2.0f);
         C3D_FogGasMode(true, false, false);
@@ -520,7 +587,7 @@ void glClear(GLbitfield mask) {
     u32 color = 0; u32 depth = 0;
     if (mask & GL_COLOR_BUFFER_BIT) {
         bits |= C3D_CLEAR_COLOR;
-        color = ((u32)(g.clear_a * 255.0f) << 24) | ((u32)(g.clear_b * 255.0f) << 16) | ((u32)(g.clear_g * 255.0f) << 8) | ((u32)(g.clear_r * 255.0f) << 0);
+        color = ((u32)(g.clear_r * 255.0f) << 24) | ((u32)(g.clear_g * 255.0f) << 16) | ((u32)(g.clear_b * 255.0f) << 8) | ((u32)(g.clear_a * 255.0f) << 0);
     }
     if (mask & GL_DEPTH_BUFFER_BIT) {
         bits |= C3D_CLEAR_DEPTH;
@@ -557,7 +624,7 @@ void glDisable(GLenum cap) {
         case GL_BLEND:         g.blend_enabled = 0; break;
         case GL_ALPHA_TEST:    g.alpha_test_enabled = 0; break;
         case GL_CULL_FACE:     g.cull_face_enabled = 0; break;
-        case GL_TEXTURE_2D:    g.tev_dirty = 0; g.texture_2d_enabled = 0; break;
+        case GL_TEXTURE_2D:    g.tev_dirty = 1; g.texture_2d_enabled = 0; break;
         case GL_SCISSOR_TEST:  g.scissor_test_enabled = 0; break;
         case GL_FOG:           g.fog_enabled = 0; break;
         default: break;
@@ -566,13 +633,25 @@ void glDisable(GLenum cap) {
 
 void glDepthFunc(GLenum func) { g.depth_func = func; }
 void glDepthMask(GLboolean flag) { g.depth_mask = flag; }
-void glDepthRangef(GLclampf near_val, GLclampf far_val) { (void)near_val; (void)far_val; }
+
+void glDepthRangef(GLclampf near_val, GLclampf far_val) {
+    near_val = clampf(near_val, 0.0f, 1.0f);
+    far_val  = clampf(far_val, 0.0f, 1.0f);
+    // After z-remap, z_ndc is in [-1, 0]. Map to [near_val, far_val]:
+    // z_buf(-1)=near_val, z_buf(0)=far_val => z_buf = z_ndc*(far-near) + far
+    C3D_DepthMap(false, far_val - near_val, far_val);
+}
 void glBlendFunc(GLenum sfactor, GLenum dfactor) { g.blend_src = sfactor; g.blend_dst = dfactor; }
 void glAlphaFunc(GLenum func, GLclampf ref) { g.alpha_func = func; g.alpha_ref = ref; }
 void glCullFace(GLenum mode) { g.cull_face_mode = mode; }
 void glFrontFace(GLenum mode) { g.front_face = mode; }
 void glShadeModel(GLenum mode) { (void)mode; }
-void glPolygonOffset(GLfloat factor, GLfloat units) { g.polygon_offset_factor = factor; g.polygon_offset_units = units; C3D_DepthMap(true, 0.5f, 0.5f + (units * 0.0001f)); }
+void glPolygonOffset(GLfloat factor, GLfloat units) {
+    g.polygon_offset_factor = factor;
+    g.polygon_offset_units = units;
+    C3D_DepthMap(false, 1.0f, 1.0f + (units * 0.0001f));
+}
+
 void glLineWidth(GLfloat width) { (void)width; }
 void glPolygonMode(GLenum face, GLenum mode) { (void)face; (void)mode; }
 
@@ -587,6 +666,16 @@ void glColor4f(GLfloat r, GLfloat g_, GLfloat b, GLfloat a) {
 void glColor3f(GLfloat r, GLfloat g_, GLfloat b) {
     if (g.dl_recording >= 0) { dl_record_color3f(r, g_, b); return; }
     g.cur_color[0] = r; g.cur_color[1] = g_; g.cur_color[2] = b; g.cur_color[3] = 1.0f;
+}
+
+void glColor4ub(GLubyte r, GLubyte g_, GLubyte b, GLubyte a) {
+    g.cur_color[0] = r / 255.0f; g.cur_color[1] = g_ / 255.0f;
+    g.cur_color[2] = b / 255.0f; g.cur_color[3] = a / 255.0f;
+}
+
+void glColor3ub(GLubyte r, GLubyte g_, GLubyte b) {
+    g.cur_color[0] = r / 255.0f; g.cur_color[1] = g_ / 255.0f;
+    g.cur_color[2] = b / 255.0f; g.cur_color[3] = 1.0f;
 }
 
 void glFogf(GLenum pname, GLfloat param) {
@@ -689,7 +778,10 @@ void glOrthof(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloat 
     C3D_Mtx ortho; Mtx_Identity(&ortho);
     ortho.r[0].x = 2.0f / (right - left); ortho.r[0].w = -(right + left) / (right - left);
     ortho.r[1].y = 2.0f / (top - bottom); ortho.r[1].w = -(top + bottom) / (top - bottom);
-    ortho.r[2].z = -2.0f / (far_val - near_val); ortho.r[2].w = -(far_val + near_val) / (far_val - near_val);
+
+    ortho.r[2].z = -2.0f / (far_val - near_val);
+    ortho.r[2].w = -(far_val + near_val) / (far_val - near_val);
+
     C3D_Mtx result; Mtx_Multiply(&result, cur_mtx(), &ortho);
     Mtx_Copy(cur_mtx(), &result); g.matrices_dirty = 1;
 }
@@ -723,7 +815,14 @@ const GLubyte* glGetString(GLenum name) {
 
 void glGenTextures(GLsizei n, GLuint *textures) {
     for (GLsizei i = 0; i < n; i++) {
-        textures[i] = g.tex_next_id++;
+        GLuint start = g.tex_next_id;
+        while (g.textures[g.tex_next_id].allocated) {
+            g.tex_next_id++;
+            if (g.tex_next_id >= GL2C3D_MAX_TEXTURES) g.tex_next_id = 1;
+            if (g.tex_next_id == start) { g.last_error = GL_OUT_OF_MEMORY; textures[i] = 0; break; }
+        }
+        textures[i] = g.tex_next_id;
+        g.tex_next_id++;
         if (g.tex_next_id >= GL2C3D_MAX_TEXTURES) g.tex_next_id = 1;
     }
 }
@@ -754,8 +853,16 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
 
     if (!C3D_TexInit(&slot->tex, pot_w, pot_h, gpu_fmt)) { g.last_error = GL_OUT_OF_MEMORY; return; }
     slot->allocated = 1; slot->width = width; slot->height = height; slot->pot_w = pot_w; slot->pot_h = pot_h; slot->fmt = gpu_fmt;
-    C3D_TexSetFilter(&slot->tex, GPU_NEAREST, GPU_NEAREST);
-    C3D_TexSetWrap(&slot->tex, GPU_REPEAT, GPU_REPEAT);
+
+    /* Apply stored filter/wrap params (may have been set before allocation) */
+    {
+        GPU_TEXTURE_FILTER_PARAM mag = (slot->mag_filter == GL_LINEAR) ? GPU_LINEAR : GPU_NEAREST;
+        GPU_TEXTURE_FILTER_PARAM min_f = (slot->min_filter == GL_LINEAR || slot->min_filter == GL_LINEAR_MIPMAP_LINEAR || slot->min_filter == GL_LINEAR_MIPMAP_NEAREST) ? GPU_LINEAR : GPU_NEAREST;
+        C3D_TexSetFilter(&slot->tex, mag, min_f);
+        GPU_TEXTURE_WRAP_PARAM ws = (slot->wrap_s == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE : ((slot->wrap_s == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
+        GPU_TEXTURE_WRAP_PARAM wt = (slot->wrap_t == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE : ((slot->wrap_t == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
+        C3D_TexSetWrap(&slot->tex, ws, wt);
+    }
 
     if (pixels) {
         if (gpu_fmt == GPU_RGBA8) {
@@ -821,25 +928,23 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) {
     (void)target;
     if (g.bound_texture == 0 || g.bound_texture >= GL2C3D_MAX_TEXTURES) return;
     TexSlot *slot = &g.textures[g.bound_texture];
+
+    /* Store params even before allocation — they'll be applied when the texture is created */
+    if (pname == GL_TEXTURE_MIN_FILTER)      slot->min_filter = param;
+    else if (pname == GL_TEXTURE_MAG_FILTER)  slot->mag_filter = param;
+    else if (pname == GL_TEXTURE_WRAP_S)      slot->wrap_s = param;
+    else if (pname == GL_TEXTURE_WRAP_T)      slot->wrap_t = param;
+
     if (!slot->allocated) return;
-    GPU_TEXTURE_FILTER_PARAM filt; GPU_TEXTURE_WRAP_PARAM wrap;
-    if (pname == GL_TEXTURE_MIN_FILTER) {
-        slot->min_filter = param;
-        filt = (param == GL_LINEAR || param == GL_LINEAR_MIPMAP_LINEAR || param == GL_LINEAR_MIPMAP_NEAREST) ? GPU_LINEAR : GPU_NEAREST;
-        C3D_TexSetFilter(&slot->tex, (slot->mag_filter == GL_LINEAR) ? GPU_LINEAR : GPU_NEAREST, filt);
-    } else if (pname == GL_TEXTURE_MAG_FILTER) {
-        slot->mag_filter = param;
-        filt = (param == GL_LINEAR) ? GPU_LINEAR : GPU_NEAREST;
-        C3D_TexSetFilter(&slot->tex, filt, (slot->min_filter == GL_LINEAR || slot->min_filter == GL_LINEAR_MIPMAP_LINEAR) ? GPU_LINEAR : GPU_NEAREST);
-    } else if (pname == GL_TEXTURE_WRAP_S) {
-        slot->wrap_s = param;
-        wrap = (param == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE : GPU_REPEAT;
-        C3D_TexSetWrap(&slot->tex, wrap, (slot->wrap_t == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE : GPU_REPEAT);
-    } else if (pname == GL_TEXTURE_WRAP_T) {
-        slot->wrap_t = param;
-        wrap = (param == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE : GPU_REPEAT;
-        C3D_TexSetWrap(&slot->tex, (slot->wrap_s == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE : GPU_REPEAT, wrap);
-    }
+
+    /* Apply to the live C3D texture */
+    GPU_TEXTURE_FILTER_PARAM mag = (slot->mag_filter == GL_LINEAR) ? GPU_LINEAR : GPU_NEAREST;
+    GPU_TEXTURE_FILTER_PARAM min_f = (slot->min_filter == GL_LINEAR || slot->min_filter == GL_LINEAR_MIPMAP_LINEAR || slot->min_filter == GL_LINEAR_MIPMAP_NEAREST) ? GPU_LINEAR : GPU_NEAREST;
+    C3D_TexSetFilter(&slot->tex, mag, min_f);
+
+    GPU_TEXTURE_WRAP_PARAM ws = (slot->wrap_s == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE : ((slot->wrap_s == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
+    GPU_TEXTURE_WRAP_PARAM wt = (slot->wrap_t == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE : ((slot->wrap_t == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
+    C3D_TexSetWrap(&slot->tex, ws, wt);
 }
 
 void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const GLvoid *data) {
@@ -849,15 +954,27 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, G
 
 void glGenBuffers(GLsizei n, GLuint *buffers) {
     for (GLsizei i = 0; i < n; i++) {
-        buffers[i] = g.vbo_next_id++;
-        if (g.vbo_next_id >= GL2C3D_MAX_VBOS) g.vbo_next_id = 1;
+        if (!vbo_ensure_capacity(g.vbo_next_id + 1)) {
+            g.last_error = GL_OUT_OF_MEMORY; buffers[i] = 0; continue;
+        }
+        GLuint start = g.vbo_next_id;
+        while (g.vbo_next_id < (GLuint)g.vbo_capacity && g.vbos[g.vbo_next_id].allocated) {
+            g.vbo_next_id++;
+        }
+        if (g.vbo_next_id >= (GLuint)g.vbo_capacity) {
+            if (!vbo_ensure_capacity(g.vbo_next_id + 1)) {
+                g.last_error = GL_OUT_OF_MEMORY; buffers[i] = 0; continue;
+            }
+        }
+        buffers[i] = g.vbo_next_id;
+        g.vbo_next_id++;
     }
 }
 
 void glDeleteBuffers(GLsizei n, const GLuint *buffers) {
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = buffers[i];
-        if (id > 0 && id < GL2C3D_MAX_VBOS && g.vbos[id].allocated) {
+        if (id > 0 && (int)id < g.vbo_capacity && g.vbos[id].allocated) {
             if (g.vbos[id].data) linearFree(g.vbos[id].data);
             g.vbos[id].data = NULL; g.vbos[id].size = 0; g.vbos[id].allocated = 0;
             if (g.bound_array_buffer == id) g.bound_array_buffer = 0;
@@ -877,8 +994,9 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
     if (target == GL_ARRAY_BUFFER) bound = g.bound_array_buffer;
     else if (target == GL_ELEMENT_ARRAY_BUFFER) bound = g.bound_element_array_buffer;
 
-    if (bound == 0 || bound >= GL2C3D_MAX_VBOS) {
-        if(bound >= GL2C3D_MAX_VBOS) printf("[NovaGL] Error: VBO ID %d out of bounds!\n", bound);
+    if (bound == 0) return;
+    if (!vbo_ensure_capacity(bound + 1)) {
+        g.last_error = GL_OUT_OF_MEMORY;
         return;
     }
     VBOSlot *slot = &g.vbos[bound];
@@ -899,6 +1017,18 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
         memcpy(slot->data, data, size);
         GSPGPU_FlushDataCache(slot->data, size);
     }
+}
+
+void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvoid *data) {
+    GLuint bound = 0;
+    if (target == GL_ARRAY_BUFFER) bound = g.bound_array_buffer;
+    else if (target == GL_ELEMENT_ARRAY_BUFFER) bound = g.bound_element_array_buffer;
+    if (bound == 0 || (int)bound >= g.vbo_capacity) return;
+    VBOSlot *slot = &g.vbos[bound];
+    if (!slot->allocated || !slot->data || !data) return;
+    if (offset + (int)size > slot->size) { g.last_error = GL_INVALID_VALUE; return; }
+    memcpy((uint8_t*)slot->data + offset, data, size);
+    GSPGPU_FlushDataCache((uint8_t*)slot->data + offset, size);
 }
 
 void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
@@ -935,13 +1065,49 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     C3D_BufInfo *bufInfo = C3D_GetBufInfo();
     BufInfo_Init(bufInfo);
 
-    int vbo_id = g.va_vertex.vbo_id;
-    int use_vbo = (g.va_vertex.enabled && vbo_id > 0 && vbo_id < GL2C3D_MAX_VBOS && g.vbos[vbo_id].allocated);
+    // VBO fast path: if all arrays come from the same VBO with matching {float3, float2, ubyte4} layout
+    if (g.va_vertex.enabled && g.va_vertex.vbo_id > 0 &&
+        g.va_vertex.vbo_id < g.vbo_capacity && g.vbos[g.va_vertex.vbo_id].allocated &&
+        g.va_vertex.size == 3 && g.va_vertex.type == GL_FLOAT && g.va_vertex.stride == 24 &&
+        (uintptr_t)g.va_vertex.pointer == 0 &&
+        g.va_texcoord.enabled && g.va_texcoord.vbo_id == g.va_vertex.vbo_id &&
+        g.va_texcoord.size == 2 && g.va_texcoord.type == GL_FLOAT && g.va_texcoord.stride == 24 &&
+        (uintptr_t)g.va_texcoord.pointer == 12 &&
+        g.va_color.enabled && g.va_color.vbo_id == g.va_vertex.vbo_id &&
+        g.va_color.size == 4 && g.va_color.type == GL_UNSIGNED_BYTE && g.va_color.stride == 24 &&
+        (uintptr_t)g.va_color.pointer == 20)
+    {
+        VBOSlot *vbo = &g.vbos[g.va_vertex.vbo_id];
+        uint8_t *data = (uint8_t*)vbo->data + first * 24;
+        GSPGPU_FlushDataCache(data, count * 24);
+        BufInfo_Add(bufInfo, data, 24, 3, 0x210);
 
-    if (use_vbo) {
-        uint8_t *vbo_base = (uint8_t*)g.vbos[vbo_id].data + (uintptr_t)g.va_vertex.pointer;
-        BufInfo_Add(bufInfo, vbo_base + first * 24, 24, 3, 0x210);
-    } else {
+        if (mode == GL_QUADS) {
+            int num_quads = count / 4;
+            int idx_count = num_quads * 6;
+            int idx_bytes = idx_count * 2;
+            if (idx_bytes > g.index_buf_size) {
+                if (g.index_buf) linearFree(g.index_buf);
+                g.index_buf_size = idx_bytes + 4096;
+                g.index_buf = linearAlloc(g.index_buf_size);
+            }
+            if (!g.index_buf) { g.last_error = GL_OUT_OF_MEMORY; return; }
+            uint16_t *idx = (uint16_t*)g.index_buf;
+            for (int q = 0; q < num_quads; q++) {
+                uint16_t base = q * 4;
+                idx[q*6+0] = base+0; idx[q*6+1] = base+1; idx[q*6+2] = base+2;
+                idx[q*6+3] = base+0; idx[q*6+4] = base+2; idx[q*6+5] = base+3;
+            }
+            GSPGPU_FlushDataCache(g.index_buf, idx_bytes);
+            C3D_DrawElements(GPU_TRIANGLES, idx_count, C3D_UNSIGNED_SHORT, g.index_buf);
+        } else {
+            C3D_DrawArrays(gl_to_gpu_primitive(mode), 0, count);
+        }
+        return;
+    }
+
+    // Slow path: assemble interleaved vertices from separate arrays
+    {
         int req_size = count * 24;
         if (req_size > g.client_array_buf_size) {
             if (g.client_array_buf) linearFree(g.client_array_buf);
@@ -951,34 +1117,48 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         if (!g.client_array_buf) return;
 
         uint8_t *dst = (uint8_t*)g.client_array_buf;
-        int p_str = g.va_vertex.stride ? g.va_vertex.stride : 12;
-        int t_str = g.va_texcoord.stride ? g.va_texcoord.stride : 8;
-        int c_str = g.va_color.stride ? g.va_color.stride : 4;
+        int p_str = calc_stride(g.va_vertex.stride, g.va_vertex.size, g.va_vertex.type);
+        int t_str = calc_stride(g.va_texcoord.stride, g.va_texcoord.size, g.va_texcoord.type);
+        int c_str = calc_stride(g.va_color.stride, g.va_color.size, g.va_color.type);
 
         for (int i = 0; i < count; i++) {
             if (g.va_vertex.enabled) {
-                const uint8_t *src_ptr = (g.va_vertex.vbo_id > 0 && g.vbos[g.va_vertex.vbo_id].allocated) ?
+                const uint8_t *src_ptr = (g.va_vertex.vbo_id > 0 && g.va_vertex.vbo_id < g.vbo_capacity && g.vbos[g.va_vertex.vbo_id].allocated) ?
                     (const uint8_t*)g.vbos[g.va_vertex.vbo_id].data + (uintptr_t)g.va_vertex.pointer : (const uint8_t*)g.va_vertex.pointer;
                 if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
-                    int bytes_to_copy = g.va_vertex.size * sizeof(float);
-                    memcpy(dst, src_ptr + (first + i) * p_str, bytes_to_copy);
-                    if (bytes_to_copy == 8) { float zero = 0.0f; memcpy(dst + 8, &zero, 4); }
+                    float pos[3] = {0.0f, 0.0f, 0.0f};
+                    read_vertex_attrib_float(pos, src_ptr + (first + i) * p_str, g.va_vertex.size, g.va_vertex.type);
+                    memcpy(dst, pos, 12);
                 } else { memset(dst, 0, 12); }
             } else { memset(dst, 0, 12); }
 
             if (g.va_texcoord.enabled) {
-                const uint8_t *src_ptr = (g.va_texcoord.vbo_id > 0 && g.vbos[g.va_texcoord.vbo_id].allocated) ?
+                const uint8_t *src_ptr = (g.va_texcoord.vbo_id > 0 && g.va_texcoord.vbo_id < g.vbo_capacity && g.vbos[g.va_texcoord.vbo_id].allocated) ?
                     (const uint8_t*)g.vbos[g.va_texcoord.vbo_id].data + (uintptr_t)g.va_texcoord.pointer : (const uint8_t*)g.va_texcoord.pointer;
-                if (src_ptr && (uintptr_t)src_ptr > 0x1000) memcpy(dst + 12, src_ptr + (first + i) * t_str, 8);
-                else memset(dst + 12, 0, 8);
+                if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
+                    float tc[2] = {0.0f, 0.0f};
+                    read_vertex_attrib_float(tc, src_ptr + (first + i) * t_str, g.va_texcoord.size > 2 ? 2 : g.va_texcoord.size, g.va_texcoord.type);
+                    memcpy(dst + 12, tc, 8);
+                } else memset(dst + 12, 0, 8);
             } else { memset(dst + 12, 0, 8); }
 
             if (g.va_color.enabled) {
-                const uint8_t *src_ptr = (g.va_color.vbo_id > 0 && g.vbos[g.va_color.vbo_id].allocated) ?
+                const uint8_t *src_ptr = (g.va_color.vbo_id > 0 && g.va_color.vbo_id < g.vbo_capacity && g.vbos[g.va_color.vbo_id].allocated) ?
                     (const uint8_t*)g.vbos[g.va_color.vbo_id].data + (uintptr_t)g.va_color.pointer : (const uint8_t*)g.va_color.pointer;
                 if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
-                    if (g.va_color.size == 3) { memcpy(dst + 20, src_ptr + (first + i) * c_str, 3); dst[23] = 255; }
-                    else memcpy(dst + 20, src_ptr + (first + i) * c_str, 4);
+                    if (g.va_color.type == GL_UNSIGNED_BYTE) {
+                        if (g.va_color.size == 3) { memcpy(dst + 20, src_ptr + (first + i) * c_str, 3); dst[23] = 255; }
+                        else memcpy(dst + 20, src_ptr + (first + i) * c_str, 4);
+                    } else if (g.va_color.type == GL_FLOAT) {
+                        const float *cf = (const float*)(src_ptr + (first + i) * c_str);
+                        dst[20] = (uint8_t)(clampf(cf[0], 0.0f, 1.0f) * 255.0f);
+                        dst[21] = (uint8_t)(clampf(cf[1], 0.0f, 1.0f) * 255.0f);
+                        dst[22] = (uint8_t)(clampf(cf[2], 0.0f, 1.0f) * 255.0f);
+                        dst[23] = g.va_color.size >= 4 ? (uint8_t)(clampf(cf[3], 0.0f, 1.0f) * 255.0f) : 255;
+                    } else {
+                        if (g.va_color.size == 3) { memcpy(dst + 20, src_ptr + (first + i) * c_str, 3); dst[23] = 255; }
+                        else memcpy(dst + 20, src_ptr + (first + i) * c_str, 4);
+                    }
                 } else { dst[20] = dst[21] = dst[22] = dst[23] = 255; }
             } else {
                 dst[20] = (uint8_t)(g.cur_color[0] * 255.0f); dst[21] = (uint8_t)(g.cur_color[1] * 255.0f);
@@ -990,9 +1170,29 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         BufInfo_Add(bufInfo, g.client_array_buf, 24, 3, 0x210);
     }
 
-    GPU_Primitive_t prim = gl_to_gpu_primitive(mode);
-    if (mode == GL_LINES || mode == GL_LINE_STRIP) prim = GPU_TRIANGLES;
-    C3D_DrawArrays(prim, 0, count);
+    if (mode == GL_QUADS) {
+        int num_quads = count / 4;
+        int idx_count = num_quads * 6;
+        int idx_bytes = idx_count * 2;
+        if (idx_bytes > g.index_buf_size) {
+            if (g.index_buf) linearFree(g.index_buf);
+            g.index_buf_size = idx_bytes + 4096;
+            g.index_buf = linearAlloc(g.index_buf_size);
+        }
+        if (!g.index_buf) { g.last_error = GL_OUT_OF_MEMORY; return; }
+        uint16_t *idx = (uint16_t*)g.index_buf;
+        for (int q = 0; q < num_quads; q++) {
+            uint16_t base = q * 4;
+            idx[q*6+0] = base+0; idx[q*6+1] = base+1; idx[q*6+2] = base+2;
+            idx[q*6+3] = base+0; idx[q*6+4] = base+2; idx[q*6+5] = base+3;
+        }
+        GSPGPU_FlushDataCache(g.index_buf, idx_bytes);
+        C3D_DrawElements(GPU_TRIANGLES, idx_count, C3D_UNSIGNED_SHORT, g.index_buf);
+    } else {
+        GPU_Primitive_t prim = gl_to_gpu_primitive(mode);
+        if (mode == GL_LINES || mode == GL_LINE_STRIP) prim = GPU_TRIANGLES;
+        C3D_DrawArrays(prim, 0, count);
+    }
 }
 
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices) {
@@ -1000,12 +1200,10 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
     if (type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_BYTE) { g.last_error = GL_INVALID_ENUM; return; }
 
     const uint8_t *idx_src = NULL;
-    int is_vbo_index = 0;
 
-    if (g.bound_element_array_buffer > 0 && g.bound_element_array_buffer < GL2C3D_MAX_VBOS &&
+    if (g.bound_element_array_buffer > 0 && g.bound_element_array_buffer < g.vbo_capacity &&
         g.vbos[g.bound_element_array_buffer].allocated && g.vbos[g.bound_element_array_buffer].data) {
         idx_src = (const uint8_t*)g.vbos[g.bound_element_array_buffer].data + (uintptr_t)indices;
-        is_vbo_index = 1;
     } else {
         idx_src = (const uint8_t*)indices;
     }
@@ -1015,32 +1213,45 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
     C3D_BufInfo *bufInfo = C3D_GetBufInfo();
     BufInfo_Init(bufInfo);
 
-    int idx_size = (type == GL_UNSIGNED_SHORT) ? 2 : 1;
     GPU_Primitive_t prim = gl_to_gpu_primitive(mode);
     if (mode == GL_LINES || mode == GL_LINE_STRIP) prim = GPU_TRIANGLES;
 
-    int vbo_id = g.va_vertex.vbo_id;
-    int use_vbo = (g.va_vertex.enabled && vbo_id > 0 && vbo_id < GL2C3D_MAX_VBOS && g.vbos[vbo_id].allocated);
+    // VBO fast path for indexed drawing with matching layout
+    if (g.va_vertex.enabled && g.va_vertex.vbo_id > 0 &&
+        g.va_vertex.vbo_id < g.vbo_capacity && g.vbos[g.va_vertex.vbo_id].allocated &&
+        g.va_vertex.size == 3 && g.va_vertex.type == GL_FLOAT && g.va_vertex.stride == 24 &&
+        (uintptr_t)g.va_vertex.pointer == 0 &&
+        g.va_texcoord.enabled && g.va_texcoord.vbo_id == g.va_vertex.vbo_id &&
+        g.va_texcoord.size == 2 && g.va_texcoord.type == GL_FLOAT && g.va_texcoord.stride == 24 &&
+        (uintptr_t)g.va_texcoord.pointer == 12 &&
+        g.va_color.enabled && g.va_color.vbo_id == g.va_vertex.vbo_id &&
+        g.va_color.size == 4 && g.va_color.type == GL_UNSIGNED_BYTE && g.va_color.stride == 24 &&
+        (uintptr_t)g.va_color.pointer == 20)
+    {
+        VBOSlot *vbo = &g.vbos[g.va_vertex.vbo_id];
+        GSPGPU_FlushDataCache(vbo->data, vbo->size);
+        BufInfo_Add(bufInfo, vbo->data, 24, 3, 0x210);
 
-    if (use_vbo) {
-        uint8_t *vbo_base = (uint8_t*)g.vbos[vbo_id].data + (uintptr_t)g.va_vertex.pointer;
-        BufInfo_Add(bufInfo, vbo_base, 24, 3, 0x210);
-
-        //this may get some boost, but i really dk
-        if (is_vbo_index) {
-            C3D_DrawElements(prim, count, (type == GL_UNSIGNED_SHORT) ? C3D_UNSIGNED_SHORT : C3D_UNSIGNED_BYTE, (void*)idx_src);
-        } else {
-            void *idx_copy = linearAlloc(count * idx_size);
-            if (!idx_copy) { g.last_error = GL_OUT_OF_MEMORY; return; }
-            memcpy(idx_copy, idx_src, count * idx_size);
-            GSPGPU_FlushDataCache(idx_copy, count * idx_size);
-
-            C3D_DrawElements(prim, count, (type == GL_UNSIGNED_SHORT) ? C3D_UNSIGNED_SHORT : C3D_UNSIGNED_BYTE, idx_copy);
-            linearFree(idx_copy);
+        // Copy indices to linear memory
+        int idx_bytes = count * 2;
+        if (idx_bytes > g.index_buf_size) {
+            if (g.index_buf) linearFree(g.index_buf);
+            g.index_buf_size = idx_bytes + 4096;
+            g.index_buf = linearAlloc(g.index_buf_size);
         }
+        if (!g.index_buf) { g.last_error = GL_OUT_OF_MEMORY; return; }
+        uint16_t *dst_idx = (uint16_t*)g.index_buf;
+        if (type == GL_UNSIGNED_SHORT) {
+            memcpy(dst_idx, idx_src, count * 2);
+        } else {
+            for (int i = 0; i < count; i++) dst_idx[i] = idx_src[i];
+        }
+        GSPGPU_FlushDataCache(g.index_buf, idx_bytes);
+        C3D_DrawElements(prim, count, C3D_UNSIGNED_SHORT, g.index_buf);
         return;
     }
 
+    // Slow path
     int req_size = count * 24;
     if (req_size > g.client_array_buf_size) {
         if (g.client_array_buf) linearFree(g.client_array_buf);
@@ -1050,36 +1261,50 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
     if (!g.client_array_buf) { g.last_error = GL_OUT_OF_MEMORY; return; }
 
     uint8_t *dst = (uint8_t*)g.client_array_buf;
-    int p_str = g.va_vertex.stride ? g.va_vertex.stride : 12;
-    int t_str = g.va_texcoord.stride ? g.va_texcoord.stride : 8;
-    int c_str = g.va_color.stride ? g.va_color.stride : 4;
+    int p_str = calc_stride(g.va_vertex.stride, g.va_vertex.size, g.va_vertex.type);
+    int t_str = calc_stride(g.va_texcoord.stride, g.va_texcoord.size, g.va_texcoord.type);
+    int c_str = calc_stride(g.va_color.stride, g.va_color.size, g.va_color.type);
 
     for (int i = 0; i < count; i++) {
         int src_index = (type == GL_UNSIGNED_SHORT) ? ((const uint16_t*)idx_src)[i] : ((const uint8_t*)idx_src)[i];
 
         if (g.va_vertex.enabled) {
-            const uint8_t *src_ptr = (g.va_vertex.vbo_id > 0 && g.vbos[g.va_vertex.vbo_id].allocated) ?
+            const uint8_t *src_ptr = (g.va_vertex.vbo_id > 0 && g.va_vertex.vbo_id < g.vbo_capacity && g.vbos[g.va_vertex.vbo_id].allocated) ?
                 (const uint8_t*)g.vbos[g.va_vertex.vbo_id].data + (uintptr_t)g.va_vertex.pointer : (const uint8_t*)g.va_vertex.pointer;
             if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
-                int bytes_to_copy = g.va_vertex.size * sizeof(float);
-                memcpy(dst, src_ptr + src_index * p_str, bytes_to_copy);
-                if (bytes_to_copy == 8) { float zero = 0.0f; memcpy(dst + 8, &zero, 4); }
+                float pos[3] = {0.0f, 0.0f, 0.0f};
+                read_vertex_attrib_float(pos, src_ptr + src_index * p_str, g.va_vertex.size, g.va_vertex.type);
+                memcpy(dst, pos, 12);
             } else memset(dst, 0, 12);
         } else memset(dst, 0, 12);
 
         if (g.va_texcoord.enabled) {
-            const uint8_t *src_ptr = (g.va_texcoord.vbo_id > 0 && g.vbos[g.va_texcoord.vbo_id].allocated) ?
+            const uint8_t *src_ptr = (g.va_texcoord.vbo_id > 0 && g.va_texcoord.vbo_id < g.vbo_capacity && g.vbos[g.va_texcoord.vbo_id].allocated) ?
                 (const uint8_t*)g.vbos[g.va_texcoord.vbo_id].data + (uintptr_t)g.va_texcoord.pointer : (const uint8_t*)g.va_texcoord.pointer;
-            if (src_ptr && (uintptr_t)src_ptr > 0x1000) memcpy(dst + 12, src_ptr + src_index * t_str, 8);
-            else memset(dst + 12, 0, 8);
+            if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
+                float tc[2] = {0.0f, 0.0f};
+                read_vertex_attrib_float(tc, src_ptr + src_index * t_str, g.va_texcoord.size > 2 ? 2 : g.va_texcoord.size, g.va_texcoord.type);
+                memcpy(dst + 12, tc, 8);
+            } else memset(dst + 12, 0, 8);
         } else memset(dst + 12, 0, 8);
 
         if (g.va_color.enabled) {
-            const uint8_t *src_ptr = (g.va_color.vbo_id > 0 && g.vbos[g.va_color.vbo_id].allocated) ?
+            const uint8_t *src_ptr = (g.va_color.vbo_id > 0 && g.va_color.vbo_id < g.vbo_capacity && g.vbos[g.va_color.vbo_id].allocated) ?
                 (const uint8_t*)g.vbos[g.va_color.vbo_id].data + (uintptr_t)g.va_color.pointer : (const uint8_t*)g.va_color.pointer;
             if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
-                if (g.va_color.size == 3) { memcpy(dst + 20, src_ptr + src_index * c_str, 3); dst[23] = 255; }
-                else memcpy(dst + 20, src_ptr + src_index * c_str, 4);
+                if (g.va_color.type == GL_UNSIGNED_BYTE) {
+                    if (g.va_color.size == 3) { memcpy(dst + 20, src_ptr + src_index * c_str, 3); dst[23] = 255; }
+                    else memcpy(dst + 20, src_ptr + src_index * c_str, 4);
+                } else if (g.va_color.type == GL_FLOAT) {
+                    const float *cf = (const float*)(src_ptr + src_index * c_str);
+                    dst[20] = (uint8_t)(clampf(cf[0], 0.0f, 1.0f) * 255.0f);
+                    dst[21] = (uint8_t)(clampf(cf[1], 0.0f, 1.0f) * 255.0f);
+                    dst[22] = (uint8_t)(clampf(cf[2], 0.0f, 1.0f) * 255.0f);
+                    dst[23] = g.va_color.size >= 4 ? (uint8_t)(clampf(cf[3], 0.0f, 1.0f) * 255.0f) : 255;
+                } else {
+                    if (g.va_color.size == 3) { memcpy(dst + 20, src_ptr + src_index * c_str, 3); dst[23] = 255; }
+                    else memcpy(dst + 20, src_ptr + src_index * c_str, 4);
+                }
             } else { dst[20] = dst[21] = dst[22] = dst[23] = 255; }
         } else {
             dst[20] = (uint8_t)(g.cur_color[0] * 255.0f); dst[21] = (uint8_t)(g.cur_color[1] * 255.0f);
@@ -1090,7 +1315,28 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
 
     GSPGPU_FlushDataCache(g.client_array_buf, req_size);
     BufInfo_Add(bufInfo, g.client_array_buf, 24, 3, 0x210);
-    C3D_DrawArrays(prim, 0, count);
+
+    if (mode == GL_QUADS) {
+        int num_quads = count / 4;
+        int idx_count = num_quads * 6;
+        int idx_bytes = idx_count * 2;
+        if (idx_bytes > g.index_buf_size) {
+            if (g.index_buf) linearFree(g.index_buf);
+            g.index_buf_size = idx_bytes + 4096;
+            g.index_buf = linearAlloc(g.index_buf_size);
+        }
+        if (!g.index_buf) { g.last_error = GL_OUT_OF_MEMORY; return; }
+        uint16_t *idx = (uint16_t*)g.index_buf;
+        for (int q = 0; q < num_quads; q++) {
+            uint16_t base = q * 4;
+            idx[q*6+0] = base+0; idx[q*6+1] = base+1; idx[q*6+2] = base+2;
+            idx[q*6+3] = base+0; idx[q*6+4] = base+2; idx[q*6+5] = base+3;
+        }
+        GSPGPU_FlushDataCache(g.index_buf, idx_bytes);
+        C3D_DrawElements(GPU_TRIANGLES, idx_count, C3D_UNSIGNED_SHORT, g.index_buf);
+    } else {
+        C3D_DrawArrays(prim, 0, count);
+    }
 }
 
 GLuint glGenLists(GLsizei range) {
@@ -1183,7 +1429,6 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
     (void)x; (void)y; (void)width; (void)height; (void)format; (void)type;
     if (pixels) memset(pixels, 0, width * height * 4);
 }
-
 void glFrustumf(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloat near_val, GLfloat far_val) {
     C3D_Mtx frustum; memset(&frustum, 0, sizeof(C3D_Mtx));
     float n = near_val; float f = far_val;
@@ -1191,9 +1436,12 @@ void glFrustumf(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloa
     frustum.r[0].z = (right + left) / (right - left);
     frustum.r[1].y = (2.0f * n) / (top - bottom);
     frustum.r[1].z = (top + bottom) / (top - bottom);
+
+    // Standard OpenGL: z_ndc maps to [-1, +1]
     frustum.r[2].z = -(f + n) / (f - n);
     frustum.r[2].w = -(2.0f * f * n) / (f - n);
     frustum.r[3].z = -1.0f;
+
     C3D_Mtx result; Mtx_Multiply(&result, cur_mtx(), &frustum);
     Mtx_Copy(cur_mtx(), &result); g.matrices_dirty = 1;
 }
@@ -1204,4 +1452,80 @@ void glFrustum(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLd
 
 void glFrustumx(GLfixed left, GLfixed right, GLfixed bottom, GLfixed top, GLfixed near_val, GLfixed far_val) {
     glFrustumf(left / 65536.0f, right / 65536.0f, bottom / 65536.0f, top / 65536.0f, near_val / 65536.0f, far_val / 65536.0f);
+}
+
+void glActiveTexture(GLenum texture) {
+    (void)texture; /* single texture unit on PICA200 — unit 0 only */
+}
+
+void glClientActiveTexture(GLenum texture) {
+    (void)texture;
+}
+
+void glMultiTexCoord4f(GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q) {
+    (void)target; (void)s; (void)t; (void)r; (void)q;
+}
+
+void glTexEnvi(GLenum target, GLenum pname, GLint param) {
+    (void)target;
+    if (pname == GL_TEXTURE_ENV_MODE) {
+        g.tev_dirty = 1;
+        C3D_TexEnv *env0 = C3D_GetTexEnv(0);
+        C3D_TexEnvInit(env0);
+        switch (param) {
+            case GL_MODULATE:
+                C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0);
+                C3D_TexEnvFunc(env0, C3D_Both, GPU_MODULATE);
+                break;
+            case GL_REPLACE:
+                C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+                C3D_TexEnvFunc(env0, C3D_Both, GPU_REPLACE);
+                break;
+            case GL_DECAL:
+                C3D_TexEnvSrc(env0, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_TEXTURE0);
+                C3D_TexEnvFunc(env0, C3D_RGB, GPU_INTERPOLATE);
+                C3D_TexEnvSrc(env0, C3D_Alpha, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+                C3D_TexEnvFunc(env0, C3D_Alpha, GPU_REPLACE);
+                break;
+            case GL_ADD:
+                C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0);
+                C3D_TexEnvFunc(env0, C3D_Both, GPU_ADD);
+                break;
+            default:
+                C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0);
+                C3D_TexEnvFunc(env0, C3D_Both, GPU_MODULATE);
+                break;
+        }
+    }
+}
+
+void glTexEnvf(GLenum target, GLenum pname, GLfloat param) {
+    glTexEnvi(target, pname, (GLint)param);
+}
+
+void glTexEnvfv(GLenum target, GLenum pname, const GLfloat *params) {
+    if (pname == GL_TEXTURE_ENV_COLOR && params) {
+        /* TEV env color — store but PICA200 TEV constant color is limited */
+        (void)target;
+    } else if (params) {
+        glTexEnvi(target, pname, (GLint)params[0]);
+    }
+}
+
+GLboolean glIsEnabled(GLenum cap) {
+    switch (cap) {
+        case GL_DEPTH_TEST:    return g.depth_test_enabled;
+        case GL_BLEND:         return g.blend_enabled;
+        case GL_ALPHA_TEST:    return g.alpha_test_enabled;
+        case GL_CULL_FACE:     return g.cull_face_enabled;
+        case GL_TEXTURE_2D:    return g.texture_2d_enabled;
+        case GL_SCISSOR_TEST:  return g.scissor_test_enabled;
+        case GL_FOG:           return g.fog_enabled;
+        default:               return GL_FALSE;
+    }
+}
+
+GLboolean glIsTexture(GLuint texture) {
+    if (texture > 0 && texture < GL2C3D_MAX_TEXTURES && g.textures[texture].allocated) return GL_TRUE;
+    return GL_FALSE;
 }
