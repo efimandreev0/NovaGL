@@ -14,7 +14,7 @@
 /* Configuration                                                             */
 /* ========================================================================= */
 #define GL2C3D_MAX_TEXTURES     2048
-#define GL2C3D_INITIAL_VBOS     4096
+#define GL2C3D_MAX_VBOS         32768
 #define GL2C3D_MATRIX_STACK     32
 #define GL2C3D_DISPLAY_LISTS    512
 #define GL2C3D_DL_MAX_OPS       64
@@ -95,8 +95,7 @@ static struct {
     int        tex_next_id;
     int        texture_2d_enabled;
 
-    VBOSlot   *vbos;
-    int        vbo_capacity;
+    VBOSlot    vbos[GL2C3D_MAX_VBOS];
     GLuint     bound_array_buffer;
     GLuint     bound_element_array_buffer;
     int        vbo_next_id;
@@ -166,18 +165,6 @@ static struct {
 
 static void dl_record_translate(float x, float y, float z);
 static void dl_record_color3f(float r, float g_, float b);
-
-static int vbo_ensure_capacity(GLuint id) {
-    if ((int)id < g.vbo_capacity) return 1;
-    int new_cap = g.vbo_capacity ? g.vbo_capacity : GL2C3D_INITIAL_VBOS;
-    while (new_cap <= (int)id) new_cap *= 2;
-    VBOSlot *new_vbos = (VBOSlot*)realloc(g.vbos, new_cap * sizeof(VBOSlot));
-    if (!new_vbos) return 0;
-    memset(new_vbos + g.vbo_capacity, 0, (new_cap - g.vbo_capacity) * sizeof(VBOSlot));
-    g.vbos = new_vbos;
-    g.vbo_capacity = new_cap;
-    return 1;
-}
 
 static GPU_TESTFUNC gl_to_gpu_testfunc(GLenum func) {
     switch (func) {
@@ -390,7 +377,10 @@ void nova_init(void) {
     AttrInfo_AddLoader(&g.attr_info, 2, GPU_UNSIGNED_BYTE, 4);
     C3D_SetAttrInfo(&g.attr_info);
 
-    C3D_DepthMap(false, 1.0f, 1.0f);
+    // After z-remap, z_ndc ∈ [-1, 0]. OpenGL near→-1, far→0.
+    // z_buf = z_ndc + 1 → near(0), far(1). GL_LEQUAL works: near(0) ≤ far(1).
+    // bIsZBuffer=true negates zScale internally, so pass -1.0 to get +1.0 on GPU.
+    C3D_DepthMap(true, -1.0f, 1.0f);
 
     g.client_array_buf_size = 2 * 1024 * 1024;
     g.client_array_buf = linearAlloc(g.client_array_buf_size);
@@ -430,8 +420,6 @@ void nova_init(void) {
     g.color_mask_r = g.color_mask_g = g.color_mask_b = g.color_mask_a = GL_TRUE;
 
     g.tex_next_id = 1;
-    g.vbos = (VBOSlot*)calloc(GL2C3D_INITIAL_VBOS, sizeof(VBOSlot));
-    g.vbo_capacity = GL2C3D_INITIAL_VBOS;
     g.vbo_next_id = 1;
     g.dl_recording = -1;
     g.dl_next_base = 1;
@@ -447,10 +435,9 @@ void nova_fini(void) {
     for (int i = 0; i < GL2C3D_MAX_TEXTURES; i++) {
         if (g.textures[i].allocated) C3D_TexDelete(&g.textures[i].tex);
     }
-    for (int i = 0; i < g.vbo_capacity; i++) {
+    for (int i = 0; i < GL2C3D_MAX_VBOS; i++) {
         if (g.vbos[i].allocated && g.vbos[i].data) linearFree(g.vbos[i].data);
     }
-    free(g.vbos); g.vbos = NULL; g.vbo_capacity = 0;
     if (g.shader_dvlb) {
         shaderProgramFree(&g.shader_program);
         DVLB_Free(g.shader_dvlb);
@@ -471,13 +458,14 @@ void nova_set_render_target(int is_right_eye) {
 static void apply_gpu_state(void) {
     if (g.matrices_dirty) {
         if (g.uLoc_projection >= 0) {
-            // Remap z from OpenGL [-1,+1] to PICA200 [-1,0]:
-            // new_row2 = row2 * 0.5 - row3 * 0.5
+            // Remap z from OpenGL [-1,+1] to PICA200 [-0.9999, -0.0001]:
+            // new_z = old_z * 0.4999 - 0.5
+            // Both boundaries safely inside PICA200 clip range [-1, 0]
             C3D_Mtx adj_proj = g.proj_stack[g.proj_sp];
-            adj_proj.r[2].x = adj_proj.r[2].x * 0.5f - adj_proj.r[3].x * 0.5f;
-            adj_proj.r[2].y = adj_proj.r[2].y * 0.5f - adj_proj.r[3].y * 0.5f;
-            adj_proj.r[2].z = adj_proj.r[2].z * 0.5f - adj_proj.r[3].z * 0.5f;
-            adj_proj.r[2].w = adj_proj.r[2].w * 0.5f - adj_proj.r[3].w * 0.5f;
+            adj_proj.r[2].x = adj_proj.r[2].x * 0.4999f - adj_proj.r[3].x * 0.5f;
+            adj_proj.r[2].y = adj_proj.r[2].y * 0.4999f - adj_proj.r[3].y * 0.5f;
+            adj_proj.r[2].z = adj_proj.r[2].z * 0.4999f - adj_proj.r[3].z * 0.5f;
+            adj_proj.r[2].w = adj_proj.r[2].w * 0.4999f - adj_proj.r[3].w * 0.5f;
 
             C3D_Mtx tilt;
             Mtx_Identity(&tilt);
@@ -637,8 +625,8 @@ void glDepthMask(GLboolean flag) { g.depth_mask = flag; }
 void glDepthRangef(GLclampf near_val, GLclampf far_val) {
     near_val = clampf(near_val, 0.0f, 1.0f);
     far_val  = clampf(far_val, 0.0f, 1.0f);
-    // After z-remap, z_ndc is in [-1, 0]. Map to [near_val, far_val]:
-    // z_buf(-1)=near_val, z_buf(0)=far_val => z_buf = z_ndc*(far-near) + far
+    // After z-remap, z_ndc ∈ [-1, 0]. near→-1, far→0.
+    // z_buf = z_ndc*(far-near) + far → near(-1)→near_val, far(0)→far_val
     C3D_DepthMap(false, far_val - near_val, far_val);
 }
 void glBlendFunc(GLenum sfactor, GLenum dfactor) { g.blend_src = sfactor; g.blend_dst = dfactor; }
@@ -954,27 +942,22 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, G
 
 void glGenBuffers(GLsizei n, GLuint *buffers) {
     for (GLsizei i = 0; i < n; i++) {
-        if (!vbo_ensure_capacity(g.vbo_next_id + 1)) {
-            g.last_error = GL_OUT_OF_MEMORY; buffers[i] = 0; continue;
-        }
         GLuint start = g.vbo_next_id;
-        while (g.vbo_next_id < (GLuint)g.vbo_capacity && g.vbos[g.vbo_next_id].allocated) {
+        while (g.vbos[g.vbo_next_id].allocated) {
             g.vbo_next_id++;
-        }
-        if (g.vbo_next_id >= (GLuint)g.vbo_capacity) {
-            if (!vbo_ensure_capacity(g.vbo_next_id + 1)) {
-                g.last_error = GL_OUT_OF_MEMORY; buffers[i] = 0; continue;
-            }
+            if (g.vbo_next_id >= GL2C3D_MAX_VBOS) g.vbo_next_id = 1;
+            if (g.vbo_next_id == start) { g.last_error = GL_OUT_OF_MEMORY; buffers[i] = 0; break; }
         }
         buffers[i] = g.vbo_next_id;
         g.vbo_next_id++;
+        if (g.vbo_next_id >= GL2C3D_MAX_VBOS) g.vbo_next_id = 1;
     }
 }
 
 void glDeleteBuffers(GLsizei n, const GLuint *buffers) {
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = buffers[i];
-        if (id > 0 && (int)id < g.vbo_capacity && g.vbos[id].allocated) {
+        if (id > 0 && (int)id < GL2C3D_MAX_VBOS && g.vbos[id].allocated) {
             if (g.vbos[id].data) linearFree(g.vbos[id].data);
             g.vbos[id].data = NULL; g.vbos[id].size = 0; g.vbos[id].allocated = 0;
             if (g.bound_array_buffer == id) g.bound_array_buffer = 0;
@@ -994,11 +977,7 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
     if (target == GL_ARRAY_BUFFER) bound = g.bound_array_buffer;
     else if (target == GL_ELEMENT_ARRAY_BUFFER) bound = g.bound_element_array_buffer;
 
-    if (bound == 0) return;
-    if (!vbo_ensure_capacity(bound + 1)) {
-        g.last_error = GL_OUT_OF_MEMORY;
-        return;
-    }
+    if (bound == 0 || bound >= GL2C3D_MAX_VBOS) return;
     VBOSlot *slot = &g.vbos[bound];
 
     if (slot->allocated && slot->size < (int)size) {
@@ -1023,7 +1002,7 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
     GLuint bound = 0;
     if (target == GL_ARRAY_BUFFER) bound = g.bound_array_buffer;
     else if (target == GL_ELEMENT_ARRAY_BUFFER) bound = g.bound_element_array_buffer;
-    if (bound == 0 || (int)bound >= g.vbo_capacity) return;
+    if (bound == 0 || (int)bound >= GL2C3D_MAX_VBOS) return;
     VBOSlot *slot = &g.vbos[bound];
     if (!slot->allocated || !slot->data || !data) return;
     if (offset + (int)size > slot->size) { g.last_error = GL_INVALID_VALUE; return; }
@@ -1067,7 +1046,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
 
     // VBO fast path: if all arrays come from the same VBO with matching {float3, float2, ubyte4} layout
     if (g.va_vertex.enabled && g.va_vertex.vbo_id > 0 &&
-        g.va_vertex.vbo_id < g.vbo_capacity && g.vbos[g.va_vertex.vbo_id].allocated &&
+        g.va_vertex.vbo_id < GL2C3D_MAX_VBOS && g.vbos[g.va_vertex.vbo_id].allocated &&
         g.va_vertex.size == 3 && g.va_vertex.type == GL_FLOAT && g.va_vertex.stride == 24 &&
         (uintptr_t)g.va_vertex.pointer == 0 &&
         g.va_texcoord.enabled && g.va_texcoord.vbo_id == g.va_vertex.vbo_id &&
@@ -1123,7 +1102,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
 
         for (int i = 0; i < count; i++) {
             if (g.va_vertex.enabled) {
-                const uint8_t *src_ptr = (g.va_vertex.vbo_id > 0 && g.va_vertex.vbo_id < g.vbo_capacity && g.vbos[g.va_vertex.vbo_id].allocated) ?
+                const uint8_t *src_ptr = (g.va_vertex.vbo_id > 0 && g.va_vertex.vbo_id < GL2C3D_MAX_VBOS && g.vbos[g.va_vertex.vbo_id].allocated) ?
                     (const uint8_t*)g.vbos[g.va_vertex.vbo_id].data + (uintptr_t)g.va_vertex.pointer : (const uint8_t*)g.va_vertex.pointer;
                 if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
                     float pos[3] = {0.0f, 0.0f, 0.0f};
@@ -1133,7 +1112,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             } else { memset(dst, 0, 12); }
 
             if (g.va_texcoord.enabled) {
-                const uint8_t *src_ptr = (g.va_texcoord.vbo_id > 0 && g.va_texcoord.vbo_id < g.vbo_capacity && g.vbos[g.va_texcoord.vbo_id].allocated) ?
+                const uint8_t *src_ptr = (g.va_texcoord.vbo_id > 0 && g.va_texcoord.vbo_id < GL2C3D_MAX_VBOS && g.vbos[g.va_texcoord.vbo_id].allocated) ?
                     (const uint8_t*)g.vbos[g.va_texcoord.vbo_id].data + (uintptr_t)g.va_texcoord.pointer : (const uint8_t*)g.va_texcoord.pointer;
                 if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
                     float tc[2] = {0.0f, 0.0f};
@@ -1143,7 +1122,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
             } else { memset(dst + 12, 0, 8); }
 
             if (g.va_color.enabled) {
-                const uint8_t *src_ptr = (g.va_color.vbo_id > 0 && g.va_color.vbo_id < g.vbo_capacity && g.vbos[g.va_color.vbo_id].allocated) ?
+                const uint8_t *src_ptr = (g.va_color.vbo_id > 0 && g.va_color.vbo_id < GL2C3D_MAX_VBOS && g.vbos[g.va_color.vbo_id].allocated) ?
                     (const uint8_t*)g.vbos[g.va_color.vbo_id].data + (uintptr_t)g.va_color.pointer : (const uint8_t*)g.va_color.pointer;
                 if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
                     if (g.va_color.type == GL_UNSIGNED_BYTE) {
@@ -1201,7 +1180,7 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
 
     const uint8_t *idx_src = NULL;
 
-    if (g.bound_element_array_buffer > 0 && g.bound_element_array_buffer < g.vbo_capacity &&
+    if (g.bound_element_array_buffer > 0 && g.bound_element_array_buffer < GL2C3D_MAX_VBOS &&
         g.vbos[g.bound_element_array_buffer].allocated && g.vbos[g.bound_element_array_buffer].data) {
         idx_src = (const uint8_t*)g.vbos[g.bound_element_array_buffer].data + (uintptr_t)indices;
     } else {
@@ -1218,7 +1197,7 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
 
     // VBO fast path for indexed drawing with matching layout
     if (g.va_vertex.enabled && g.va_vertex.vbo_id > 0 &&
-        g.va_vertex.vbo_id < g.vbo_capacity && g.vbos[g.va_vertex.vbo_id].allocated &&
+        g.va_vertex.vbo_id < GL2C3D_MAX_VBOS && g.vbos[g.va_vertex.vbo_id].allocated &&
         g.va_vertex.size == 3 && g.va_vertex.type == GL_FLOAT && g.va_vertex.stride == 24 &&
         (uintptr_t)g.va_vertex.pointer == 0 &&
         g.va_texcoord.enabled && g.va_texcoord.vbo_id == g.va_vertex.vbo_id &&
@@ -1269,7 +1248,7 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
         int src_index = (type == GL_UNSIGNED_SHORT) ? ((const uint16_t*)idx_src)[i] : ((const uint8_t*)idx_src)[i];
 
         if (g.va_vertex.enabled) {
-            const uint8_t *src_ptr = (g.va_vertex.vbo_id > 0 && g.va_vertex.vbo_id < g.vbo_capacity && g.vbos[g.va_vertex.vbo_id].allocated) ?
+            const uint8_t *src_ptr = (g.va_vertex.vbo_id > 0 && g.va_vertex.vbo_id < GL2C3D_MAX_VBOS && g.vbos[g.va_vertex.vbo_id].allocated) ?
                 (const uint8_t*)g.vbos[g.va_vertex.vbo_id].data + (uintptr_t)g.va_vertex.pointer : (const uint8_t*)g.va_vertex.pointer;
             if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
                 float pos[3] = {0.0f, 0.0f, 0.0f};
@@ -1279,7 +1258,7 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
         } else memset(dst, 0, 12);
 
         if (g.va_texcoord.enabled) {
-            const uint8_t *src_ptr = (g.va_texcoord.vbo_id > 0 && g.va_texcoord.vbo_id < g.vbo_capacity && g.vbos[g.va_texcoord.vbo_id].allocated) ?
+            const uint8_t *src_ptr = (g.va_texcoord.vbo_id > 0 && g.va_texcoord.vbo_id < GL2C3D_MAX_VBOS && g.vbos[g.va_texcoord.vbo_id].allocated) ?
                 (const uint8_t*)g.vbos[g.va_texcoord.vbo_id].data + (uintptr_t)g.va_texcoord.pointer : (const uint8_t*)g.va_texcoord.pointer;
             if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
                 float tc[2] = {0.0f, 0.0f};
@@ -1289,7 +1268,7 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
         } else memset(dst + 12, 0, 8);
 
         if (g.va_color.enabled) {
-            const uint8_t *src_ptr = (g.va_color.vbo_id > 0 && g.va_color.vbo_id < g.vbo_capacity && g.vbos[g.va_color.vbo_id].allocated) ?
+            const uint8_t *src_ptr = (g.va_color.vbo_id > 0 && g.va_color.vbo_id < GL2C3D_MAX_VBOS && g.vbos[g.va_color.vbo_id].allocated) ?
                 (const uint8_t*)g.vbos[g.va_color.vbo_id].data + (uintptr_t)g.va_color.pointer : (const uint8_t*)g.va_color.pointer;
             if (src_ptr && (uintptr_t)src_ptr > 0x1000) {
                 if (g.va_color.type == GL_UNSIGNED_BYTE) {
