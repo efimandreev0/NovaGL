@@ -627,7 +627,7 @@ void glDepthRangef(GLclampf near_val, GLclampf far_val) {
     far_val  = clampf(far_val, 0.0f, 1.0f);
     // After z-remap, z_ndc ∈ [-1, 0]. near→-1, far→0.
     // z_buf = z_ndc*(far-near) + far → near(-1)→near_val, far(0)→far_val
-    C3D_DepthMap(false, far_val - near_val, far_val);
+    C3D_DepthMap(true, -(far_val - near_val), far_val);
 }
 void glBlendFunc(GLenum sfactor, GLenum dfactor) { g.blend_src = sfactor; g.blend_dst = dfactor; }
 void glAlphaFunc(GLenum func, GLclampf ref) { g.alpha_func = func; g.alpha_ref = ref; }
@@ -637,7 +637,7 @@ void glShadeModel(GLenum mode) { (void)mode; }
 void glPolygonOffset(GLfloat factor, GLfloat units) {
     g.polygon_offset_factor = factor;
     g.polygon_offset_units = units;
-    C3D_DepthMap(false, 1.0f, 1.0f + (units * 0.0001f));
+    C3D_DepthMap(true, -1.0f, 1.0f + (units * 0.0001f));
 }
 
 void glLineWidth(GLfloat width) { (void)width; }
