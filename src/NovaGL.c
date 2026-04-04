@@ -157,6 +157,10 @@ static struct {
     int        tev_dirty;
     int        last_tex_state;
     GLint      tex_env_mode;
+
+    int polygon_offset_fill_enabled;
+    GLfloat    depth_near;
+    GLfloat    depth_far;
 } g;
 
 #include "../.dkp-generated/shaders/NovaGL_shader_shbin.h"
@@ -171,6 +175,32 @@ static struct {
 static void dl_record_translate(float x, float y, float z);
 static void dl_record_color3f(float r, float g_, float b);
 
+static GPU_TESTFUNC gl_to_gpu_alpha_testfunc(GLenum func) {
+    switch (func) {
+        case GL_NEVER:    return GPU_NEVER;
+        case GL_LESS:     return GPU_LESS;
+        case GL_EQUAL:    return GPU_EQUAL;
+        case GL_LEQUAL:   return GPU_LEQUAL;
+        case GL_GREATER:  return GPU_GREATER;
+        case GL_NOTEQUAL: return GPU_NOTEQUAL;
+        case GL_GEQUAL:   return GPU_GEQUAL;
+        case GL_ALWAYS:   return GPU_ALWAYS;
+        default:          return GPU_ALWAYS;
+    }
+}
+static GPU_TESTFUNC gl_to_gpu_depth_testfunc(GLenum func) {
+    switch (func) {
+        case GL_NEVER:    return GPU_NEVER;
+        case GL_LESS:     return GPU_GREATER;
+        case GL_EQUAL:    return GPU_EQUAL;
+        case GL_LEQUAL:   return GPU_GEQUAL;
+        case GL_GREATER:  return GPU_LESS;
+        case GL_NOTEQUAL: return GPU_NOTEQUAL;
+        case GL_GEQUAL:   return GPU_LEQUAL;
+        case GL_ALWAYS:   return GPU_ALWAYS;
+        default:          return GPU_ALWAYS;
+    }
+}
 static GPU_TESTFUNC gl_to_gpu_testfunc(GLenum func) {
     switch (func) {
         case GL_NEVER:    return GPU_NEVER;
@@ -204,9 +234,17 @@ static GPU_BLENDFACTOR gl_to_gpu_blendfactor(GLenum factor) {
 
 static int gl_type_size(GLenum type) {
     switch (type) {
-        case GL_BYTE:           case GL_UNSIGNED_BYTE:  return 1;
-        case GL_SHORT:          case GL_UNSIGNED_SHORT: return 2;
-        case GL_FLOAT:          case GL_INT:            case GL_UNSIGNED_INT: return 4;
+        case GL_BYTE:
+        case GL_UNSIGNED_BYTE:  return 1;
+
+        case GL_SHORT:
+        case GL_UNSIGNED_SHORT: return 2;
+
+        case GL_FLOAT:
+        case GL_INT:
+        case GL_UNSIGNED_INT:
+        case GL_FIXED:          return 4;
+
         default:                return 4;
     }
 }
@@ -219,6 +257,12 @@ static void read_vertex_attrib_float(float *dst, const uint8_t *src, GLint size,
     switch (type) {
         case GL_FLOAT:
             memcpy(dst, src, size * sizeof(float));
+            break;
+        case GL_FIXED:
+            for (int j = 0; j < size; j++) {
+                // GL_FIXED (16.16) конвертируем в float
+                dst[j] = (float)((const int32_t*)src)[j] / 65536.0f;
+            }
             break;
         case GL_SHORT:
             for (int j = 0; j < size; j++) dst[j] = (float)((const int16_t*)src)[j];
@@ -378,6 +422,17 @@ static uint32_t* rgb_to_rgba(const uint8_t *rgb, int w, int h) {
 extern const unsigned char NovaGL_shader_shbin[];
 static const void* _force_shader_ref = NovaGL_shader_shbin;
 
+static void apply_depth_map(void) {
+    float scale = g.depth_far - g.depth_near;
+    float offset = g.depth_far;
+
+    if (g.polygon_offset_fill_enabled) {
+        offset += (g.polygon_offset_units * 0.0001f);
+    }
+
+    C3D_DepthMap(true, scale, offset);
+}
+
 void nova_init(void) {
     memset(&g, 0, sizeof(g));
 
@@ -410,10 +465,10 @@ void nova_init(void) {
     AttrInfo_AddLoader(&g.attr_info, 2, GPU_UNSIGNED_BYTE, 4);
     C3D_SetAttrInfo(&g.attr_info);
 
-    // After z-remap, z_ndc ∈ [-1, 0]. OpenGL near→-1, far→0.
-    // z_buf = z_ndc + 1 → near(0), far(1). GL_LEQUAL works: near(0) ≤ far(1).
-    // bIsZBuffer=true negates zScale internally, so pass -1.0 to get +1.0 on GPU.
-    C3D_DepthMap(true, -1.0f, 1.0f);
+    g.depth_near = 0.0f;
+    g.depth_far = 1.0f;
+    g.polygon_offset_fill_enabled = 0;
+    apply_depth_map();
 
     g.client_array_buf_size = 2 * 1024 * 1024;
     g.client_array_buf = linearAlloc(g.client_array_buf_size);
@@ -491,7 +546,6 @@ void nova_set_render_target(int is_right_eye) {
     C3D_FrameDrawOn(is_right_eye ? g.render_target_bot : g.render_target_top);
     g.current_target = is_right_eye ? g.render_target_bot : g.render_target_top;
 }
-
 static void apply_gpu_state(void) {
     if (g.matrices_dirty) {
         if (g.uLoc_projection >= 0) {
@@ -625,18 +679,26 @@ void glClearDepthf(GLclampf depth) { g.clear_depth = clampf(depth, 0.0f, 1.0f); 
 
 void glClear(GLbitfield mask) {
     C3D_ClearBits bits = 0;
-    u32 color = 0; u32 depth = 0;
+    u32 color = 0;
+    u32 depth = 0;
+
     if (mask & GL_COLOR_BUFFER_BIT) {
         bits |= C3D_CLEAR_COLOR;
-        color = ((u32)(g.clear_r * 255.0f) << 24) | ((u32)(g.clear_g * 255.0f) << 16) | ((u32)(g.clear_b * 255.0f) << 8) | ((u32)(g.clear_a * 255.0f) << 0);
+        color = ((u32)(g.clear_r * 255.0f) << 24) |
+                ((u32)(g.clear_g * 255.0f) << 16) |
+                ((u32)(g.clear_b * 255.0f) << 8)  |
+                ((u32)(g.clear_a * 255.0f) << 0);
     }
+
     if (mask & GL_DEPTH_BUFFER_BIT) {
         bits |= C3D_CLEAR_DEPTH;
         depth = (u32)(g.clear_depth * 0xFFFFFF);
     }
-    if (bits && g.current_target) C3D_RenderTargetClear(g.current_target, bits, color, depth);
-}
 
+    if (bits && g.current_target) {
+        C3D_RenderTargetClear(g.current_target, bits, color, depth);
+    }
+}
 void glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
     g.vp_x = x; g.vp_y = y; g.vp_w = width; g.vp_h = height;
     C3D_SetViewport(y, x, height, width);
@@ -655,6 +717,10 @@ void glEnable(GLenum cap) {
         case GL_TEXTURE_2D:    g.tev_dirty = 1; g.texture_2d_enabled = 1; break;
         case GL_SCISSOR_TEST:  g.scissor_test_enabled = 1; break;
         case GL_FOG:           g.fog_enabled = 1; g.fog_dirty = 1; break;
+        case GL_POLYGON_OFFSET_FILL:
+            g.polygon_offset_fill_enabled = 1;
+            apply_depth_map();
+            break;
         default: break;
     }
 }
@@ -668,6 +734,10 @@ void glDisable(GLenum cap) {
         case GL_TEXTURE_2D:    g.tev_dirty = 1; g.texture_2d_enabled = 0; break;
         case GL_SCISSOR_TEST:  g.scissor_test_enabled = 0; break;
         case GL_FOG:           g.fog_enabled = 0; break;
+        case GL_POLYGON_OFFSET_FILL:
+            g.polygon_offset_fill_enabled = 0;
+            apply_depth_map();
+            break;
         default: break;
     }
 }
@@ -676,12 +746,11 @@ void glDepthFunc(GLenum func) { g.depth_func = func; }
 void glDepthMask(GLboolean flag) { g.depth_mask = flag; }
 
 void glDepthRangef(GLclampf near_val, GLclampf far_val) {
-    near_val = clampf(near_val, 0.0f, 1.0f);
-    far_val  = clampf(far_val, 0.0f, 1.0f);
-    // After z-remap, z_ndc ∈ [-1, 0]. near→-1, far→0.
-    // z_buf = z_ndc*(far-near) + far → near(-1)→near_val, far(0)→far_val
-    C3D_DepthMap(true, -(far_val - near_val), far_val);
+    g.depth_near = clampf(near_val, 0.0f, 1.0f);
+    g.depth_far  = clampf(far_val, 0.0f, 1.0f);
+    apply_depth_map();
 }
+
 void glBlendFunc(GLenum sfactor, GLenum dfactor) { g.blend_src = sfactor; g.blend_dst = dfactor; }
 void glAlphaFunc(GLenum func, GLclampf ref) { g.alpha_func = func; g.alpha_ref = ref; }
 void glCullFace(GLenum mode) { g.cull_face_mode = mode; }
@@ -690,9 +759,8 @@ void glShadeModel(GLenum mode) { (void)mode; }
 void glPolygonOffset(GLfloat factor, GLfloat units) {
     g.polygon_offset_factor = factor;
     g.polygon_offset_units = units;
-    C3D_DepthMap(true, -1.0f, 1.0f + (units * 0.0001f));
+    apply_depth_map();
 }
-
 void glLineWidth(GLfloat width) { (void)width; }
 void glPolygonMode(GLenum face, GLenum mode) { (void)face; (void)mode; }
 
