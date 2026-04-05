@@ -46,21 +46,16 @@ make
 
 int main(void) {
     gfxInitDefault();
-    gl2c3d_init();       // Initialize translator + Citro3D
+    nova_init();       // Initialize translator + Citro3D
 
     while (aptMainLoop()) {
-        gl2c3d_frame_begin();
-        gl2c3d_set_render_target(0);  // 0 = top screen
-
-        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
+        
         // ... your GL ES 1.1 drawing code ...
-
-        gl2c3d_frame_end();
+        
+        NovaSwapBuffers();
     }
 
-    gl2c3d_fini();       // Cleanup
+    nova_fini();       // Cleanup
     gfxExit();
     return 0;
 }
@@ -82,8 +77,7 @@ typedef struct {
 
 - Vertex data **must** be in linear memory (`linearAlloc`) for GPU access
 - Textures are automatically Morton-swizzled during `glTexImage2D`
-- Use `gl2c3d_frame_begin()` / `gl2c3d_frame_end()` instead of swap buffers
-- `gl2c3d_set_render_target(0)` for top screen, `(1)` for bottom screen
+- `nova_set_render_target(0)` for top screen, `(1)` for bottom screen
 - Max texture size limited by PICA200 (typically 1024x1024)
 
 ## License
