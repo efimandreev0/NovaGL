@@ -2,19 +2,21 @@
  * NovaGL.h - OpenGL ES 1.1 -> Citro3D Translation Layer
  */
 
-#ifndef GL2CITRO3D_H
-#define GL2CITRO3D_H
+#ifndef NOVA_H
+#define NOVA_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
+#include <3ds.h>
+#include <citro3d.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
 
-/* ========================================================================= */
-/* GL Type Definitions                                                       */
-/* ========================================================================= */
+/* GL Types */
 typedef unsigned int    GLenum;
 typedef unsigned char   GLboolean;
 typedef unsigned int    GLbitfield;
@@ -33,10 +35,27 @@ typedef int             GLfixed;
 typedef ptrdiff_t       GLintptr;
 typedef ptrdiff_t       GLsizeiptr;
 typedef float           GLdouble;
+//nova_constants
+#define NOVA_MAX_TEXTURES     2048
+#define NOVA_MAX_VBOS         32768
+#define NOVA_MATRIX_STACK     32
+#define NOVA_DISPLAY_LISTS    512
+#define NOVA_DL_MAX_OPS       64
+#define NOVA_CMD_BUF_SIZE     (512 * 1024)
 
-/* ========================================================================= */
-/* GL Constants (Оставил всё как было, они правильные)                       */
-/* ========================================================================= */
+#define NOVA_SCREEN_W         400
+#define NOVA_SCREEN_H         240
+
+#define NOVA_SCREEN_BOTTOM_W  240
+#define NOVA_SCREEN_BOTTOM_H  320
+
+#define DISPLAY_TRANSFER_FLAGS \
+(GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | \
+GX_TRANSFER_RAW_COPY(0) | \
+GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | \
+GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
+GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
+//GL_constants
 #define GL_FALSE                    0
 #define GL_TRUE                     1
 #define GL_NO_ERROR                 0
@@ -208,10 +227,145 @@ typedef float           GLdouble;
 #define GL_TEXTURE2                 0x84C2
 #define GL_TEXTURE3                 0x84C3
 #define GL_MAX_TEXTURE_UNITS        0x84E2
+//Structures 
+    typedef struct {
+    C3D_Tex     tex;
+    int         allocated;
+    int         width, height;
+    int         pot_w, pot_h;
+    GPU_TEXCOLOR fmt;
+    int         min_filter;
+    int         mag_filter;
+    int         wrap_s;
+    int         wrap_t;
+} TexSlot;
 
-/* ========================================================================= */
-/* API Declarations                                                          */
-/* ========================================================================= */
+typedef struct {
+    void   *data;
+    int     size;    
+    int     capacity;
+    int     allocated;
+#ifdef NOVA_VBO_STREAM
+    int     is_stream;
+#endif
+} VBOSlot;
+
+typedef enum {
+    DL_OP_TRANSLATE,
+    DL_OP_COLOR3F,
+    DL_OP_NONE,
+} DLOpType;
+
+typedef struct {
+    DLOpType type;
+    float    args[4];
+} DLOp;
+
+typedef struct {
+    DLOp ops[NOVA_DL_MAX_OPS];
+    int  count;
+    int  used;
+} DisplayList;
+
+static struct {
+    C3D_RenderTarget *render_target_top;
+    C3D_RenderTarget *render_target_bot;
+    C3D_RenderTarget *current_target;
+    DVLB_s           *shader_dvlb;
+    shaderProgram_s   shader_program;
+    int               uLoc_projection;
+    int               uLoc_modelview;
+    int               uLoc_fogparams;
+    C3D_AttrInfo      attr_info;
+
+    int        matrix_mode;
+    C3D_Mtx    proj_stack[NOVA_MATRIX_STACK];
+    int        proj_sp;
+    C3D_Mtx    mv_stack[NOVA_MATRIX_STACK];
+    int        mv_sp;
+    C3D_Mtx    tex_stack[NOVA_MATRIX_STACK];
+    int        tex_sp;
+    int        matrices_dirty;
+
+    float      cur_color[4];
+
+    TexSlot    textures[NOVA_MAX_TEXTURES];
+    GLuint     bound_texture;
+    int        tex_next_id;
+    int        texture_2d_enabled;
+
+    VBOSlot    vbos[NOVA_MAX_VBOS];
+    GLuint     bound_array_buffer;
+    GLuint     bound_element_array_buffer;
+    int        vbo_next_id;
+
+    struct {
+        int     enabled;
+        GLint   size;
+        GLenum  type;
+        GLsizei stride;
+        const void *pointer;
+        GLuint  vbo_id;
+    } va_vertex, va_texcoord, va_color, va_normal;
+
+    int        depth_test_enabled;
+    GLenum     depth_func;
+    GLboolean  depth_mask;
+    int        blend_enabled;
+    GLenum     blend_src, blend_dst;
+    int        alpha_test_enabled;
+    GLenum     alpha_func;
+    float      alpha_ref;
+    int        cull_face_enabled;
+    GLenum     cull_face_mode;
+    GLenum     front_face;
+
+    int        scissor_test_enabled;
+    GLint      scissor_x, scissor_y;
+    GLsizei    scissor_w, scissor_h;
+
+    int        fog_enabled;
+    GLenum     fog_mode;
+    float      fog_start, fog_end, fog_density;
+    float      fog_color[4];
+    C3D_FogLut fog_lut;
+    int        fog_dirty;
+
+    float      clear_r, clear_g, clear_b, clear_a;
+    float      clear_depth;
+    GLboolean  color_mask_r, color_mask_g, color_mask_b, color_mask_a;
+    float      polygon_offset_factor, polygon_offset_units;
+
+    GLint      vp_x, vp_y;
+    GLsizei    vp_w, vp_h;
+
+    DisplayList dl_store[NOVA_DISPLAY_LISTS];
+    int         dl_recording;
+    GLuint      dl_next_base;
+
+    GLenum     last_error;
+    int        initialized;
+    void      *client_array_buf;
+    int        client_array_buf_size;
+    int        client_array_buf_offset;
+
+    void      *index_buf;
+    int        index_buf_size;
+    int        index_buf_offset;
+
+    int        tev_dirty;
+    int        last_tex_state;
+    GLint      tex_env_mode;
+
+    int polygon_offset_fill_enabled;
+    GLfloat    depth_near;
+    GLfloat    depth_far;
+
+    void *tex_staging;
+    int   tex_staging_size;
+} g;
+//API
+void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_size, int tex_staging_size);
 void nova_init(void);
 void nova_fini(void);
 void nova_frame_begin(void);
@@ -224,8 +378,7 @@ void glClearColor(GLclampf r, GLclampf g, GLclampf b, GLclampf a);
 void glClearDepthf(GLclampf depth);
 void glViewport(GLint x, GLint y, GLsizei width, GLsizei height);
 void glScissor(GLint x, GLint y, GLsizei width, GLsizei height);
-void glEnable(GLenum cap);
-void glDisable(GLenum cap);
+
 void glDepthFunc(GLenum func);
 void glDepthMask(GLboolean flag);
 void glDepthRangef(GLclampf near_val, GLclampf far_val);
@@ -239,6 +392,8 @@ void glColor4ub(GLubyte r, GLubyte g, GLubyte b, GLubyte a);
 void glColor3ub(GLubyte r, GLubyte g, GLubyte b);
 void glColorMask(GLboolean r, GLboolean g, GLboolean b, GLboolean a);
 void glShadeModel(GLenum mode);
+
+//matrix.c
 void glMatrixMode(GLenum mode);
 void glLoadIdentity(void);
 void glPushMatrix(void);
@@ -249,6 +404,10 @@ void glScalef(GLfloat x, GLfloat y, GLfloat z);
 void glMultMatrixf(const GLfloat *m);
 void glLoadMatrixf(const GLfloat *m);
 void glOrthof(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloat near_val, GLfloat far_val);
+void glFrustumf(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloat near_val, GLfloat far_val);
+void glFrustum(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble near_val, GLdouble far_val);
+void glFrustumx(GLfixed left, GLfixed right, GLfixed bottom, GLfixed top, GLfixed near_val, GLfixed far_val);
+
 void glGenTextures(GLsizei n, GLuint *textures);
 void glDeleteTextures(GLsizei n, const GLuint *textures);
 void glBindTexture(GLenum target, GLuint texture);
@@ -298,15 +457,16 @@ void glEndList(void);
 void glCallList(GLuint list);
 void glCallLists(GLsizei n, GLenum type, const GLvoid *lists);
 void glDeleteLists(GLuint list, GLsizei range);
-void glFrustumf(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloat near_val, GLfloat far_val);
-void glFrustum(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble near_val, GLdouble far_val);
-void glFrustumx(GLfixed left, GLfixed right, GLfixed bottom, GLfixed top, GLfixed near_val, GLfixed far_val);
+
 void glActiveTexture(GLenum texture);
 void glClientActiveTexture(GLenum texture);
 void glMultiTexCoord4f(GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q);
 void glTexEnvi(GLenum target, GLenum pname, GLint param);
 void glTexEnvf(GLenum target, GLenum pname, GLfloat param);
 void glTexEnvfv(GLenum target, GLenum pname, const GLfloat *params);
+
+void glEnable(GLenum cap);
+void glDisable(GLenum cap);
 GLboolean glIsEnabled(GLenum cap);
 GLboolean glIsTexture(GLuint texture);
 
@@ -314,4 +474,4 @@ GLboolean glIsTexture(GLuint texture);
 }
 #endif
 
-#endif /* GL2CITRO3D_H */
+#endif /* NOVA_H */

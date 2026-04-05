@@ -11,9 +11,14 @@ ctr_add_shader_library(NovaGL_shader "${SHADER_SRC}")
 
 dkp_add_embedded_binary_library(shaders NovaGL_shader)
 
+option(NOVA_VBO_STREAM "Use VBO stream" ON)
+if (NOVA_VBO_STREAM)
+    add_definitions(-DNOVA_VBO_STREAM)
+endif()
 # Library sources
 add_library(NovaGL STATIC
         NovaGL.c
+        utils.c
 )
 
 target_include_directories(NovaGL
@@ -21,6 +26,7 @@ target_include_directories(NovaGL
         "${CMAKE_CURRENT_SOURCE_DIR}/../include"
         PRIVATE
         "${GENERATED_DIR}"
+        "../.dkp-generated/shaders/"
 )
 
 target_link_libraries(NovaGL
