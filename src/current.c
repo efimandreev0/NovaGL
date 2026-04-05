@@ -27,3 +27,5 @@ void glColor3ub(GLubyte r, GLubyte g_, GLubyte b) {
 void glMultiTexCoord4f(GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q) {
     (void)target; (void)s; (void)t; (void)r; (void)q;
 }
+
+void glNormal3f(GLfloat nx, GLfloat ny, GLfloat nz) { (void)nx; (void)ny; (void)nz; }

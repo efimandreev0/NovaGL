@@ -10,6 +10,7 @@
 void nova_init() {
     nova_init_ex(NOVA_CMD_BUF_SIZE, 512 * 1024, 256 * 1024, 512 * 1024);
 }
+
 void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_size, int tex_staging_size) {
     memset(&g, 0, sizeof(g));
 
@@ -123,11 +124,13 @@ void nova_frame_begin(void) {
     g.client_array_buf_offset = 0;
     g.index_buf_offset = 0;
 }
+
 void nova_frame_end(void) { C3D_FrameEnd(0); }
 void nova_set_render_target(int is_right_eye) {
     C3D_FrameDrawOn(is_right_eye ? g.render_target_bot : g.render_target_top);
     g.current_target = is_right_eye ? g.render_target_bot : g.render_target_top;
 }
+
 static void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements, GLenum type, const GLvoid *indices) {
     if (count <= 0) return;
     if (is_elements && type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_BYTE) {
@@ -272,64 +275,8 @@ static void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_e
 
     cleanup_vbo_stream();
 }
+
 GLenum glGetError(void) { GLenum e = g.last_error; g.last_error = GL_NO_ERROR; return e; }
-
-
-
-
-void glNormal3f(GLfloat nx, GLfloat ny, GLfloat nz) { (void)nx; (void)ny; (void)nz; }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-GLuint glGenLists(GLsizei range) {
-    GLuint base = g.dl_next_base;
-    g.dl_next_base += range;
-    if (g.dl_next_base >= NOVA_DISPLAY_LISTS) g.dl_next_base = 1;
-    for (GLsizei i = 0; i < range && (base + i) < NOVA_DISPLAY_LISTS; i++) {
-        g.dl_store[base + i].count = 0; g.dl_store[base + i].used = 1;
-    }
-    return base;
-}
-
-void glNewList(GLuint list, GLenum mode) {
-    (void)mode;
-    if (list < NOVA_DISPLAY_LISTS) { g.dl_recording = list; g.dl_store[list].count = 0; }
-}
-
-void glEndList(void) { g.dl_recording = -1; }
-
-void glCallList(GLuint list) { dl_execute(list); }
-
-void glCallLists(GLsizei n, GLenum type, const GLvoid *lists) {
-    for (GLsizei i = 0; i < n; i++) {
-        GLuint id = 0;
-        if (type == GL_UNSIGNED_INT) id = ((const GLuint*)lists)[i];
-        else if (type == GL_UNSIGNED_BYTE) id = ((const GLubyte*)lists)[i];
-        else if (type == GL_UNSIGNED_SHORT) id = ((const GLushort*)lists)[i];
-        dl_execute(id);
-    }
-}
-
-void glDeleteLists(GLuint list, GLsizei range) {
-    for (GLsizei i = 0; i < range && (list + i) < NOVA_DISPLAY_LISTS; i++) {
-        g.dl_store[list + i].used = 0; g.dl_store[list + i].count = 0;
-    }
-}
-
 
 void glFlush(void) { }
 void glFinish(void) { }
