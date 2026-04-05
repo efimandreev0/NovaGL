@@ -1,5 +1,5 @@
 ﻿//
-// Created by Notebook on 05.04.2026.
+// created by efimandreev0 on 05.04.2026.
 //
 
 #include "NovaGL.h"
@@ -48,29 +48,22 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
 
     VBOSlot *slot = &g.vbos[id];
 
-    // 🔥 если нужно больше памяти → расширяем
     if (!slot->allocated || slot->capacity < size)
     {
         int new_capacity = size;
 
-        if (slot->capacity > 0)
-        {
-            new_capacity = slot->capacity;
-            while (new_capacity < size)
-                new_capacity = (new_capacity * 3) / 2; // growth
+        if (slot->data) {
+            linearFree(slot->data);
+            slot->data = NULL;
         }
 
         void *new_buf = linearAlloc(new_capacity);
         if (!new_buf) {
             g.last_error = GL_OUT_OF_MEMORY;
+            slot->allocated = 0;
+            slot->capacity = 0;
+            slot->size = 0;
             return;
-        }
-
-        // копируем старые данные
-        if (slot->data)
-        {
-            memcpy(new_buf, slot->data, slot->size);
-            linearFree(slot->data);
         }
 
         slot->data = new_buf;
@@ -83,7 +76,8 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
 #ifdef NOVA_VBO_STREAM
     slot->is_stream = (usage == GL_STREAM_DRAW);
 #endif
-    if (data)
+
+    if (data && slot->data)
     {
         memcpy(slot->data, data, size);
         GSPGPU_FlushDataCache(slot->data, size);

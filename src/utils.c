@@ -144,7 +144,7 @@ void read_vertex_attrib_float(float *dst, const uint8_t *src, GLint size, GLenum
             break;
         case GL_FIXED:
             for (int j = 0; j < size; j++) {
-                // GL_FIXED (16.16) конвертируем в float
+                // GL_FIXED (16.16)
                 dst[j] = (float)((const int32_t*)src)[j] / 65536.0f;
             }
             break;
@@ -251,7 +251,8 @@ void swizzle_16bit(uint16_t *dst, const uint16_t *src, int src_w, int src_h, int
             dst[pixel_offset] = src[y * src_w + x];
         }
     }
-    // Заполняем пустоты (padding) нулями (прозрачным цветом)
+    // Padding
+
     for (int y = src_h; y < pot_h; y++) {
         for (int x = 0; x < pot_w; x++) {
             int flipped_y = pot_h - 1 - y;
@@ -462,24 +463,16 @@ void cleanup_vbo_stream(void) {
 void draw_emulated_quads(int count) {
     int num_quads = count / 4;
     int idx_count = num_quads * 6;
-    int idx_bytes = idx_count * 2;
 
-    if (idx_bytes > g.index_buf_size) return;
+    if (!g.static_quad_indices) return;
 
-    g.index_buf_offset = (g.index_buf_offset + 7) & ~7;
-    if (g.index_buf_offset + idx_bytes > g.index_buf_size) {
-        C3D_FrameSplit(0);
-        g.index_buf_offset = 0;
+    int quads_drawn = 0;
+    while (quads_drawn < num_quads) {
+        int quads_to_draw = num_quads - quads_drawn;
+        if (quads_to_draw > g.static_quad_count) quads_to_draw = g.static_quad_count;
+
+        C3D_DrawElements(GPU_TRIANGLES, quads_to_draw * 6, C3D_UNSIGNED_SHORT, g.static_quad_indices);
+
+        quads_drawn += quads_to_draw;
     }
-
-    uint16_t *idx = (uint16_t*)linear_alloc_ring(g.index_buf, &g.index_buf_offset, idx_bytes, g.index_buf_size);
-
-    for (int q = 0; q < num_quads; q++) {
-        uint16_t base = q * 4;
-        idx[q*6+0] = base+0; idx[q*6+1] = base+1; idx[q*6+2] = base+2;
-        idx[q*6+3] = base+0; idx[q*6+4] = base+2; idx[q*6+5] = base+3;
-    }
-
-    GSPGPU_FlushDataCache(idx, idx_bytes);
-    C3D_DrawElements(GPU_TRIANGLES, idx_count, C3D_UNSIGNED_SHORT, idx);
 }

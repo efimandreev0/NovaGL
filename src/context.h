@@ -1,5 +1,5 @@
 ﻿//
-// Created by Notebook on 05.04.2026.
+// created by efimandreev0 on 05.04.2026.
 //
 
 #ifndef NOVAGL_CONTEXT_H
@@ -142,6 +142,11 @@ extern struct NovaState{
 
     void *tex_staging;
     int   tex_staging_size;
+
+    uint16_t *static_quad_indices;
+    int static_quad_count;
+
+    bool RenderTargetBottom;
 } g;
 
 #endif //NOVAGL_CONTEXT_H

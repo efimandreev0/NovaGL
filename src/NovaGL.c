@@ -57,6 +57,17 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.index_buf_size = index_buf_size;
     g.index_buf = linearAlloc(g.index_buf_size);
 
+    g.static_quad_count = 16384;
+    g.static_quad_indices = (uint16_t*)linearAlloc(g.static_quad_count * 6 * sizeof(uint16_t));
+    if (g.static_quad_indices) {
+        for (int q = 0; q < g.static_quad_count; q++) {
+            uint16_t base = q * 4;
+            g.static_quad_indices[q*6+0] = base+0; g.static_quad_indices[q*6+1] = base+1; g.static_quad_indices[q*6+2] = base+2;
+            g.static_quad_indices[q*6+3] = base+0; g.static_quad_indices[q*6+4] = base+2; g.static_quad_indices[q*6+5] = base+3;
+        }
+        GSPGPU_FlushDataCache(g.static_quad_indices, g.static_quad_count * 6 * sizeof(uint16_t));
+    }
+
     g.matrix_mode = GL_MODELVIEW;
     Mtx_Identity(&g.proj_stack[0]);
     Mtx_Identity(&g.mv_stack[0]);
@@ -100,8 +111,25 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.tex_staging = linearAlloc(g.tex_staging_size);
 
     g.initialized = 1;
-}
 
+    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    g.client_array_buf_offset = 0;
+    g.index_buf_offset = 0;
+
+    C3D_FrameDrawOn(g.render_target_top);
+    g.current_target = g.render_target_top;
+}
+void novaSwapBuffers(void) {
+    C3D_FrameEnd(0);
+
+    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+
+    g.client_array_buf_offset = 0;
+    g.index_buf_offset = 0;
+
+    C3D_FrameDrawOn(g.render_target_top);
+    g.current_target = g.render_target_top;
+}
 void nova_fini(void) {
     if (!g.initialized) return;
     if (g.client_array_buf) linearFree(g.client_array_buf);
@@ -122,13 +150,6 @@ void nova_fini(void) {
     g.initialized = 0;
 }
 
-void nova_frame_begin(void) {
-    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
-    g.client_array_buf_offset = 0;
-    g.index_buf_offset = 0;
-}
-
-void nova_frame_end(void) { C3D_FrameEnd(0); }
 void nova_set_render_target(int is_right_eye) {
     C3D_FrameDrawOn(is_right_eye ? g.render_target_bot : g.render_target_top);
     g.current_target = is_right_eye ? g.render_target_bot : g.render_target_top;

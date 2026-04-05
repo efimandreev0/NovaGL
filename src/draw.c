@@ -1,5 +1,5 @@
 ﻿//
-// Created by Notebook on 05.04.2026.
+// created by efimandreev0 on 05.04.2026.
 //
 
 #include "NovaGL.h"

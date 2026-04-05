@@ -60,6 +60,12 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
 
         void *staging = get_tex_staging(needed);
 
+        if (!staging) {
+            printf("[NovaGL][ERROR] texture.c: glTexImage2D staging.");
+            g.last_error = GL_OUT_OF_MEMORY;
+            return;
+        }
+
         if (gpu_fmt == GPU_RGBA8)
         {
             const uint32_t *src = (const uint32_t*)pixels;

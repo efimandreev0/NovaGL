@@ -109,8 +109,6 @@ int main(void) {
 
         glEnable(GL_DEPTH_TEST);
 
-        /* 3. ИЗМЕНЕНИЕ: ВРЕМЕННО ВЫКЛЮЧАЕМ ТУМАН.
-           Он 100% закрашивал вам сцену. Мы включим его позже, когда убедимся в цветах. */
         glDisable(GL_FOG);
 
         glDisable(GL_TEXTURE_2D);
@@ -119,7 +117,6 @@ int main(void) {
         glEnableClientState(GL_VERTEX_ARRAY);
         glEnableClientState(GL_COLOR_ARRAY);
 
-        // offsetof безошибочно высчитает смещение, уберегая от ручных ошибок
         glVertexPointer(3, GL_FLOAT, sizeof(Vertex), (void*)offsetof(Vertex, x));
         glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), (void*)offsetof(Vertex, r));
 
