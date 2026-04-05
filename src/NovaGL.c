@@ -4,8 +4,11 @@
 
 #include "NovaGL.h"
 #include "utils.h"
+#include "context.h"
 
 #include "NovaGL_shader_shbin.h"
+
+struct NovaState g;
 
 void nova_init() {
     nova_init_ex(NOVA_CMD_BUF_SIZE, 512 * 1024, 256 * 1024, 512 * 1024);
@@ -131,7 +134,7 @@ void nova_set_render_target(int is_right_eye) {
     g.current_target = is_right_eye ? g.render_target_bot : g.render_target_top;
 }
 
-static void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements, GLenum type, const GLvoid *indices) {
+void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements, GLenum type, const GLvoid *indices) {
     if (count <= 0) return;
     if (is_elements && type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_BYTE) {
         g.last_error = GL_INVALID_ENUM;

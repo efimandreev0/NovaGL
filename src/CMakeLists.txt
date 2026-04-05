@@ -17,20 +17,20 @@ if (NOVA_VBO_STREAM)
 endif()
 # Library sources
 add_library(NovaGL STATIC
-        NovaGL.c
-        utils.c
         matrix.c
         state.c
         raster.c
-        clear.cpp
+        clear.c
         texture.c
         vbo.c
         vertex_array.c
         current.c
         draw.c
         fog.c
-        framebuffer.cpp
+        framebuffer.c
         display_list.c
+        utils.c
+        NovaGL.c
 )
 
 target_include_directories(NovaGL

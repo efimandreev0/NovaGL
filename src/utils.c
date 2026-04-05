@@ -4,14 +4,14 @@
 #include "NovaGL.h"
 #include "utils.h"
 
-static inline unsigned int next_pow2(unsigned int v) {
+unsigned int next_pow2(unsigned int v) {
     v--;
     v |= v >> 1; v |= v >> 2; v |= v >> 4;
     v |= v >> 8; v |= v >> 16;
     return v + 1;
 }
 
-static void* linear_alloc_ring(void *base, int *offset, int size, int capacity) {
+void* linear_alloc_ring(void *base, int *offset, int size, int capacity) {
     size = (size + 0x7F) & ~0x7F;
 
     if (*offset + size > capacity) {
@@ -24,11 +24,11 @@ static void* linear_alloc_ring(void *base, int *offset, int size, int capacity) 
     return ptr;
 }
 
-static inline float clampf(float x, float lo, float hi) {
+float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
 
-static void dl_record_translate(float x, float y, float z) {
+void dl_record_translate(float x, float y, float z) {
     if (g.dl_recording >= 0 && g.dl_recording < NOVA_DISPLAY_LISTS) {
         DisplayList *dl = &g.dl_store[g.dl_recording];
         if (dl->count < NOVA_DL_MAX_OPS) {
@@ -38,7 +38,7 @@ static void dl_record_translate(float x, float y, float z) {
     }
 }
 
-static void dl_record_color3f(float r, float g_, float b) {
+void dl_record_color3f(float r, float g_, float b) {
     if (g.dl_recording >= 0 && g.dl_recording < NOVA_DISPLAY_LISTS) {
         DisplayList *dl = &g.dl_store[g.dl_recording];
         if (dl->count < NOVA_DL_MAX_OPS) {
@@ -48,7 +48,7 @@ static void dl_record_color3f(float r, float g_, float b) {
     }
 }
 
-static void dl_execute(GLuint list) {
+void dl_execute(GLuint list) {
     if (list >= NOVA_DISPLAY_LISTS) return;
     DisplayList *dl = &g.dl_store[list];
     if (!dl->used) return;
@@ -59,7 +59,7 @@ static void dl_execute(GLuint list) {
     }
 }
 
-static GPU_TESTFUNC gl_to_gpu_alpha_testfunc(GLenum func) {
+GPU_TESTFUNC gl_to_gpu_alpha_testfunc(GLenum func) {
     switch (func) {
         case GL_NEVER:    return GPU_NEVER;
         case GL_LESS:     return GPU_LESS;
@@ -72,7 +72,7 @@ static GPU_TESTFUNC gl_to_gpu_alpha_testfunc(GLenum func) {
         default:          return GPU_ALWAYS;
     }
 }
-static GPU_TESTFUNC gl_to_gpu_depth_testfunc(GLenum func) {
+GPU_TESTFUNC gl_to_gpu_depth_testfunc(GLenum func) {
     switch (func) {
         case GL_NEVER:    return GPU_NEVER;
         case GL_LESS:     return GPU_GREATER;
@@ -85,7 +85,7 @@ static GPU_TESTFUNC gl_to_gpu_depth_testfunc(GLenum func) {
         default:          return GPU_ALWAYS;
     }
 }
-static GPU_TESTFUNC gl_to_gpu_testfunc(GLenum func) {
+GPU_TESTFUNC gl_to_gpu_testfunc(GLenum func) {
     switch (func) {
         case GL_NEVER:    return GPU_NEVER;
         case GL_LESS:     return GPU_LESS;
@@ -99,7 +99,7 @@ static GPU_TESTFUNC gl_to_gpu_testfunc(GLenum func) {
     }
 }
 
-static GPU_BLENDFACTOR gl_to_gpu_blendfactor(GLenum factor) {
+GPU_BLENDFACTOR gl_to_gpu_blendfactor(GLenum factor) {
     switch (factor) {
         case GL_ZERO:                return GPU_ZERO;
         case GL_ONE:                 return GPU_ONE;
@@ -116,7 +116,7 @@ static GPU_BLENDFACTOR gl_to_gpu_blendfactor(GLenum factor) {
     }
 }
 
-static int gl_type_size(GLenum type) {
+int gl_type_size(GLenum type) {
     switch (type) {
         case GL_BYTE:
         case GL_UNSIGNED_BYTE:  return 1;
@@ -133,11 +133,11 @@ static int gl_type_size(GLenum type) {
     }
 }
 
-static int calc_stride(GLsizei stride, GLint size, GLenum type) {
+int calc_stride(GLsizei stride, GLint size, GLenum type) {
     return stride ? stride : size * gl_type_size(type);
 }
 
-static void read_vertex_attrib_float(float *dst, const uint8_t *src, GLint size, GLenum type) {
+void read_vertex_attrib_float(float *dst, const uint8_t *src, GLint size, GLenum type) {
     switch (type) {
         case GL_FLOAT:
             memcpy(dst, src, size * sizeof(float));
@@ -160,7 +160,7 @@ static void read_vertex_attrib_float(float *dst, const uint8_t *src, GLint size,
     }
 }
 
-static GPU_Primitive_t gl_to_gpu_primitive(GLenum mode) {
+GPU_Primitive_t gl_to_gpu_primitive(GLenum mode) {
     switch (mode) {
         case GL_TRIANGLES:      return GPU_TRIANGLES;
         case GL_TRIANGLE_STRIP: return GPU_TRIANGLE_STRIP;
@@ -169,7 +169,7 @@ static GPU_Primitive_t gl_to_gpu_primitive(GLenum mode) {
     }
 }
 
-static GPU_TEXCOLOR gl_to_gpu_texfmt(GLenum format, GLenum type) {
+GPU_TEXCOLOR gl_to_gpu_texfmt(GLenum format, GLenum type) {
     if (format == GL_RGBA || format == GL_RGBA8_OES) {
         if (type == GL_UNSIGNED_BYTE)           return GPU_RGBA8;
         if (type == GL_UNSIGNED_SHORT_4_4_4_4)  return GPU_RGBA4;
@@ -185,7 +185,7 @@ static GPU_TEXCOLOR gl_to_gpu_texfmt(GLenum format, GLenum type) {
     return GPU_RGBA8;
 }
 
-static int gpu_texfmt_bpp(GPU_TEXCOLOR fmt) {
+int gpu_texfmt_bpp(GPU_TEXCOLOR fmt) {
     switch (fmt) {
         case GPU_RGBA8:    return 4;
         case GPU_RGB8:     return 3;
@@ -200,7 +200,7 @@ static int gpu_texfmt_bpp(GPU_TEXCOLOR fmt) {
     }
 }
 
-static C3D_Mtx* cur_mtx(void) {
+C3D_Mtx* cur_mtx(void) {
     switch (g.matrix_mode) {
         case GL_PROJECTION: return &g.proj_stack[g.proj_sp];
         case GL_TEXTURE:    return &g.tex_stack[g.tex_sp];
@@ -208,7 +208,7 @@ static C3D_Mtx* cur_mtx(void) {
     }
 }
 
-static int* cur_sp(void) {
+int* cur_sp(void) {
     switch (g.matrix_mode) {
         case GL_PROJECTION: return &g.proj_sp;
         case GL_TEXTURE:    return &g.tex_sp;
@@ -216,14 +216,14 @@ static int* cur_sp(void) {
     }
 }
 
-static C3D_Mtx* cur_stack(void) {
+C3D_Mtx* cur_stack(void) {
     switch (g.matrix_mode) {
         case GL_PROJECTION: return g.proj_stack;
         case GL_TEXTURE:    return g.tex_stack;
         default:            return g.mv_stack;
     }
 }
-static void* get_tex_staging(int size)
+void* get_tex_staging(int size)
 {
     if (g.tex_staging_size < size) {
         linearFree(g.tex_staging);
@@ -232,12 +232,12 @@ static void* get_tex_staging(int size)
     }
     return g.tex_staging;
 }
-static inline uint32_t morton_interleave(uint32_t x, uint32_t y) {
+uint32_t morton_interleave(uint32_t x, uint32_t y) {
     static const uint32_t xlut[8] = {0x00,0x01,0x04,0x05,0x10,0x11,0x14,0x15};
     static const uint32_t ylut[8] = {0x00,0x02,0x08,0x0a,0x20,0x22,0x28,0x2a};
     return xlut[x & 7] | ylut[y & 7];
 }
-static void swizzle_16bit(uint16_t *dst, const uint16_t *src, int src_w, int src_h, int pot_w, int pot_h) {
+void swizzle_16bit(uint16_t *dst, const uint16_t *src, int src_w, int src_h, int pot_w, int pot_h) {
     for (int y = 0; y < src_h; y++) {
         for (int x = 0; x < src_w; x++) {
             int flipped_y = pot_h - 1 - y;
@@ -266,7 +266,7 @@ static void swizzle_16bit(uint16_t *dst, const uint16_t *src, int src_w, int src
         }
     }
 }
-static void swizzle_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src_h, int pot_w, int pot_h) {
+void swizzle_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src_h, int pot_w, int pot_h) {
     for (int y = 0; y < src_h; y++) {
         for (int x = 0; x < src_w; x++) {
             uint32_t pixel = src[y * src_w + x];
@@ -302,7 +302,7 @@ static void swizzle_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src
     }
 }
 
-static uint32_t* rgb_to_rgba(const uint8_t *rgb, int w, int h) {
+uint32_t* rgb_to_rgba(const uint8_t *rgb, int w, int h) {
     uint32_t *out = (uint32_t*)malloc(w * h * 4);
     if (!out) return NULL;
     for (int i = 0; i < w * h; i++) {
@@ -311,7 +311,7 @@ static uint32_t* rgb_to_rgba(const uint8_t *rgb, int w, int h) {
     return out;
 }
 
-static void apply_depth_map(void) {
+void apply_depth_map(void) {
     float scale = g.depth_far - g.depth_near;
     float offset = g.depth_far;
 
@@ -322,7 +322,7 @@ static void apply_depth_map(void) {
     C3D_DepthMap(true, scale, offset);
 }
 
-static void apply_gpu_state(void) {
+void apply_gpu_state(void) {
     if (g.matrices_dirty) {
         if (g.uLoc_projection >= 0) {
             C3D_Mtx adj_proj = g.proj_stack[g.proj_sp];
@@ -444,7 +444,7 @@ static void apply_gpu_state(void) {
     }
 }
 
-static inline void cleanup_vbo_stream(void) {
+void cleanup_vbo_stream(void) {
 #ifdef NOVA_VBO_STREAM
     if (g.bound_array_buffer) {
         VBOSlot *slot = &g.vbos[g.bound_array_buffer];
@@ -459,7 +459,7 @@ static inline void cleanup_vbo_stream(void) {
 #endif
 }
 
-static inline void draw_emulated_quads(int count) {
+void draw_emulated_quads(int count) {
     int num_quads = count / 4;
     int idx_count = num_quads * 6;
     int idx_bytes = idx_count * 2;
