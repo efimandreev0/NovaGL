@@ -19,6 +19,18 @@ endif()
 add_library(NovaGL STATIC
         NovaGL.c
         utils.c
+        matrix.c
+        state.c
+        raster.c
+        clear.cpp
+        texture.c
+        vbo.c
+        vertex_array.c
+        current.c
+        draw.c
+        fog.c
+        framebuffer.cpp
+        display_list.c
 )
 
 target_include_directories(NovaGL

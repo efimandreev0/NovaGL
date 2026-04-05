@@ -1,5 +1,5 @@
 ﻿//
-// Created by Notebook on 05.04.2026.
+// Created by efimandreev0 on 05.04.2026.
 //
 #include "NovaGL.h"
 #include "utils.h"
@@ -320,4 +320,166 @@ static void apply_depth_map(void) {
     }
 
     C3D_DepthMap(true, scale, offset);
+}
+
+static void apply_gpu_state(void) {
+    if (g.matrices_dirty) {
+        if (g.uLoc_projection >= 0) {
+            C3D_Mtx adj_proj = g.proj_stack[g.proj_sp];
+            adj_proj.r[2].x = adj_proj.r[2].x * 0.4999f - adj_proj.r[3].x * 0.5f;
+            adj_proj.r[2].y = adj_proj.r[2].y * 0.4999f - adj_proj.r[3].y * 0.5f;
+            adj_proj.r[2].z = adj_proj.r[2].z * 0.4999f - adj_proj.r[3].z * 0.5f;
+            adj_proj.r[2].w = adj_proj.r[2].w * 0.4999f - adj_proj.r[3].w * 0.5f;
+
+            C3D_Mtx tilt;
+            Mtx_Identity(&tilt);
+            tilt.r[0].x =  0.0f; tilt.r[0].y = 1.0f;
+            tilt.r[1].x = -1.0f; tilt.r[1].y = 0.0f;
+
+            C3D_Mtx final_proj;
+            Mtx_Multiply(&final_proj, &tilt, &adj_proj);
+            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection, &final_proj);
+        }
+        if (g.uLoc_modelview >= 0)
+            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_modelview, &g.mv_stack[g.mv_sp]);
+        g.matrices_dirty = 0;
+    }
+
+    if (g.uLoc_fogparams >= 0) {
+        float range = g.fog_end - g.fog_start;
+        if (range == 0.0f) range = 1.0f;
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams, g.fog_start, g.fog_end, 1.0f / range, g.fog_enabled ? 1.0f : 0.0f);
+    }
+
+    GPU_WRITEMASK writemask = GPU_WRITE_COLOR;
+    if (g.depth_mask && g.depth_test_enabled) writemask |= GPU_WRITE_DEPTH;
+    C3D_DepthTest(g.depth_test_enabled, gl_to_gpu_testfunc(g.depth_func), writemask);
+
+    C3D_AlphaTest(g.alpha_test_enabled, gl_to_gpu_testfunc(g.alpha_func), (u8)(g.alpha_ref * 255.0f));
+
+    if (g.blend_enabled) {
+        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, gl_to_gpu_blendfactor(g.blend_src), gl_to_gpu_blendfactor(g.blend_dst), gl_to_gpu_blendfactor(g.blend_src), gl_to_gpu_blendfactor(g.blend_dst));
+    } else {
+        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    }
+
+    if (g.cull_face_enabled) {
+        GPU_CULLMODE cull;
+        if (g.cull_face_mode == GL_FRONT) cull = (g.front_face == GL_CCW) ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW;
+        else cull = (g.front_face == GL_CCW) ? GPU_CULL_BACK_CCW : GPU_CULL_FRONT_CCW;
+        C3D_CullFace(cull);
+    } else {
+        C3D_CullFace(GPU_CULL_NONE);
+    }
+
+    if (g.scissor_test_enabled) {
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, g.scissor_y, g.scissor_x, g.scissor_y + g.scissor_h, g.scissor_x + g.scissor_w);
+    } else {
+        C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    }
+
+    if (g.fog_enabled && g.fog_dirty) {
+        u32 fc = ((u8)(g.fog_color[0]*255) << 24) | ((u8)(g.fog_color[1]*255) << 16) | ((u8)(g.fog_color[2]*255) << 8) | ((u8)(g.fog_color[3]*255));
+        C3D_FogColor(fc);
+        if (g.fog_mode == GL_LINEAR) {
+            float range = g.fog_end - g.fog_start;
+            if (range < 0.001f) range = 0.001f;
+            for (int i = 0; i < 128; i++) {
+                float depth = (float)i / 127.0f * g.fog_end;
+                float f = (depth <= g.fog_start) ? 0.0f : (depth >= g.fog_end) ? 1.0f : (depth - g.fog_start) / range;
+                g.fog_lut.data[i] = (u32)(clampf(f, 0.0f, 1.0f) * 0x7FF) & 0xFFF;
+            }
+        }
+        else if (g.fog_mode == GL_EXP) FogLut_Exp(&g.fog_lut, g.fog_density, 0.0f, g.fog_end, 1.0f);
+        else FogLut_Exp(&g.fog_lut, g.fog_density * g.fog_density, 0.0f, g.fog_end, 2.0f);
+        C3D_FogGasMode(true, false, false);
+        C3D_FogLutBind(&g.fog_lut);
+        g.fog_dirty = 0;
+    } else if (!g.fog_enabled) {
+        C3D_FogGasMode(false, false, false);
+    }
+
+    int current_tex_state = (g.texture_2d_enabled && g.bound_texture > 0);
+    if (g.tev_dirty || g.last_tex_state != current_tex_state) {
+        C3D_TexEnv *env0 = C3D_GetTexEnv(0);
+        C3D_TexEnvInit(env0);
+        if (current_tex_state) {
+            switch (g.tex_env_mode) {
+                case GL_REPLACE:
+                    C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+                    C3D_TexEnvFunc(env0, C3D_Both, GPU_REPLACE);
+                    break;
+                case GL_DECAL:
+                    C3D_TexEnvSrc(env0, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_TEXTURE0);
+                    C3D_TexEnvFunc(env0, C3D_RGB, GPU_INTERPOLATE);
+                    C3D_TexEnvSrc(env0, C3D_Alpha, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+                    C3D_TexEnvFunc(env0, C3D_Alpha, GPU_REPLACE);
+                    break;
+                case GL_ADD:
+                    C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0);
+                    C3D_TexEnvFunc(env0, C3D_Both, GPU_ADD);
+                    break;
+                case GL_MODULATE:
+                default:
+                    C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0);
+                    C3D_TexEnvFunc(env0, C3D_Both, GPU_MODULATE);
+                    break;
+            }
+        } else {
+            C3D_TexEnvSrc(env0, C3D_Both, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+            C3D_TexEnvFunc(env0, C3D_Both, GPU_REPLACE);
+        }
+        for (int i = 1; i < 6; i++) {
+            C3D_TexEnv *env = C3D_GetTexEnv(i);
+            C3D_TexEnvInit(env);
+            C3D_TexEnvSrc(env, C3D_Both, GPU_PREVIOUS, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+            C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+        }
+        g.last_tex_state = current_tex_state;
+        g.tev_dirty = 0;
+    }
+
+    if (current_tex_state && g.bound_texture < NOVA_MAX_TEXTURES && g.textures[g.bound_texture].allocated) {
+        C3D_TexBind(0, &g.textures[g.bound_texture].tex);
+    }
+}
+
+static inline void cleanup_vbo_stream(void) {
+#ifdef NOVA_VBO_STREAM
+    if (g.bound_array_buffer) {
+        VBOSlot *slot = &g.vbos[g.bound_array_buffer];
+        if (slot->is_stream && slot->data) {
+            linearFree(slot->data);
+            slot->data = NULL;
+            slot->allocated = 0;
+            slot->size = 0;
+            slot->capacity = 0;
+        }
+    }
+#endif
+}
+
+static inline void draw_emulated_quads(int count) {
+    int num_quads = count / 4;
+    int idx_count = num_quads * 6;
+    int idx_bytes = idx_count * 2;
+
+    if (idx_bytes > g.index_buf_size) return;
+
+    g.index_buf_offset = (g.index_buf_offset + 7) & ~7;
+    if (g.index_buf_offset + idx_bytes > g.index_buf_size) {
+        C3D_FrameSplit(0);
+        g.index_buf_offset = 0;
+    }
+
+    uint16_t *idx = (uint16_t*)linear_alloc_ring(g.index_buf, &g.index_buf_offset, idx_bytes, g.index_buf_size);
+
+    for (int q = 0; q < num_quads; q++) {
+        uint16_t base = q * 4;
+        idx[q*6+0] = base+0; idx[q*6+1] = base+1; idx[q*6+2] = base+2;
+        idx[q*6+3] = base+0; idx[q*6+4] = base+2; idx[q*6+5] = base+3;
+    }
+
+    GSPGPU_FlushDataCache(idx, idx_bytes);
+    C3D_DrawElements(GPU_TRIANGLES, idx_count, C3D_UNSIGNED_SHORT, idx);
 }

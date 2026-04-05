@@ -371,6 +371,7 @@ void nova_fini(void);
 void nova_frame_begin(void);
 void nova_frame_end(void);
 void nova_set_render_target(int is_right_eye);
+static void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements, GLenum type, const GLvoid *indices);
 
 GLenum glGetError(void);
 void glClear(GLbitfield mask);

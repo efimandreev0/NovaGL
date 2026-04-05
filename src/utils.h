@@ -1,5 +1,5 @@
 ﻿//
-// Created by Notebook on 05.04.2026.
+// Created by efimandreev0 on 05.04.2026.
 //
 
 #ifndef NOVAGL_UTILS_H
@@ -55,4 +55,10 @@ static void swizzle_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src
 static uint32_t* rgb_to_rgba(const uint8_t *rgb, int w, int h);
 
 static void apply_depth_map(void);
+
+static void apply_gpu_state(void);
+
+static inline void cleanup_vbo_stream(void);
+
+static inline void draw_emulated_quads(int count);
 #endif //NOVAGL_UTILS_H
