@@ -9,22 +9,31 @@
 //Structures
 typedef struct {
     C3D_Tex     tex;
+
+    // if not allocated then don't drawing it
     int         allocated;
     int         width, height;
+
+    //power of two texture size. Needed for correct drawing
     int         pot_w, pot_h;
     GPU_TEXCOLOR fmt;
     int         min_filter;
     int         mag_filter;
+
+    //is wrapped
     int         wrap_s;
     int         wrap_t;
 } TexSlot;
 
 typedef struct {
+    //struct data
     void   *data;
     int     size;
     int     capacity;
     int     allocated;
+
 #ifdef NOVA_VBO_STREAM
+    //using for CIRCULAR_VERTEX_POOL
     int     is_stream;
 #endif
 } VBOSlot;
@@ -47,16 +56,19 @@ typedef struct {
 } DisplayList;
 
 extern struct NovaState{
+    //C3D targets
     C3D_RenderTarget *render_target_top;
     C3D_RenderTarget *render_target_bot;
     C3D_RenderTarget *current_target;
+
+    //Shader stuff
     DVLB_s           *shader_dvlb;
     shaderProgram_s   shader_program;
     int               uLoc_projection;
     int               uLoc_modelview;
     int               uLoc_fogparams;
     C3D_AttrInfo      attr_info;
-
+    //Matrix stuff
     int        matrix_mode;
     C3D_Mtx    proj_stack[NOVA_MATRIX_STACK];
     int        proj_sp;
@@ -68,6 +80,7 @@ extern struct NovaState{
 
     float      cur_color[4];
 
+    //Textures stuff
     TexSlot    textures[NOVA_MAX_TEXTURES];
     GLuint     bound_texture;
     int        tex_next_id;
