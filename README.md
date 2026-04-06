@@ -1,5 +1,5 @@
 # NovaGL
-
+<p align="center"><img width="50%" src="./NovaGL.png"></p>
 OpenGL ES 1.1 → Citro3D translation layer for Nintendo 3DS (PICA200 GPU).
 
 Drop-in replacement for `<GLES/gl.h>` that maps fixed-function GL calls to Citro3D's API. Designed for porting GL ES 1.1 applications (like Minecraft PE) to the 3DS.
