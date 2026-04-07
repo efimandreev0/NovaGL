@@ -7,24 +7,25 @@
 
 void glGenTextures(GLsizei n, GLuint *textures) {
     for (GLsizei i = 0; i < n; i++) {
-        GLuint start = g.tex_next_id;
-        while (g.textures[g.tex_next_id].allocated) {
-            g.tex_next_id++;
-            if (g.tex_next_id >= NOVA_MAX_TEXTURES) g.tex_next_id = 1;
-            if (g.tex_next_id == start) { g.last_error = GL_OUT_OF_MEMORY; textures[i] = 0; break; }
+        GLuint id = 1;
+        while (id < NOVA_MAX_TEXTURES && g.textures[id].in_use) {
+            id++;
         }
-        textures[i] = g.tex_next_id;
-        g.tex_next_id++;
-        if (g.tex_next_id >= NOVA_MAX_TEXTURES) g.tex_next_id = 1;
+        if (id == NOVA_MAX_TEXTURES) { g.last_error = GL_OUT_OF_MEMORY; textures[i] = 0; break; }
+
+        g.textures[id].in_use = 1;
+        textures[i] = id;
     }
 }
-
 void glDeleteTextures(GLsizei n, const GLuint *textures) {
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = textures[i];
-        if (id > 0 && id < NOVA_MAX_TEXTURES && g.textures[id].allocated) {
-            C3D_TexDelete(&g.textures[id].tex);
+        if (id > 0 && id < NOVA_MAX_TEXTURES && g.textures[id].in_use) {
+            if (g.textures[id].allocated) {
+                C3D_TexDelete(&g.textures[id].tex);
+            }
             g.textures[id].allocated = 0;
+            g.textures[id].in_use = 0;
             if (g.bound_texture == id) g.bound_texture = 0;
         }
     }
@@ -43,8 +44,22 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     if (pot_w < 8) pot_w = 8; if (pot_h < 8) pot_h = 8;
     if (pot_w > 1024) pot_w = 1024; if (pot_h > 1024) pot_h = 1024;
 
-    if (!C3D_TexInit(&slot->tex, pot_w, pot_h, gpu_fmt)) { g.last_error = GL_OUT_OF_MEMORY; return; }
-    slot->allocated = 1; slot->width = width; slot->height = height; slot->pot_w = pot_w; slot->pot_h = pot_h; slot->fmt = gpu_fmt;
+    int need_init = 1;
+    if (slot->allocated) {
+        // Если текстура такого же размера уже была выделена в этом слоте - НЕ УДАЛЯЕМ ЕЁ!
+        if (slot->pot_w == pot_w && slot->pot_h == pot_h && slot->fmt == gpu_fmt) {
+            need_init = 0;
+        } else {
+            C3D_TexDelete(&slot->tex);
+            slot->allocated = 0;
+        }
+    }
+
+    if (need_init) {
+        if (!C3D_TexInit(&slot->tex, pot_w, pot_h, gpu_fmt)) { g.last_error = GL_OUT_OF_MEMORY; return; }
+        slot->allocated = 1; slot->pot_w = pot_w; slot->pot_h = pot_h; slot->fmt = gpu_fmt;
+    }
+    slot->width = width; slot->height = height; slot->pot_w = pot_w; slot->pot_h = pot_h; slot->fmt = gpu_fmt;
 
     GPU_TEXTURE_FILTER_PARAM mag = (slot->mag_filter == GL_LINEAR) ? GPU_LINEAR : GPU_NEAREST;
     GPU_TEXTURE_FILTER_PARAM min_f = (slot->min_filter == GL_LINEAR || slot->min_filter == GL_LINEAR_MIPMAP_LINEAR || slot->min_filter == GL_LINEAR_MIPMAP_NEAREST) ? GPU_LINEAR : GPU_NEAREST;

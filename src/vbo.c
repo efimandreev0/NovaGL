@@ -7,26 +7,25 @@
 
 void glGenBuffers(GLsizei n, GLuint *buffers) {
     for (GLsizei i = 0; i < n; i++) {
-        GLuint start = g.vbo_next_id;
-        // МЕНЯЕМ .allocated НА .in_use
-        while (g.vbos[g.vbo_next_id].in_use) {
-            g.vbo_next_id++;
-            if (g.vbo_next_id >= NOVA_MAX_VBOS) g.vbo_next_id = 1;
-            if (g.vbo_next_id == start) { g.last_error = GL_OUT_OF_MEMORY; buffers[i] = 0; break; }
+        GLuint id = 1;
+        while (id < NOVA_MAX_VBOS && g.vbos[id].in_use) {
+            id++;
         }
-        g.vbos[g.vbo_next_id].in_use = 1;
-        buffers[i] = g.vbo_next_id;
-        g.vbo_next_id++;
-        if (g.vbo_next_id >= NOVA_MAX_VBOS) g.vbo_next_id = 1;
+        if (id == NOVA_MAX_VBOS) { g.last_error = GL_OUT_OF_MEMORY; buffers[i] = 0; break; }
+
+        g.vbos[id].in_use = 1;
+        buffers[i] = id;
     }
 }
+
 void glDeleteBuffers(GLsizei n, const GLuint *buffers) {
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = buffers[i];
         if (id > 0 && (int)id < NOVA_MAX_VBOS && g.vbos[id].in_use) {
-            if (g.vbos[id].data) linearFree(g.vbos[id].data);
-            g.vbos[id].data = NULL; g.vbos[id].size = 0; g.vbos[id].allocated = 0;
-            g.vbos[id].in_use = 0; // ОСВОБОЖДАЕМ ID
+
+            g.vbos[id].in_use = 0;
+            g.vbos[id].size = 0;
+
             if (g.bound_array_buffer == id) g.bound_array_buffer = 0;
             if (g.bound_element_array_buffer == id) g.bound_element_array_buffer = 0;
         }

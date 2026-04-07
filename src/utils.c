@@ -446,8 +446,8 @@ void apply_gpu_state(void) {
 }
 
 void cleanup_vbo_stream(void) {
+#if 0
 #ifdef NOVA_VBO_STREAM
-    // Очищаем Vertex Buffer
     if (g.bound_array_buffer) {
         VBOSlot *slot = &g.vbos[g.bound_array_buffer];
         if (slot->is_stream && slot->data) {
@@ -470,6 +470,7 @@ void cleanup_vbo_stream(void) {
             slot->capacity = 0;
         }
     }
+#endif
 #endif
 }
 
