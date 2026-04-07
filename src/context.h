@@ -20,6 +20,8 @@ typedef struct {
     int         min_filter;
     int         mag_filter;
 
+    int in_use;
+
     //is wrapped
     int         wrap_s;
     int         wrap_t;
@@ -31,6 +33,8 @@ typedef struct {
     int     size;
     int     capacity;
     int     allocated;
+
+    int in_use;
 
 #ifdef NOVA_VBO_STREAM
     //using for CIRCULAR_VERTEX_POOL

@@ -447,8 +447,21 @@ void apply_gpu_state(void) {
 
 void cleanup_vbo_stream(void) {
 #ifdef NOVA_VBO_STREAM
+    // Очищаем Vertex Buffer
     if (g.bound_array_buffer) {
         VBOSlot *slot = &g.vbos[g.bound_array_buffer];
+        if (slot->is_stream && slot->data) {
+            linearFree(slot->data);
+            slot->data = NULL;
+            slot->allocated = 0;
+            slot->size = 0;
+            slot->capacity = 0;
+        }
+    }
+
+    // don't forget to clear index buffer
+    if (g.bound_element_array_buffer) {
+        VBOSlot *slot = &g.vbos[g.bound_element_array_buffer];
         if (slot->is_stream && slot->data) {
             linearFree(slot->data);
             slot->data = NULL;

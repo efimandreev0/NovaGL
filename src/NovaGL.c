@@ -289,7 +289,7 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
 
     GSPGPU_FlushDataCache(dst_start, req_size);
     BufInfo_Add(bufInfo, dst_start, 24, 3, 0x210);
-    g.client_array_buf_offset += req_size;
+    //g.client_array_buf_offset += req_size;
 
     if (mode == GL_QUADS) {
         draw_emulated_quads(count);
