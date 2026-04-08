@@ -22,15 +22,24 @@ void glDeleteBuffers(GLsizei n, const GLuint *buffers) {
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = buffers[i];
         if (id > 0 && (int)id < NOVA_MAX_VBOS && g.vbos[id].in_use) {
+            VBOSlot *slot = &g.vbos[id];
 
-            g.vbos[id].in_use = 0;
-            g.vbos[id].size = 0;
+            if (slot->allocated && slot->data) {
+                linearFree(slot->data);
+                slot->data = NULL;
+            }
 
-            if (g.bound_array_buffer == id) g.bound_array_buffer = 0;
+            slot->allocated = 0;
+            slot->capacity  = 0;
+            slot->size      = 0;
+            slot->in_use    = 0;
+
+            if (g.bound_array_buffer == id)        g.bound_array_buffer = 0;
             if (g.bound_element_array_buffer == id) g.bound_element_array_buffer = 0;
         }
     }
 }
+
 
 void glBindBuffer(GLenum target, GLuint buffer) {
     if (target == GL_ARRAY_BUFFER) g.bound_array_buffer = buffer;

@@ -132,14 +132,29 @@ void novaSwapBuffers(void) {
 }
 void nova_fini(void) {
     if (!g.initialized) return;
+
     if (g.client_array_buf) linearFree(g.client_array_buf);
-    if (g.index_buf) linearFree(g.index_buf);
+    if (g.index_buf)        linearFree(g.index_buf);
+
+    if (g.tex_staging) {
+        linearFree(g.tex_staging);
+        g.tex_staging = NULL;
+        g.tex_staging_size = 0;
+    }
+
     for (int i = 0; i < NOVA_MAX_TEXTURES; i++) {
         if (g.textures[i].allocated) C3D_TexDelete(&g.textures[i].tex);
     }
     for (int i = 0; i < NOVA_MAX_VBOS; i++) {
         if (g.vbos[i].allocated && g.vbos[i].data) linearFree(g.vbos[i].data);
     }
+
+    if (g.static_quad_indices) {
+        linearFree(g.static_quad_indices);
+        g.static_quad_indices = NULL;
+        g.static_quad_count   = 0;
+    }
+
     if (g.shader_dvlb) {
         shaderProgramFree(&g.shader_program);
         DVLB_Free(g.shader_dvlb);
