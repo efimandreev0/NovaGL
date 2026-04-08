@@ -12,7 +12,12 @@ void glEnable(GLenum cap) {
         case GL_CULL_FACE:     g.cull_face_enabled = 1; break;
         case GL_TEXTURE_2D:    g.tev_dirty = 1; g.texture_2d_enabled = 1; break;
         case GL_SCISSOR_TEST:  g.scissor_test_enabled = 1; break;
-        case GL_FOG:           break;//g.fog_enabled = 1; g.fog_dirty = 1; break;
+        case GL_FOG:
+            if (!g.fog_enabled) {
+                g.fog_enabled = 1;
+                g.fog_dirty = 1;
+            }
+            break;
         case GL_POLYGON_OFFSET_FILL:
             g.polygon_offset_fill_enabled = 1;
             apply_depth_map();
@@ -29,7 +34,12 @@ void glDisable(GLenum cap) {
         case GL_CULL_FACE:     g.cull_face_enabled = 0; break;
         case GL_TEXTURE_2D:    g.tev_dirty = 1; g.texture_2d_enabled = 0; break;
         case GL_SCISSOR_TEST:  g.scissor_test_enabled = 0; break;
-        case GL_FOG:           g.fog_enabled = 0; break;
+        case GL_FOG:
+            if (g.fog_enabled) {
+                g.fog_enabled = 0;
+                g.fog_dirty = 1;
+            }
+            break;
         case GL_POLYGON_OFFSET_FILL:
             g.polygon_offset_fill_enabled = 0;
             apply_depth_map();

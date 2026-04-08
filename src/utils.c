@@ -325,8 +325,11 @@ void apply_depth_map(void) {
 
 void apply_gpu_state(void) {
     if (g.matrices_dirty) {
+        if (g.fog_enabled) g.fog_dirty = 1;
+
         if (g.uLoc_projection >= 0) {
             C3D_Mtx adj_proj = g.proj_stack[g.proj_sp];
+            // Хак для PICA200 (Z-range 3DS)
             adj_proj.r[2].x = adj_proj.r[2].x * 0.4999f - adj_proj.r[3].x * 0.5f;
             adj_proj.r[2].y = adj_proj.r[2].y * 0.4999f - adj_proj.r[3].y * 0.5f;
             adj_proj.r[2].z = adj_proj.r[2].z * 0.4999f - adj_proj.r[3].z * 0.5f;
@@ -346,10 +349,91 @@ void apply_gpu_state(void) {
         g.matrices_dirty = 0;
     }
 
-    if (g.uLoc_fogparams >= 0) {
-        float range = g.fog_end - g.fog_start;
-        if (range == 0.0f) range = 1.0f;
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams, g.fog_start, g.fog_end, 1.0f / range, g.fog_enabled ? 1.0f : 0.0f);
+    if (g.fog_dirty) {
+        if (g.fog_enabled) {
+            u32 fc = ((u32)(g.fog_color[0]*255.0f)) |
+                     (((u32)(g.fog_color[1]*255.0f)) << 8) |
+                     (((u32)(g.fog_color[2]*255.0f)) << 16);
+            C3D_FogColor(fc);
+
+            float lut_data[128];
+
+            C3D_Mtx *proj = &g.proj_stack[g.proj_sp];
+            float P_C = proj->r[2].z;  // Элемент [2][2]
+            float P_D = proj->r[2].w;  // Элемент [2][3] (w компонента строки 2)
+
+            // Проверяем перспективу: w компонента 4-й строки должен быть -1 или около
+            int is_perspective = (fabsf(proj->r[3].w) < 0.0001f);
+
+            // C3D_DepthMap параметры (scale, offset)
+            float scale = g.depth_far - g.depth_near;
+            float offset = g.depth_far;
+
+            if (fabsf(scale) < 0.00001f) scale = 0.00001f;
+
+            for (int i = 0; i < 128; i++) {
+                float depth_val = (float)i / 127.0f;
+
+                // 1. Откатываем C3D_DepthMap: получаем z после adj_proj ([-1, 0] диапазон)
+                float z_mod = (depth_val - offset) / scale;
+
+                // 2. Откатываем adj_proj хак: z_mod = z_ndc * 0.4999 - 0.5
+                //    => z_ndc = (z_mod + 0.5) / 0.4999
+                float z_ndc = (z_mod + 0.5f) / 0.4999f;
+
+                float actual_dist;
+
+                if (is_perspective) {
+                    // Перспектива: z_ndc = -P_C - P_D/z_eye  =>  z_eye = -P_D/(z_ndc + P_C)
+                    float denom = z_ndc + P_C;
+                    if (fabsf(denom) > 0.00001f) {
+                        actual_dist = -P_D / denom;  // P_D отрицательный, поэтому -P_D положительный
+                    } else {
+                        actual_dist = g.fog_end * 2.0f;
+                    }
+                } else {
+                    // Ортогональная: z_ndc = P_C*z_eye + P_D  =>  z_eye = (z_ndc - P_D)/P_C
+                    if (fabsf(P_C) > 0.00001f) {
+                        actual_dist = fabsf((z_ndc - P_D) / P_C);
+                    } else {
+                        actual_dist = 0.0f;
+                    }
+                }
+
+                if (actual_dist < 0.0f) actual_dist = 0.0f;
+
+                // Расчёт плотности тумана f [0..1]
+                float f = 0.0f;
+                float range = g.fog_end - g.fog_start;
+                if (range < 0.001f) range = 0.001f;
+
+                if (g.fog_mode == GL_LINEAR) {
+                    if (actual_dist <= g.fog_start) f = 0.0f;
+                    else if (actual_dist >= g.fog_end) f = 1.0f;
+                    else f = (actual_dist - g.fog_start) / range;
+                }
+                else if (g.fog_mode == GL_EXP) {
+                    f = 1.0f - expf(-(g.fog_density * actual_dist));
+                }
+                else { // GL_EXP2
+                    float d = g.fog_density * actual_dist;
+                    f = 1.0f - expf(-(d * d));
+                }
+
+                f = clampf(f, 0.0f, 1.0f);
+
+                // ВАЖНО: Citro3D ожидает видимость объекта (1-f), а не плотность тумана!
+                // Иначе туман работает инвертированно
+                lut_data[i] = 1.0f - f;
+            }
+
+            FogLut_FromArray(&g.fog_lut, lut_data);
+            C3D_FogGasMode(GPU_FOG, GPU_PLAIN_DENSITY, false);
+            C3D_FogLutBind(&g.fog_lut);
+        } else {
+            C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
+        }
+        g.fog_dirty = 0;
     }
 
     GPU_WRITEMASK writemask = GPU_WRITE_COLOR;
@@ -377,27 +461,6 @@ void apply_gpu_state(void) {
         C3D_SetScissor(GPU_SCISSOR_NORMAL, g.scissor_y, g.scissor_x, g.scissor_y + g.scissor_h, g.scissor_x + g.scissor_w);
     } else {
         C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
-    }
-
-    if (g.fog_enabled && g.fog_dirty) {
-        u32 fc = ((u8)(g.fog_color[0]*255) << 24) | ((u8)(g.fog_color[1]*255) << 16) | ((u8)(g.fog_color[2]*255) << 8) | ((u8)(g.fog_color[3]*255));
-        C3D_FogColor(fc);
-        if (g.fog_mode == GL_LINEAR) {
-            float range = g.fog_end - g.fog_start;
-            if (range < 0.001f) range = 0.001f;
-            for (int i = 0; i < 128; i++) {
-                float depth = (float)i / 127.0f * g.fog_end;
-                float f = (depth <= g.fog_start) ? 0.0f : (depth >= g.fog_end) ? 1.0f : (depth - g.fog_start) / range;
-                g.fog_lut.data[i] = (u32)(clampf(f, 0.0f, 1.0f) * 0x7FF) & 0xFFF;
-            }
-        }
-        else if (g.fog_mode == GL_EXP) FogLut_Exp(&g.fog_lut, g.fog_density, 0.0f, g.fog_end, 1.0f);
-        else FogLut_Exp(&g.fog_lut, g.fog_density * g.fog_density, 0.0f, g.fog_end, 2.0f);
-        C3D_FogGasMode(true, false, false);
-        C3D_FogLutBind(&g.fog_lut);
-        g.fog_dirty = 0;
-    } else if (!g.fog_enabled) {
-        C3D_FogGasMode(false, false, false);
     }
 
     int current_tex_state = (g.texture_2d_enabled && g.bound_texture > 0);
