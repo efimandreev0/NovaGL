@@ -168,6 +168,18 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) {
     C3D_TexSetWrap(&slot->tex, ws, wt);
 }
 
+void glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
+    glTexParameteri(target, pname, (GLint)param);
+}
+
+void glTexParameterfv(GLenum target, GLenum pname, const GLfloat *params) {
+    if (params) glTexParameteri(target, pname, (GLint)params[0]);
+}
+
+void glTexParameteriv(GLenum target, GLenum pname, const GLint *params) {
+    if (params) glTexParameteri(target, pname, params[0]);
+}
+
 void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const GLvoid *data) {
     (void)data; (void)imageSize; (void)internalformat;
     glTexImage2D(target, level, GL_RGBA, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
@@ -208,4 +220,60 @@ void glTexEnvfv(GLenum target, GLenum pname, const GLfloat *params) {
 GLboolean glIsTexture(GLuint texture) {
     if (texture > 0 && texture < NOVA_MAX_TEXTURES && g.textures[texture].allocated) return GL_TRUE;
     return GL_FALSE;
+}
+
+/* 1D texture functions (emulated as 2D textures with height=1) */
+void glTexImage1D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLint border, GLenum format, GLenum type, const GLvoid *pixels) {
+    (void)target; (void)level; (void)internalformat; (void)border;
+    /* Emulate 1D texture as 2D texture with height=1 */
+    glTexImage2D(GL_TEXTURE_2D, level, internalformat, width, 1, border, format, type, pixels);
+}
+
+void glTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const GLvoid *pixels) {
+    (void)target; (void)level;
+    /* Emulate 1D texture subimage as 2D with height=1 */
+    glTexSubImage2D(GL_TEXTURE_2D, level, xoffset, 0, width, 1, format, type, pixels);
+}
+
+/* Texture coordinate generation (not fully implemented - PICA200 has limited support) */
+void glTexGend(GLenum coord, GLenum pname, GLdouble param) {
+    (void)coord; (void)pname; (void)param;
+    /* Texture coordinate generation not implemented */
+}
+
+void glTexGendv(GLenum coord, GLenum pname, const GLdouble *params) {
+    (void)coord; (void)pname; (void)params;
+}
+
+void glTexGenf(GLenum coord, GLenum pname, GLfloat param) {
+    (void)coord; (void)pname; (void)param;
+}
+
+void glTexGenfv(GLenum coord, GLenum pname, const GLfloat *params) {
+    (void)coord; (void)pname; (void)params;
+}
+
+void glTexGeni(GLenum coord, GLenum pname, GLint param) {
+    (void)coord; (void)pname; (void)param;
+}
+
+void glTexGeniv(GLenum coord, GLenum pname, const GLint *params) {
+    (void)coord; (void)pname; (void)params;
+}
+
+/* ARB multitexture functions */
+void glMultiTexCoord2fARB(GLenum target, GLfloat s, GLfloat t) {
+    (void)target;
+    /* Only texture unit 0 is supported on PICA200 */
+    if (target == GL_TEXTURE0_ARB || target == GL_TEXTURE0) {
+        /* Store texcoord for immediate mode */
+    }
+}
+
+void glActiveTextureARB(GLenum texture) {
+    glActiveTexture(texture);
+}
+
+void glClientActiveTextureARB(GLenum texture) {
+    glClientActiveTexture(texture);
 }

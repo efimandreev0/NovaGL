@@ -89,3 +89,99 @@ const GLubyte* glGetString(GLenum name) {
 }
 
 void glHint(GLenum target, GLenum mode) { (void)target; (void)mode; }
+
+
+/* Attribute stack (simplified implementation) */
+typedef struct {
+    GLboolean depth_test;
+    GLboolean blend;
+    GLboolean alpha_test;
+    GLboolean cull_face;
+    GLboolean texture_2d;
+    GLboolean scissor_test;
+    GLboolean fog;
+    GLenum depth_func;
+    GLenum blend_src;
+    GLenum blend_dst;
+    GLenum alpha_func;
+    GLfloat alpha_ref;
+    GLenum cull_face_mode;
+    GLenum front_face;
+} AttribState;
+
+static AttribState attrib_stack[16];
+static int attrib_stack_ptr = 0;
+
+void glPushAttrib(GLbitfield mask) {
+    (void)mask;
+    if (attrib_stack_ptr < 16) {
+        AttribState *s = &attrib_stack[attrib_stack_ptr++];
+        s->depth_test = g.depth_test_enabled;
+        s->blend = g.blend_enabled;
+        s->alpha_test = g.alpha_test_enabled;
+        s->cull_face = g.cull_face_enabled;
+        s->texture_2d = g.texture_2d_enabled;
+        s->scissor_test = g.scissor_test_enabled;
+        s->fog = g.fog_enabled;
+        s->depth_func = g.depth_func;
+        s->blend_src = g.blend_src;
+        s->blend_dst = g.blend_dst;
+        s->alpha_func = g.alpha_func;
+        s->alpha_ref = g.alpha_ref;
+        s->cull_face_mode = g.cull_face_mode;
+        s->front_face = g.front_face;
+    }
+}
+
+void glPopAttrib(void) {
+    if (attrib_stack_ptr > 0) {
+        AttribState *s = &attrib_stack[--attrib_stack_ptr];
+        g.depth_test_enabled = s->depth_test;
+        g.blend_enabled = s->blend;
+        g.alpha_test_enabled = s->alpha_test;
+        g.cull_face_enabled = s->cull_face;
+        g.texture_2d_enabled = s->texture_2d;
+        g.scissor_test_enabled = s->scissor_test;
+        g.fog_enabled = s->fog;
+        g.depth_func = s->depth_func;
+        g.blend_src = s->blend_src;
+        g.blend_dst = s->blend_dst;
+        g.alpha_func = s->alpha_func;
+        g.alpha_ref = s->alpha_ref;
+        g.cull_face_mode = s->cull_face_mode;
+        g.front_face = s->front_face;
+        g.tev_dirty = 1;
+        g.fog_dirty = 1;
+    }
+}
+
+typedef struct {
+    int va_vertex_enabled;
+    int va_color_enabled;
+    int va_texcoord_enabled;
+    int va_normal_enabled;
+} ClientAttribState;
+
+static ClientAttribState client_attrib_stack[16];
+static int client_attrib_stack_ptr = 0;
+
+void glPushClientAttrib(GLbitfield mask) {
+    (void)mask;
+    if (client_attrib_stack_ptr < 16) {
+        ClientAttribState *s = &client_attrib_stack[client_attrib_stack_ptr++];
+        s->va_vertex_enabled = g.va_vertex.enabled;
+        s->va_color_enabled = g.va_color.enabled;
+        s->va_texcoord_enabled = g.va_texcoord.enabled;
+        s->va_normal_enabled = g.va_normal.enabled;
+    }
+}
+
+void glPopClientAttrib(void) {
+    if (client_attrib_stack_ptr > 0) {
+        ClientAttribState *s = &client_attrib_stack[--client_attrib_stack_ptr];
+        g.va_vertex.enabled = s->va_vertex_enabled;
+        g.va_color.enabled = s->va_color_enabled;
+        g.va_texcoord.enabled = s->va_texcoord_enabled;
+        g.va_normal.enabled = s->va_normal_enabled;
+    }
+}

@@ -47,3 +47,28 @@ void glPolygonOffset(GLfloat factor, GLfloat units) {
 void glLineWidth(GLfloat width) { (void)width; }
 
 void glPolygonMode(GLenum face, GLenum mode) { (void)face; (void)mode; }
+
+
+void glDepthRange(GLclampd near_val, GLclampd far_val) {
+    g.depth_near = clampf((GLfloat)near_val, 0.0f, 1.0f);
+    g.depth_far  = clampf((GLfloat)far_val, 0.0f, 1.0f);
+    apply_depth_map();
+}
+
+void glClipPlane(GLenum plane, const GLdouble *equation) {
+    (void)plane; (void)equation;
+    /* Clip planes not supported on PICA200 */
+}
+
+void glStencilFunc(GLenum func, GLint ref, GLuint mask) {
+    (void)func; (void)ref; (void)mask;
+    /* Stencil testing not fully implemented */
+}
+
+void glStencilMask(GLuint mask) {
+    (void)mask;
+}
+
+void glStencilOp(GLenum fail, GLenum zfail, GLenum zpass) {
+    (void)fail; (void)zfail; (void)zpass;
+}

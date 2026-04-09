@@ -40,3 +40,12 @@ void glClearColor(GLclampf r, GLclampf g_, GLclampf b, GLclampf a) {
 void glClearDepthf(GLclampf depth) {
     g.clear_depth = clampf(depth, 0.0f, 1.0f);
 }
+
+void glClearDepth(GLclampd depth) {
+    g.clear_depth = clampf((GLfloat)depth, 0.0f, 1.0f);
+}
+
+void glClearStencil(GLint s) {
+    (void)s;
+    /* Stencil clear not fully implemented */
+}

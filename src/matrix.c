@@ -120,3 +120,48 @@ void glFrustum(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLd
 void glFrustumx(GLfixed left, GLfixed right, GLfixed bottom, GLfixed top, GLfixed near_val, GLfixed far_val) {
     glFrustumf(left / 65536.0f, right / 65536.0f, bottom / 65536.0f, top / 65536.0f, near_val / 65536.0f, far_val / 65536.0f);
 }
+
+
+/* Double-precision matrix functions */
+void glLoadMatrixd(const GLdouble *m) {
+    if (!m) return;
+    C3D_Mtx *dst = cur_mtx();
+    for (int r = 0; r < 4; r++) {
+        dst->r[r].x = (GLfloat)m[0*4 + r]; dst->r[r].y = (GLfloat)m[1*4 + r];
+        dst->r[r].z = (GLfloat)m[2*4 + r]; dst->r[r].w = (GLfloat)m[3*4 + r];
+    }
+    g.matrices_dirty = 1;
+}
+
+void glMultMatrixd(const GLdouble *m) {
+    if (!m) return;
+    C3D_Mtx tmp;
+    for (int r = 0; r < 4; r++) {
+        tmp.r[r].x = (GLfloat)m[0*4 + r]; tmp.r[r].y = (GLfloat)m[1*4 + r];
+        tmp.r[r].z = (GLfloat)m[2*4 + r]; tmp.r[r].w = (GLfloat)m[3*4 + r];
+    }
+    C3D_Mtx result; Mtx_Multiply(&result, cur_mtx(), &tmp);
+    Mtx_Copy(cur_mtx(), &result); g.matrices_dirty = 1;
+}
+
+void glRotated(GLdouble angle, GLdouble x, GLdouble y, GLdouble z) {
+    glRotatef((GLfloat)angle, (GLfloat)x, (GLfloat)y, (GLfloat)z);
+}
+
+void glScaled(GLdouble x, GLdouble y, GLdouble z) {
+    glScalef((GLfloat)x, (GLfloat)y, (GLfloat)z);
+}
+
+void glTranslated(GLdouble x, GLdouble y, GLdouble z) {
+    glTranslatef((GLfloat)x, (GLfloat)y, (GLfloat)z);
+}
+
+void glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble near_val, GLdouble far_val) {
+    C3D_Mtx ortho; Mtx_Identity(&ortho);
+    ortho.r[0].x = (GLfloat)(2.0 / (right - left)); ortho.r[0].w = (GLfloat)(-(right + left) / (right - left));
+    ortho.r[1].y = (GLfloat)(2.0 / (top - bottom)); ortho.r[1].w = (GLfloat)(-(top + bottom) / (top - bottom));
+    ortho.r[2].z = (GLfloat)(-2.0 / (far_val - near_val));
+    ortho.r[2].w = (GLfloat)(-(far_val + near_val) / (far_val - near_val));
+    C3D_Mtx result; Mtx_Multiply(&result, cur_mtx(), &ortho);
+    Mtx_Copy(cur_mtx(), &result); g.matrices_dirty = 1;
+}

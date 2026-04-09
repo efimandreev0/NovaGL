@@ -31,6 +31,7 @@ add_library(NovaGL STATIC
         display_list.c
         utils.c
         NovaGL.c
+        immediate.c
 )
 
 target_include_directories(NovaGL

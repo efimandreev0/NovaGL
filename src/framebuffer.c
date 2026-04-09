@@ -33,3 +33,10 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
 }
 
 void glPixelStorei(GLenum pname, GLint param) { (void)pname; (void)param; }
+
+void glPixelStoref(GLenum pname, GLfloat param) { (void)pname; (void)param; }
+
+void glDrawBuffer(GLenum mode) {
+    (void)mode;
+    /* Only single buffer supported on 3DS */
+}
