@@ -5,6 +5,11 @@
 #include "NovaGL.h"
 #include "utils.h"
 
+/* Helper: get currently bound texture ID for the active unit */
+static inline GLuint active_bound_texture(void) {
+    return g.bound_texture[g.active_texture_unit];
+}
+
 void glGenTextures(GLsizei n, GLuint *textures) {
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = 1;
@@ -17,6 +22,7 @@ void glGenTextures(GLsizei n, GLuint *textures) {
         textures[i] = id;
     }
 }
+
 void glDeleteTextures(GLsizei n, const GLuint *textures) {
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = textures[i];
@@ -26,19 +32,23 @@ void glDeleteTextures(GLsizei n, const GLuint *textures) {
             }
             g.textures[id].allocated = 0;
             g.textures[id].in_use = 0;
-            if (g.bound_texture == id) g.bound_texture = 0;
+            for (int u = 0; u < 3; u++)
+                if (g.bound_texture[u] == id) g.bound_texture[u] = 0;
         }
     }
 }
 
-void glBindTexture(GLenum target, GLuint texture) { (void)target; g.bound_texture = texture; }
+void glBindTexture(GLenum target, GLuint texture) {
+    (void)target;
+    g.bound_texture[g.active_texture_unit] = texture;
+}
 
 void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels) {
     (void)target; (void)level; (void)border; (void)internalformat;
-    if (g.bound_texture == 0 || g.bound_texture >= NOVA_MAX_TEXTURES) return;
-    TexSlot *slot = &g.textures[g.bound_texture];
+    GLuint bound = active_bound_texture();
+    if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return;
+    TexSlot *slot = &g.textures[bound];
 
-    if (slot->allocated) { C3D_TexDelete(&slot->tex); slot->allocated = 0; }
     GPU_TEXCOLOR gpu_fmt = gl_to_gpu_texfmt(format, type);
     int pot_w = next_pow2(width); int pot_h = next_pow2(height);
     if (pot_w < 8) pot_w = 8; if (pot_h < 8) pot_h = 8;
@@ -46,7 +56,6 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
 
     int need_init = 1;
     if (slot->allocated) {
-        // Если текстура такого же размера уже была выделена в этом слоте - НЕ УДАЛЯЕМ ЕЁ!
         if (slot->pot_w == pot_w && slot->pot_h == pot_h && slot->fmt == gpu_fmt) {
             need_init = 0;
         } else {
@@ -57,7 +66,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
 
     if (need_init) {
         if (!C3D_TexInit(&slot->tex, pot_w, pot_h, gpu_fmt)) { g.last_error = GL_OUT_OF_MEMORY; return; }
-        slot->allocated = 1; slot->pot_w = pot_w; slot->pot_h = pot_h; slot->fmt = gpu_fmt;
+        slot->allocated = 1;
     }
     slot->width = width; slot->height = height; slot->pot_w = pot_w; slot->pot_h = pot_h; slot->fmt = gpu_fmt;
 
@@ -71,9 +80,18 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     if (pixels)
     {
         int bpp = gpu_texfmt_bpp(gpu_fmt);
-        int needed = pot_w * pot_h * bpp;
+        int src_w = width, src_h = height;
+        int needs_downscale = (src_w > pot_w || src_h > pot_h);
+        int ds_w = src_w > pot_w ? pot_w : src_w;
+        int ds_h = src_h > pot_h ? pot_h : src_h;
 
-        void *staging = get_tex_staging(needed);
+        int staging_need = pot_w * pot_h * bpp;
+        if (gpu_fmt == GPU_RGBA8 && format == GL_RGB)
+            staging_need += src_w * src_h * 4;
+        if (needs_downscale)
+            staging_need += ds_w * ds_h * bpp;
+
+        void *staging = get_tex_staging(staging_need);
 
         if (!staging) {
             printf("[NovaGL][ERROR] texture.c: glTexImage2D staging.");
@@ -89,22 +107,45 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
             {
                 const uint8_t *src8 = (const uint8_t*)pixels;
                 uint32_t *tmp = (uint32_t*)staging;
-                for (int i = 0; i < width * height; i++) {
+                for (int i = 0; i < src_w * src_h; i++) {
                     tmp[i] =
-                        (0xFF << 24) |
-                        (src8[i*3+2] << 16) |
-                        (src8[i*3+1] << 8) |
-                        (src8[i*3+0]);
+                        (0xFFu << 24) |
+                        ((uint32_t)src8[i*3+2] << 16) |
+                        ((uint32_t)src8[i*3+1] << 8) |
+                        ((uint32_t)src8[i*3+0]);
                 }
                 src = tmp;
             }
 
-            swizzle_rgba8((uint32_t*)slot->tex.data, src,
-                          width, height, pot_w, pot_h);
+            if (needs_downscale) {
+                uint32_t *ds_buf = (uint32_t*)((uint8_t*)staging + src_w * src_h * 4);
+                downscale_rgba8(ds_buf, src, src_w, src_h, ds_w, ds_h);
+                swizzle_rgba8((uint32_t*)slot->tex.data, ds_buf, ds_w, ds_h, pot_w, pot_h);
+            } else {
+                swizzle_rgba8((uint32_t*)slot->tex.data, src, src_w, src_h, pot_w, pot_h);
+            }
         }
-        else
+        else if (bpp == 2)
         {
-            memcpy(slot->tex.data, pixels, width * height * bpp);
+            if (needs_downscale) {
+                uint16_t *ds_buf = (uint16_t*)staging;
+                downscale_16bit(ds_buf, (const uint16_t*)pixels, src_w, src_h, ds_w, ds_h);
+                swizzle_16bit((uint16_t*)slot->tex.data, ds_buf, ds_w, ds_h, pot_w, pot_h);
+            } else {
+                swizzle_16bit((uint16_t*)slot->tex.data, (const uint16_t*)pixels,
+                              src_w, src_h, pot_w, pot_h);
+            }
+        }
+        else if (bpp == 1)
+        {
+            if (needs_downscale) {
+                uint8_t *ds_buf = (uint8_t*)staging;
+                downscale_8bit(ds_buf, (const uint8_t*)pixels, src_w, src_h, ds_w, ds_h);
+                swizzle_8bit((uint8_t*)slot->tex.data, ds_buf, ds_w, ds_h, pot_w, pot_h);
+            } else {
+                swizzle_8bit((uint8_t*)slot->tex.data, (const uint8_t*)pixels,
+                              src_w, src_h, pot_w, pot_h);
+            }
         }
 
         C3D_TexFlush(&slot->tex);
@@ -113,8 +154,9 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
 
 void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels) {
     (void)target; (void)level;
-    if (g.bound_texture == 0 || g.bound_texture >= NOVA_MAX_TEXTURES) return;
-    TexSlot *slot = &g.textures[g.bound_texture];
+    GLuint bound = active_bound_texture();
+    if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return;
+    TexSlot *slot = &g.textures[bound];
     if (!slot->allocated || !pixels) return;
 
     if (slot->fmt == GPU_RGBA8) {
@@ -147,8 +189,9 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
 
 void glTexParameteri(GLenum target, GLenum pname, GLint param) {
     (void)target;
-    if (g.bound_texture == 0 || g.bound_texture >= NOVA_MAX_TEXTURES) return;
-    TexSlot *slot = &g.textures[g.bound_texture];
+    GLuint bound = active_bound_texture();
+    if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return;
+    TexSlot *slot = &g.textures[bound];
 
     /* Store params even before allocation — they'll be applied when the texture is created */
     if (pname == GL_TEXTURE_MIN_FILTER)      slot->min_filter = param;
@@ -186,23 +229,27 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, G
 }
 
 void glActiveTexture(GLenum texture) {
-    (void)texture; /* single texture unit on PICA200 — unit 0 only */
+    int unit = (int)(texture - GL_TEXTURE0);
+    if (unit >= 0 && unit < 3)
+        g.active_texture_unit = unit;
 }
 
 void glClientActiveTexture(GLenum texture) {
-    (void)texture;
+    int unit = (int)(texture - GL_TEXTURE0);
+    if (unit >= 0 && unit < 3)
+        g.client_active_texture_unit = unit;
 }
 
 void glTexEnvi(GLenum target, GLenum pname, GLint param) {
     (void)target;
     if (pname == GL_TEXTURE_ENV_MODE) {
-        if (g.tex_env_mode != param) {
-            g.tex_env_mode = param;
+        int unit = g.active_texture_unit;
+        if (g.tex_env_mode[unit] != param) {
+            g.tex_env_mode[unit] = param;
             g.tev_dirty = 1;
         }
     }
 }
-
 
 void glTexEnvf(GLenum target, GLenum pname, GLfloat param) {
     glTexEnvi(target, pname, (GLint)param);
@@ -225,49 +272,25 @@ GLboolean glIsTexture(GLuint texture) {
 /* 1D texture functions (emulated as 2D textures with height=1) */
 void glTexImage1D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLint border, GLenum format, GLenum type, const GLvoid *pixels) {
     (void)target; (void)level; (void)internalformat; (void)border;
-    /* Emulate 1D texture as 2D texture with height=1 */
     glTexImage2D(GL_TEXTURE_2D, level, internalformat, width, 1, border, format, type, pixels);
 }
 
 void glTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const GLvoid *pixels) {
     (void)target; (void)level;
-    /* Emulate 1D texture subimage as 2D with height=1 */
     glTexSubImage2D(GL_TEXTURE_2D, level, xoffset, 0, width, 1, format, type, pixels);
 }
 
 /* Texture coordinate generation (not fully implemented - PICA200 has limited support) */
-void glTexGend(GLenum coord, GLenum pname, GLdouble param) {
-    (void)coord; (void)pname; (void)param;
-    /* Texture coordinate generation not implemented */
-}
-
-void glTexGendv(GLenum coord, GLenum pname, const GLdouble *params) {
-    (void)coord; (void)pname; (void)params;
-}
-
-void glTexGenf(GLenum coord, GLenum pname, GLfloat param) {
-    (void)coord; (void)pname; (void)param;
-}
-
-void glTexGenfv(GLenum coord, GLenum pname, const GLfloat *params) {
-    (void)coord; (void)pname; (void)params;
-}
-
-void glTexGeni(GLenum coord, GLenum pname, GLint param) {
-    (void)coord; (void)pname; (void)param;
-}
-
-void glTexGeniv(GLenum coord, GLenum pname, const GLint *params) {
-    (void)coord; (void)pname; (void)params;
-}
+void glTexGend(GLenum coord, GLenum pname, GLdouble param) { (void)coord; (void)pname; (void)param; }
+void glTexGendv(GLenum coord, GLenum pname, const GLdouble *params) { (void)coord; (void)pname; (void)params; }
+void glTexGenf(GLenum coord, GLenum pname, GLfloat param) { (void)coord; (void)pname; (void)param; }
+void glTexGenfv(GLenum coord, GLenum pname, const GLfloat *params) { (void)coord; (void)pname; (void)params; }
+void glTexGeni(GLenum coord, GLenum pname, GLint param) { (void)coord; (void)pname; (void)param; }
+void glTexGeniv(GLenum coord, GLenum pname, const GLint *params) { (void)coord; (void)pname; (void)params; }
 
 /* ARB multitexture functions */
 void glMultiTexCoord2fARB(GLenum target, GLfloat s, GLfloat t) {
-    (void)target;
-    /* Only texture unit 0 is supported on PICA200 */
-    if (target == GL_TEXTURE0_ARB || target == GL_TEXTURE0) {
-        /* Store texcoord for immediate mode */
-    }
+    (void)target; (void)s; (void)t;
 }
 
 void glActiveTextureARB(GLenum texture) {

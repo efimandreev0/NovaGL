@@ -36,7 +36,10 @@ void glColorMask(GLboolean r, GLboolean g_, GLboolean b, GLboolean a) {
     g.color_mask_r = r; g.color_mask_g = g_; g.color_mask_b = b; g.color_mask_a = a;
 }
 
-void glShadeModel(GLenum mode) { (void)mode; }
+void glShadeModel(GLenum mode) {
+    if (mode == GL_FLAT || mode == GL_SMOOTH)
+        g.shade_model = mode;
+}
 
 void glPolygonOffset(GLfloat factor, GLfloat units) {
     g.polygon_offset_factor = factor;

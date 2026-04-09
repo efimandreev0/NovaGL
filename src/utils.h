@@ -48,11 +48,19 @@ void* get_tex_staging(int size);
 
 uint32_t morton_interleave(uint32_t x, uint32_t y);
 
+void swizzle_8bit(uint8_t *dst, const uint8_t *src, int src_w, int src_h, int pot_w, int pot_h);
+
 void swizzle_16bit(uint16_t *dst, const uint16_t *src, int src_w, int src_h, int pot_w, int pot_h);
 
 void swizzle_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src_h, int pot_w, int pot_h);
 
 uint32_t* rgb_to_rgba(const uint8_t *rgb, int w, int h);
+
+void downscale_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src_h, int dst_w, int dst_h);
+
+void downscale_16bit(uint16_t *dst, const uint16_t *src, int src_w, int src_h, int dst_w, int dst_h);
+
+void downscale_8bit(uint8_t *dst, const uint8_t *src, int src_w, int src_h, int dst_w, int dst_h);
 
 void apply_depth_map(void);
 

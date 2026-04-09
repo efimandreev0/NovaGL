@@ -32,8 +32,8 @@ void glFogi(GLenum pname, GLint param) {
 
 void glFogiv(GLenum pname, const GLint *params) {
     if (pname == GL_FOG_COLOR && params) {
-        g.fog_color[0] = params[0] / 255.0f; g.fog_color[1] = params[1] / 255.0f;
-        g.fog_color[2] = params[2] / 255.0f; g.fog_color[3] = params[3] / 255.0f;
+        g.fog_color[0] = params[0] / 2147483647.0f; g.fog_color[1] = params[1] / 2147483647.0f;
+        g.fog_color[2] = params[2] / 2147483647.0f; g.fog_color[3] = params[3] / 2147483647.0f;
         g.fog_dirty = 1;
     } else if (params) {
         glFogi(pname, params[0]);

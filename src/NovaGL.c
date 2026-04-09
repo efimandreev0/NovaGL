@@ -91,6 +91,7 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.cull_face_mode = GL_BACK;
     g.front_face = GL_CCW;
 
+    g.shade_model = GL_SMOOTH;
     g.fog_mode = GL_LINEAR;
     g.fog_start = 0.0f; g.fog_end = 1.0f; g.fog_density = 1.0f;
     g.fog_color[0] = g.fog_color[1] = g.fog_color[2] = 0.0f; g.fog_color[3] = 1.0f;
@@ -104,7 +105,14 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.vbo_next_id = 1;
     g.dl_recording = -1;
     g.dl_next_base = 1;
-    g.texture_2d_enabled = 0;
+    g.active_texture_unit = 0;
+    g.client_active_texture_unit = 0;
+    g.texture_2d_enabled_unit[0] = 0;
+    g.texture_2d_enabled_unit[1] = 0;
+    g.texture_2d_enabled_unit[2] = 0;
+    g.tex_env_mode[0] = GL_MODULATE;
+    g.tex_env_mode[1] = GL_MODULATE;
+    g.tex_env_mode[2] = GL_MODULATE;
     g.tev_dirty = 1;
 
     g.tex_staging_size = tex_staging_size;
@@ -302,9 +310,34 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
         dst += 24;
     }
 
+    if (g.shade_model == GL_FLAT) {
+        int verts_per_prim = (mode == GL_TRIANGLES || mode == GL_TRIANGLE_FAN || mode == GL_TRIANGLE_STRIP) ? 3
+                           : (mode == GL_QUADS) ? 4 : 0;
+        if (verts_per_prim > 0) {
+            if (mode == GL_TRIANGLES || mode == GL_QUADS) {
+                for (int i = 0; i + verts_per_prim <= count; i += verts_per_prim) {
+                    uint8_t *provoking = dst_start + (i + verts_per_prim - 1) * 24 + 20;
+                    for (int j = 0; j < verts_per_prim - 1; j++)
+                        memcpy(dst_start + (i + j) * 24 + 20, provoking, 4);
+                }
+            } else if (mode == GL_TRIANGLE_STRIP) {
+                for (int i = 2; i < count; i++) {
+                    uint8_t *provoking = dst_start + i * 24 + 20;
+                    memcpy(dst_start + (i - 2) * 24 + 20, provoking, 4);
+                    memcpy(dst_start + (i - 1) * 24 + 20, provoking, 4);
+                }
+            } else if (mode == GL_TRIANGLE_FAN) {
+                for (int i = 2; i < count; i++) {
+                    uint8_t *provoking = dst_start + i * 24 + 20;
+                    memcpy(dst_start + 20, provoking, 4);
+                    memcpy(dst_start + (i - 1) * 24 + 20, provoking, 4);
+                }
+            }
+        }
+    }
+
     GSPGPU_FlushDataCache(dst_start, req_size);
     BufInfo_Add(bufInfo, dst_start, 24, 3, 0x210);
-    //g.client_array_buf_offset += req_size;
 
     if (mode == GL_QUADS) {
         draw_emulated_quads(count);

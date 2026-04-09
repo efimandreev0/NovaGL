@@ -237,68 +237,43 @@ uint32_t morton_interleave(uint32_t x, uint32_t y) {
     static const uint32_t ylut[8] = {0x00,0x02,0x08,0x0a,0x20,0x22,0x28,0x2a};
     return xlut[x & 7] | ylut[y & 7];
 }
-void swizzle_16bit(uint16_t *dst, const uint16_t *src, int src_w, int src_h, int pot_w, int pot_h) {
-    for (int y = 0; y < src_h; y++) {
-        for (int x = 0; x < src_w; x++) {
-            int flipped_y = pot_h - 1 - y;
-            int tile_x = x >> 3;
-            int tile_y = flipped_y >> 3;
-            int lx = x & 7;
-            int ly = flipped_y & 7;
-            int tiles_per_row = pot_w >> 3;
-            int tile_offset = (tile_y * tiles_per_row + tile_x) * 64;
-            int pixel_offset = tile_offset + morton_interleave(lx, ly);
-            dst[pixel_offset] = src[y * src_w + x];
-        }
-    }
-    // Padding
+static inline int morton_offset(int x, int y, int pot_w, int pot_h) {
+    int fy = pot_h - 1 - y;
+    int tile_offset = ((fy >> 3) * (pot_w >> 3) + (x >> 3)) * 64;
+    return tile_offset + morton_interleave(x & 7, fy & 7);
+}
 
-    for (int y = src_h; y < pot_h; y++) {
+void swizzle_8bit(uint8_t *dst, const uint8_t *src, int src_w, int src_h, int pot_w, int pot_h) {
+    for (int y = 0; y < pot_h; y++) {
         for (int x = 0; x < pot_w; x++) {
-            int flipped_y = pot_h - 1 - y;
-            int tile_x = x >> 3;
-            int tile_y = flipped_y >> 3;
-            int lx = x & 7;
-            int ly = flipped_y & 7;
-            int tiles_per_row = pot_w >> 3;
-            int tile_offset = (tile_y * tiles_per_row + tile_x) * 64;
-            int pixel_offset = tile_offset + morton_interleave(lx, ly);
-            dst[pixel_offset] = 0;
+            uint8_t val = (x < src_w && y < src_h) ? src[y * src_w + x] : 0;
+            dst[morton_offset(x, y, pot_w, pot_h)] = val;
         }
     }
 }
-void swizzle_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src_h, int pot_w, int pot_h) {
-    for (int y = 0; y < src_h; y++) {
-        for (int x = 0; x < src_w; x++) {
-            uint32_t pixel = src[y * src_w + x];
-            uint8_t r = (pixel >>  0) & 0xFF;
-            uint8_t g_c = (pixel >>  8) & 0xFF;
-            uint8_t b = (pixel >> 16) & 0xFF;
-            uint8_t a = (pixel >> 24) & 0xFF;
-            uint32_t out_pixel = ((uint32_t)r << 24) | ((uint32_t)g_c << 16) | ((uint32_t)b << 8) | (uint32_t)a;
 
-            int flipped_y = pot_h - 1 - y;
-            int tile_x = x >> 3;
-            int tile_y = flipped_y >> 3;
-            int lx = x & 7;
-            int ly = flipped_y & 7;
-            int tiles_per_row = pot_w >> 3;
-            int tile_offset = (tile_y * tiles_per_row + tile_x) * 64;
-            int pixel_offset = tile_offset + morton_interleave(lx, ly);
-            dst[pixel_offset] = out_pixel;
+void swizzle_16bit(uint16_t *dst, const uint16_t *src, int src_w, int src_h, int pot_w, int pot_h) {
+    for (int y = 0; y < pot_h; y++) {
+        for (int x = 0; x < pot_w; x++) {
+            uint16_t val = (x < src_w && y < src_h) ? src[y * src_w + x] : 0;
+            dst[morton_offset(x, y, pot_w, pot_h)] = val;
         }
     }
-    for (int y = src_h; y < pot_h; y++) {
+}
+
+void swizzle_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src_h, int pot_w, int pot_h) {
+    for (int y = 0; y < pot_h; y++) {
         for (int x = 0; x < pot_w; x++) {
-            int flipped_y = pot_h - 1 - y;
-            int tile_x = x >> 3;
-            int tile_y = flipped_y >> 3;
-            int lx = x & 7;
-            int ly = flipped_y & 7;
-            int tiles_per_row = pot_w >> 3;
-            int tile_offset = (tile_y * tiles_per_row + tile_x) * 64;
-            int pixel_offset = tile_offset + morton_interleave(lx, ly);
-            dst[pixel_offset] = 0;
+            uint32_t out_pixel = 0;
+            if (x < src_w && y < src_h) {
+                uint32_t pixel = src[y * src_w + x];
+                uint8_t r = (pixel >>  0) & 0xFF;
+                uint8_t g_c = (pixel >>  8) & 0xFF;
+                uint8_t b = (pixel >> 16) & 0xFF;
+                uint8_t a = (pixel >> 24) & 0xFF;
+                out_pixel = ((uint32_t)r << 24) | ((uint32_t)g_c << 16) | ((uint32_t)b << 8) | (uint32_t)a;
+            }
+            dst[morton_offset(x, y, pot_w, pot_h)] = out_pixel;
         }
     }
 }
@@ -310,6 +285,52 @@ uint32_t* rgb_to_rgba(const uint8_t *rgb, int w, int h) {
         out[i] = (0xFF << 24) | (rgb[i*3+2] << 16) | (rgb[i*3+1] << 8) | rgb[i*3+0];
     }
     return out;
+}
+
+void downscale_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src_h, int dst_w, int dst_h) {
+    float x_ratio = (float)src_w / dst_w;
+    float y_ratio = (float)src_h / dst_h;
+    for (int y = 0; y < dst_h; y++) {
+        int sy = (int)(y * y_ratio);
+        int sy1 = sy + 1 < src_h ? sy + 1 : sy;
+        for (int x = 0; x < dst_w; x++) {
+            int sx = (int)(x * x_ratio);
+            int sx1 = sx + 1 < src_w ? sx + 1 : sx;
+            uint32_t p00 = src[sy  * src_w + sx];
+            uint32_t p10 = src[sy  * src_w + sx1];
+            uint32_t p01 = src[sy1 * src_w + sx];
+            uint32_t p11 = src[sy1 * src_w + sx1];
+            uint8_t r = (uint8_t)(((p00>>0)&0xFF) + ((p10>>0)&0xFF) + ((p01>>0)&0xFF) + ((p11>>0)&0xFF)) / 4;
+            uint8_t g = (uint8_t)(((p00>>8)&0xFF) + ((p10>>8)&0xFF) + ((p01>>8)&0xFF) + ((p11>>8)&0xFF)) / 4;
+            uint8_t b = (uint8_t)(((p00>>16)&0xFF) + ((p10>>16)&0xFF) + ((p01>>16)&0xFF) + ((p11>>16)&0xFF)) / 4;
+            uint8_t a = (uint8_t)(((p00>>24)&0xFF) + ((p10>>24)&0xFF) + ((p01>>24)&0xFF) + ((p11>>24)&0xFF)) / 4;
+            dst[y * dst_w + x] = ((uint32_t)a << 24) | ((uint32_t)b << 16) | ((uint32_t)g << 8) | r;
+        }
+    }
+}
+
+void downscale_16bit(uint16_t *dst, const uint16_t *src, int src_w, int src_h, int dst_w, int dst_h) {
+    float x_ratio = (float)src_w / dst_w;
+    float y_ratio = (float)src_h / dst_h;
+    for (int y = 0; y < dst_h; y++) {
+        int sy = (int)(y * y_ratio);
+        for (int x = 0; x < dst_w; x++) {
+            int sx = (int)(x * x_ratio);
+            dst[y * dst_w + x] = src[sy * src_w + sx];
+        }
+    }
+}
+
+void downscale_8bit(uint8_t *dst, const uint8_t *src, int src_w, int src_h, int dst_w, int dst_h) {
+    float x_ratio = (float)src_w / dst_w;
+    float y_ratio = (float)src_h / dst_h;
+    for (int y = 0; y < dst_h; y++) {
+        int sy = (int)(y * y_ratio);
+        for (int x = 0; x < dst_w; x++) {
+            int sx = (int)(x * x_ratio);
+            dst[y * dst_w + x] = src[sy * src_w + sx];
+        }
+    }
 }
 
 void apply_depth_map(void) {
@@ -374,33 +395,33 @@ void apply_gpu_state(void) {
             for (int i = 0; i < 128; i++) {
                 float depth_val = (float)i / 127.0f;
 
-                // 1. Откатываем C3D_DepthMap: получаем z после adj_proj ([-1, 0] диапазон)
                 float z_mod = (depth_val - offset) / scale;
-
-                // 2. Откатываем adj_proj хак: z_mod = z_ndc * 0.4999 - 0.5
-                //    => z_ndc = (z_mod + 0.5) / 0.4999
                 float z_ndc = (z_mod + 0.5f) / 0.4999f;
+
+                // [ФИКС КУПОЛА]: Защита от переполнения float на границе мира.
+                // Не даем z_ndc превысить 0.9999, иначе знаменатель уйдёт в 0 или станет положительным.
+                if (z_ndc > 0.9999f) z_ndc = 0.9999f;
+                if (z_ndc < -0.9999f) z_ndc = -0.9999f;
 
                 float actual_dist;
 
                 if (is_perspective) {
-                    // Перспектива: z_ndc = -P_C - P_D/z_eye  =>  z_eye = -P_D/(z_ndc + P_C)
                     float denom = z_ndc + P_C;
-                    if (fabsf(denom) > 0.00001f) {
-                        actual_dist = -P_D / denom;  // P_D отрицательный, поэтому -P_D положительный
+                    // Если знаменатель приблизился к нулю или стал положительным,
+                    // значит мы математически "пробили" дальнюю плоскость (far plane).
+                    // Жёстко ставим огромную дистанцию, чтобы туман был 100% глухим.
+                    if (denom >= -0.000001f) {
+                        actual_dist = g.fog_end + 1000.0f;
                     } else {
-                        actual_dist = g.fog_end * 2.0f;
+                        actual_dist = fabsf(-P_D / denom);
                     }
                 } else {
-                    // Ортогональная: z_ndc = P_C*z_eye + P_D  =>  z_eye = (z_ndc - P_D)/P_C
                     if (fabsf(P_C) > 0.00001f) {
                         actual_dist = fabsf((z_ndc - P_D) / P_C);
                     } else {
                         actual_dist = 0.0f;
                     }
                 }
-
-                if (actual_dist < 0.0f) actual_dist = 0.0f;
 
                 // Расчёт плотности тумана f [0..1]
                 float f = 0.0f;
@@ -463,48 +484,78 @@ void apply_gpu_state(void) {
         C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
     }
 
-    int current_tex_state = (g.texture_2d_enabled && g.bound_texture > 0);
-    if (g.tev_dirty || g.last_tex_state != current_tex_state) {
-        C3D_TexEnv *env0 = C3D_GetTexEnv(0);
-        C3D_TexEnvInit(env0);
-        if (current_tex_state) {
-            switch (g.tex_env_mode) {
-                case GL_REPLACE:
-                    C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
-                    C3D_TexEnvFunc(env0, C3D_Both, GPU_REPLACE);
-                    break;
-                case GL_DECAL:
-                    C3D_TexEnvSrc(env0, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_TEXTURE0);
-                    C3D_TexEnvFunc(env0, C3D_RGB, GPU_INTERPOLATE);
-                    C3D_TexEnvSrc(env0, C3D_Alpha, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
-                    C3D_TexEnvFunc(env0, C3D_Alpha, GPU_REPLACE);
-                    break;
-                case GL_ADD:
-                    C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0);
-                    C3D_TexEnvFunc(env0, C3D_Both, GPU_ADD);
-                    break;
-                case GL_MODULATE:
-                default:
-                    C3D_TexEnvSrc(env0, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0);
-                    C3D_TexEnvFunc(env0, C3D_Both, GPU_MODULATE);
-                    break;
-            }
-        } else {
-            C3D_TexEnvSrc(env0, C3D_Both, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
-            C3D_TexEnvFunc(env0, C3D_Both, GPU_REPLACE);
+    int current_tex_state = 0;
+    for (int i = 0; i < 3; i++) {
+        if (g.texture_2d_enabled_unit[i] && g.bound_texture[i] > 0) {
+            current_tex_state |= (1 << i);
         }
-        for (int i = 1; i < 6; i++) {
+    }
+
+    if (g.tev_dirty || g.last_tex_state != current_tex_state) {
+        int tev_stage = 0;
+
+        for (int unit = 0; unit < 3; unit++) {
+            if (current_tex_state & (1 << unit)) {
+                C3D_TexEnv *env = C3D_GetTexEnv(tev_stage);
+                C3D_TexEnvInit(env);
+
+                // Выбираем источник: TEXTURE0, TEXTURE1 или TEXTURE2
+                GPU_TEVSRC tex_src = (unit == 0) ? GPU_TEXTURE0 : ((unit == 1) ? GPU_TEXTURE1 : GPU_TEXTURE2);
+                // На первой стадии берем цвет вершины, на последующих - результат предыдущей стадии
+                GPU_TEVSRC prev_src = (tev_stage == 0) ? GPU_PRIMARY_COLOR : GPU_PREVIOUS;
+
+                switch (g.tex_env_mode[unit]) {
+                    case GL_REPLACE:
+                        C3D_TexEnvSrc(env, C3D_Both, tex_src, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+                        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+                        break;
+                    case GL_DECAL:
+                        C3D_TexEnvSrc(env, C3D_RGB, tex_src, prev_src, tex_src);
+                        C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
+                        C3D_TexEnvSrc(env, C3D_Alpha, prev_src, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+                        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+                        break;
+                    case GL_ADD:
+                        C3D_TexEnvSrc(env, C3D_Both, tex_src, prev_src, (GPU_TEVSRC)0);
+                        C3D_TexEnvFunc(env, C3D_Both, GPU_ADD);
+                        break;
+                    case GL_MODULATE:
+                    default:
+                        C3D_TexEnvSrc(env, C3D_Both, tex_src, prev_src, (GPU_TEVSRC)0);
+                        C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
+                        break;
+                }
+                tev_stage++;
+            }
+        }
+
+        // Если нет ни одной текстуры, всё равно нужна 1 стадия для передачи цвета вершины
+        if (tev_stage == 0) {
+            C3D_TexEnv *env = C3D_GetTexEnv(0);
+            C3D_TexEnvInit(env);
+            C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+            C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+            tev_stage++;
+        }
+
+        // Выключаем (заглушаем) все оставшиеся стадии (в 3DS их 6)
+        for (int i = tev_stage; i < 6; i++) {
             C3D_TexEnv *env = C3D_GetTexEnv(i);
             C3D_TexEnvInit(env);
             C3D_TexEnvSrc(env, C3D_Both, GPU_PREVIOUS, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
             C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
         }
+
         g.last_tex_state = current_tex_state;
         g.tev_dirty = 0;
     }
 
-    if (current_tex_state && g.bound_texture < NOVA_MAX_TEXTURES && g.textures[g.bound_texture].allocated) {
-        C3D_TexBind(0, &g.textures[g.bound_texture].tex);
+    for (int unit = 0; unit < 3; unit++) {
+        if ((current_tex_state & (1 << unit)) && g.bound_texture[unit] < NOVA_MAX_TEXTURES) {
+            if (g.textures[g.bound_texture[unit]].allocated) {
+                C3D_TexBind(unit, &g.textures[g.bound_texture[unit]].tex);
+            }
+        }
     }
 }
 

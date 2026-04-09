@@ -10,7 +10,10 @@ void glEnable(GLenum cap) {
         case GL_BLEND:         g.blend_enabled = 1; break;
         case GL_ALPHA_TEST:    g.alpha_test_enabled = 1; break;
         case GL_CULL_FACE:     g.cull_face_enabled = 1; break;
-        case GL_TEXTURE_2D:    g.tev_dirty = 1; g.texture_2d_enabled = 1; break;
+        case GL_TEXTURE_2D:
+            g.texture_2d_enabled_unit[g.active_texture_unit] = 1;
+            g.tev_dirty = 1;
+            break;
         case GL_SCISSOR_TEST:  g.scissor_test_enabled = 1; break;
         case GL_FOG:
             if (!g.fog_enabled) {
@@ -32,7 +35,10 @@ void glDisable(GLenum cap) {
         case GL_BLEND:         g.blend_enabled = 0; break;
         case GL_ALPHA_TEST:    g.alpha_test_enabled = 0; break;
         case GL_CULL_FACE:     g.cull_face_enabled = 0; break;
-        case GL_TEXTURE_2D:    g.tev_dirty = 1; g.texture_2d_enabled = 0; break;
+        case GL_TEXTURE_2D:
+            g.texture_2d_enabled_unit[g.active_texture_unit] = 0;
+            g.tev_dirty = 1;
+            break;
         case GL_SCISSOR_TEST:  g.scissor_test_enabled = 0; break;
         case GL_FOG:
             if (g.fog_enabled) {
@@ -54,7 +60,7 @@ GLboolean glIsEnabled(GLenum cap) {
         case GL_BLEND:         return g.blend_enabled;
         case GL_ALPHA_TEST:    return g.alpha_test_enabled;
         case GL_CULL_FACE:     return g.cull_face_enabled;
-        case GL_TEXTURE_2D:    return g.texture_2d_enabled;
+        case GL_TEXTURE_2D:    return g.texture_2d_enabled_unit[g.active_texture_unit];
         case GL_SCISSOR_TEST:  return g.scissor_test_enabled;
         case GL_FOG:           return g.fog_enabled;
         default:               return GL_FALSE;
@@ -97,7 +103,7 @@ typedef struct {
     GLboolean blend;
     GLboolean alpha_test;
     GLboolean cull_face;
-    GLboolean texture_2d;
+    int       texture_2d_units[3]; /* one flag per unit */
     GLboolean scissor_test;
     GLboolean fog;
     GLenum depth_func;
@@ -116,40 +122,40 @@ void glPushAttrib(GLbitfield mask) {
     (void)mask;
     if (attrib_stack_ptr < 16) {
         AttribState *s = &attrib_stack[attrib_stack_ptr++];
-        s->depth_test = g.depth_test_enabled;
-        s->blend = g.blend_enabled;
-        s->alpha_test = g.alpha_test_enabled;
-        s->cull_face = g.cull_face_enabled;
-        s->texture_2d = g.texture_2d_enabled;
+        s->depth_test   = g.depth_test_enabled;
+        s->blend        = g.blend_enabled;
+        s->alpha_test   = g.alpha_test_enabled;
+        s->cull_face    = g.cull_face_enabled;
+        for (int u = 0; u < 3; u++) s->texture_2d_units[u] = g.texture_2d_enabled_unit[u];
         s->scissor_test = g.scissor_test_enabled;
-        s->fog = g.fog_enabled;
-        s->depth_func = g.depth_func;
-        s->blend_src = g.blend_src;
-        s->blend_dst = g.blend_dst;
-        s->alpha_func = g.alpha_func;
-        s->alpha_ref = g.alpha_ref;
+        s->fog          = g.fog_enabled;
+        s->depth_func   = g.depth_func;
+        s->blend_src    = g.blend_src;
+        s->blend_dst    = g.blend_dst;
+        s->alpha_func   = g.alpha_func;
+        s->alpha_ref    = g.alpha_ref;
         s->cull_face_mode = g.cull_face_mode;
-        s->front_face = g.front_face;
+        s->front_face   = g.front_face;
     }
 }
 
 void glPopAttrib(void) {
     if (attrib_stack_ptr > 0) {
         AttribState *s = &attrib_stack[--attrib_stack_ptr];
-        g.depth_test_enabled = s->depth_test;
-        g.blend_enabled = s->blend;
-        g.alpha_test_enabled = s->alpha_test;
-        g.cull_face_enabled = s->cull_face;
-        g.texture_2d_enabled = s->texture_2d;
+        g.depth_test_enabled  = s->depth_test;
+        g.blend_enabled       = s->blend;
+        g.alpha_test_enabled  = s->alpha_test;
+        g.cull_face_enabled   = s->cull_face;
+        for (int u = 0; u < 3; u++) g.texture_2d_enabled_unit[u] = s->texture_2d_units[u];
         g.scissor_test_enabled = s->scissor_test;
-        g.fog_enabled = s->fog;
-        g.depth_func = s->depth_func;
-        g.blend_src = s->blend_src;
-        g.blend_dst = s->blend_dst;
-        g.alpha_func = s->alpha_func;
-        g.alpha_ref = s->alpha_ref;
-        g.cull_face_mode = s->cull_face_mode;
-        g.front_face = s->front_face;
+        g.fog_enabled         = s->fog;
+        g.depth_func          = s->depth_func;
+        g.blend_src           = s->blend_src;
+        g.blend_dst           = s->blend_dst;
+        g.alpha_func          = s->alpha_func;
+        g.alpha_ref           = s->alpha_ref;
+        g.cull_face_mode      = s->cull_face_mode;
+        g.front_face          = s->front_face;
         g.tev_dirty = 1;
         g.fog_dirty = 1;
     }
@@ -169,19 +175,19 @@ void glPushClientAttrib(GLbitfield mask) {
     (void)mask;
     if (client_attrib_stack_ptr < 16) {
         ClientAttribState *s = &client_attrib_stack[client_attrib_stack_ptr++];
-        s->va_vertex_enabled = g.va_vertex.enabled;
-        s->va_color_enabled = g.va_color.enabled;
+        s->va_vertex_enabled   = g.va_vertex.enabled;
+        s->va_color_enabled    = g.va_color.enabled;
         s->va_texcoord_enabled = g.va_texcoord.enabled;
-        s->va_normal_enabled = g.va_normal.enabled;
+        s->va_normal_enabled   = g.va_normal.enabled;
     }
 }
 
 void glPopClientAttrib(void) {
     if (client_attrib_stack_ptr > 0) {
         ClientAttribState *s = &client_attrib_stack[--client_attrib_stack_ptr];
-        g.va_vertex.enabled = s->va_vertex_enabled;
-        g.va_color.enabled = s->va_color_enabled;
+        g.va_vertex.enabled   = s->va_vertex_enabled;
+        g.va_color.enabled    = s->va_color_enabled;
         g.va_texcoord.enabled = s->va_texcoord_enabled;
-        g.va_normal.enabled = s->va_normal_enabled;
+        g.va_normal.enabled   = s->va_normal_enabled;
     }
 }

@@ -86,9 +86,10 @@ extern struct NovaState{
 
     //Textures stuff
     TexSlot    textures[NOVA_MAX_TEXTURES];
-    GLuint     bound_texture;
+    int        active_texture_unit;
+    GLuint     bound_texture[3];
+    int        texture_2d_enabled_unit[3];
     int        tex_next_id;
-    int        texture_2d_enabled;
 
     VBOSlot    vbos[NOVA_MAX_VBOS];
     GLuint     bound_array_buffer;
@@ -119,6 +120,8 @@ extern struct NovaState{
     int        scissor_test_enabled;
     GLint      scissor_x, scissor_y;
     GLsizei    scissor_w, scissor_h;
+
+    GLenum     shade_model;
 
     int        fog_enabled;
     GLenum     fog_mode;
@@ -151,7 +154,8 @@ extern struct NovaState{
 
     int        tev_dirty;
     int        last_tex_state;
-    GLint      tex_env_mode;
+    GLint      tex_env_mode[3];
+    int        client_active_texture_unit;
 
     int polygon_offset_fill_enabled;
     GLfloat    depth_near;
