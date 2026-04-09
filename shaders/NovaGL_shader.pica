@@ -4,6 +4,7 @@
 
 .fvec projection[4]
 .fvec modelview[4]
+.fvec fogparams[2]  ; <-- Сюда прилетят параметры тумана из C-кода
 
 .alias inPosition  v0
 .alias inTexcoord  v1
@@ -33,8 +34,41 @@
     dp4 outPosition.z, projection[2], r0
     dp4 outPosition.w, projection[3], r0
 
-    mov r1, inColor
-    mul outColor, my_normalize, r1
+    mul r1, my_normalize, inColor
+
+    ; ================== НАЧАЛО ТУМАНА ==================
+    ; Считаем Радиальную дистанцию (длину вектора r0) d = sqrt(x^2 + y^2 + z^2)
+    dp3 r2.x, r0, r0
+    rsq r2.x, r2.x
+    rcp r2.x, r2.x
+
+    ; r3.x = end - d
+    add r3.x, fogparams[0].y, -r2.x
+
+    ; r3.y = end - start
+    mov r3.y, fogparams[0].x
+    add r3.y, fogparams[0].y, -r3.y
+
+    ; r3.y = 1.0 / (end - start)
+    rcp r3.y, r3.y
+
+    ; r2.x (наш фактор f) = (end - d) / (end - start)
+    mul r2.x, r3.x, r3.y
+
+    ; Зажимаем f в рамки от 0.0 до 1.0
+    max r2.x, CONST1.y, r2.x
+    min r2.x, CONST1.x, r2.x
+
+    ; r4.x = 1.0 - f
+    add r4.x, CONST1.x, -r2.x
+
+    ; Смешиваем: Color = VertexColor * f + FogColor * (1.0 - f)
+    mul r5.xyz, r1.xyz, r2.xxx
+    mul r6.xyz, fogparams[1].xyz, r4.xxx
+
+    add outColor.xyz, r5.xyz, r6.xyz
+    mov outColor.w, r1.w
+    ; ================== КОНЕЦ ТУМАНА ===================
 
     mov outTexcoord0.xy, inTexcoord.xy
     mov outTexcoord0.zw, CONST2.zw

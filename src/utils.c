@@ -371,89 +371,22 @@ void apply_gpu_state(void) {
     }
 
     if (g.fog_dirty) {
-        if (g.fog_enabled) {
-            u32 fc = ((u32)(g.fog_color[0]*255.0f)) |
-                     (((u32)(g.fog_color[1]*255.0f)) << 8) |
-                     (((u32)(g.fog_color[2]*255.0f)) << 16);
-            C3D_FogColor(fc);
-
-            float lut_data[128];
-
-            C3D_Mtx *proj = &g.proj_stack[g.proj_sp];
-            float P_C = proj->r[2].z;  // Элемент [2][2]
-            float P_D = proj->r[2].w;  // Элемент [2][3] (w компонента строки 2)
-
-            // Проверяем перспективу: w компонента 4-й строки должен быть -1 или около
-            int is_perspective = (fabsf(proj->r[3].w) < 0.0001f);
-
-            // C3D_DepthMap параметры (scale, offset)
-            float scale = g.depth_far - g.depth_near;
-            float offset = g.depth_far;
-
-            if (fabsf(scale) < 0.00001f) scale = 0.00001f;
-
-            for (int i = 0; i < 128; i++) {
-                float depth_val = (float)i / 127.0f;
-
-                float z_mod = (depth_val - offset) / scale;
-                float z_ndc = (z_mod + 0.5f) / 0.4999f;
-
-                // [ФИКС КУПОЛА]: Защита от переполнения float на границе мира.
-                // Не даем z_ndc превысить 0.9999, иначе знаменатель уйдёт в 0 или станет положительным.
-                if (z_ndc > 0.9999f) z_ndc = 0.9999f;
-                if (z_ndc < -0.9999f) z_ndc = -0.9999f;
-
-                float actual_dist;
-
-                if (is_perspective) {
-                    float denom = z_ndc + P_C;
-                    // Если знаменатель приблизился к нулю или стал положительным,
-                    // значит мы математически "пробили" дальнюю плоскость (far plane).
-                    // Жёстко ставим огромную дистанцию, чтобы туман был 100% глухим.
-                    if (denom >= -0.000001f) {
-                        actual_dist = g.fog_end + 1000.0f;
-                    } else {
-                        actual_dist = fabsf(-P_D / denom);
-                    }
-                } else {
-                    if (fabsf(P_C) > 0.00001f) {
-                        actual_dist = fabsf((z_ndc - P_D) / P_C);
-                    } else {
-                        actual_dist = 0.0f;
-                    }
+        if (g.uLoc_fogparams >= 0) {
+            if (g.fog_enabled) {
+                // Защита от деления на ноль (если игра шлет одинаковые start и end)
+                float safe_end = g.fog_end;
+                if (fabsf(safe_end - g.fog_start) < 0.001f) {
+                    safe_end = g.fog_start + 0.001f;
                 }
-
-                // Расчёт плотности тумана f [0..1]
-                float f = 0.0f;
-                float range = g.fog_end - g.fog_start;
-                if (range < 0.001f) range = 0.001f;
-
-                if (g.fog_mode == GL_LINEAR) {
-                    if (actual_dist <= g.fog_start) f = 0.0f;
-                    else if (actual_dist >= g.fog_end) f = 1.0f;
-                    else f = (actual_dist - g.fog_start) / range;
-                }
-                else if (g.fog_mode == GL_EXP) {
-                    f = 1.0f - expf(-(g.fog_density * actual_dist));
-                }
-                else { // GL_EXP2
-                    float d = g.fog_density * actual_dist;
-                    f = 1.0f - expf(-(d * d));
-                }
-
-                f = clampf(f, 0.0f, 1.0f);
-
-                // ВАЖНО: Citro3D ожидает видимость объекта (1-f), а не плотность тумана!
-                // Иначе туман работает инвертированно
-                lut_data[i] = 1.0f - f;
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams, g.fog_start, safe_end, g.fog_density, 1.0f);
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams + 1, g.fog_color[0], g.fog_color[1], g.fog_color[2], g.fog_color[3]);
+            } else {
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams, 0.0f, 999999.0f, 0.0f, 0.0f);
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams + 1, 1.0f, 1.0f, 1.0f, 1.0f);
             }
-
-            FogLut_FromArray(&g.fog_lut, lut_data);
-            C3D_FogGasMode(GPU_FOG, GPU_PLAIN_DENSITY, false);
-            C3D_FogLutBind(&g.fog_lut);
-        } else {
-            C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
         }
+
+        C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
         g.fog_dirty = 0;
     }
 

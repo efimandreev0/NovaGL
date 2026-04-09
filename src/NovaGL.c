@@ -95,6 +95,7 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.fog_mode = GL_LINEAR;
     g.fog_start = 0.0f; g.fog_end = 1.0f; g.fog_density = 1.0f;
     g.fog_color[0] = g.fog_color[1] = g.fog_color[2] = 0.0f; g.fog_color[3] = 1.0f;
+    g.fog_dirty = 1;
 
     g.vp_x = 0; g.vp_y = 0;
     g.vp_w = NOVA_SCREEN_W; g.vp_h = NOVA_SCREEN_H;
