@@ -25,6 +25,9 @@ void glEnable(GLenum cap) {
             g.polygon_offset_fill_enabled = 1;
             apply_depth_map();
             break;
+        case GL_LINE_SMOOTH:
+            g.line_smooth_enabled = 1;
+            break;
         default: break;
     }
 }
@@ -50,6 +53,9 @@ void glDisable(GLenum cap) {
             g.polygon_offset_fill_enabled = 0;
             apply_depth_map();
             break;
+        case GL_LINE_SMOOTH:
+            g.line_smooth_enabled = 0;
+            break;
         default: break;
     }
 }
@@ -63,16 +69,29 @@ GLboolean glIsEnabled(GLenum cap) {
         case GL_TEXTURE_2D:    return g.texture_2d_enabled_unit[g.active_texture_unit];
         case GL_SCISSOR_TEST:  return g.scissor_test_enabled;
         case GL_FOG:           return g.fog_enabled;
+        case GL_LINE_SMOOTH:   return g.line_smooth_enabled ? GL_TRUE : GL_FALSE;
         default:               return GL_FALSE;
     }
 }
 
 void glGetFloatv(GLenum pname, GLfloat *params) {
+    if (!params) return;
+
+    if (pname == GL_SMOOTH_LINE_WIDTH_RANGE || pname == GL_ALIASED_LINE_WIDTH_RANGE) {
+        params[0] = 1.0f; // min
+        params[1] = 1.0f; // max
+        return;
+    } else if (pname == GL_LINE_WIDTH) {
+        params[0] = 1.0f;
+        return;
+    }
+
     C3D_Mtx *src = NULL;
     if (pname == GL_MODELVIEW_MATRIX) src = &g.mv_stack[g.mv_sp];
     else if (pname == GL_PROJECTION_MATRIX) src = &g.proj_stack[g.proj_sp];
     else if (pname == GL_TEXTURE_MATRIX) src = &g.tex_stack[g.tex_sp];
     else { for (int i = 0; i < 16; i++) params[i] = 0.0f; return; }
+
     for (int r = 0; r < 4; r++) {
         params[0*4 + r] = src->r[r].x; params[1*4 + r] = src->r[r].y;
         params[2*4 + r] = src->r[r].z; params[3*4 + r] = src->r[r].w;
@@ -80,12 +99,24 @@ void glGetFloatv(GLenum pname, GLfloat *params) {
 }
 
 void glGetIntegerv(GLenum pname, GLint *params) {
+    if (!params) return;
+
     if (pname == GL_VIEWPORT) {
         params[0] = g.vp_x; params[1] = g.vp_y; params[2] = g.vp_w; params[3] = g.vp_h;
-    } else if (pname == GL_MAX_TEXTURE_SIZE) params[0] = 4096;
-    else if (pname == GL_UNPACK_ALIGNMENT) params[0] = g.unpack_alignment;
-    else if (pname == GL_PACK_ALIGNMENT) params[0] = g.pack_alignment;
-    else params[0] = 0;
+    } else if (pname == GL_MAX_TEXTURE_SIZE) {
+        params[0] = 4096;
+    } else if (pname == GL_UNPACK_ALIGNMENT) {
+        params[0] = g.unpack_alignment;
+    } else if (pname == GL_PACK_ALIGNMENT) {
+        params[0] = g.pack_alignment;
+    } else if (pname == GL_SMOOTH_LINE_WIDTH_RANGE || pname == GL_ALIASED_LINE_WIDTH_RANGE) {
+        params[0] = 1;
+        params[1] = 1;
+    } else if (pname == GL_LINE_WIDTH) {
+        params[0] = 1;
+    } else {
+        params[0] = 0;
+    }
 }
 
 const GLubyte* glGetString(GLenum name) {

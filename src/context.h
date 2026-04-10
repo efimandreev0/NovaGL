@@ -190,6 +190,8 @@ extern struct NovaState{
     GLint tex_env_operand0_rgb[3];
     GLint tex_env_operand1_rgb[3];
     GLint tex_env_operand2_rgb[3];
+
+    int line_smooth_enabled;
 } g;
 
 #endif //NOVAGL_CONTEXT_H

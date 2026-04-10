@@ -278,6 +278,11 @@ GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 #define GL_PRIMARY_COLOR                  0x8577
 #define GL_PREVIOUS                       0x8578
 
+
+#define GL_LINE_SMOOTH                    0x0B20
+#define GL_LINE_WIDTH                     0x0B21
+#define GL_SMOOTH_LINE_WIDTH_RANGE        0x0B22
+#define GL_ALIASED_LINE_WIDTH_RANGE       0x846E
 //API
 void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_size, int tex_staging_size);
 void nova_init(void);
