@@ -6,7 +6,7 @@ Drop-in replacement for `<GLES/gl.h>` that maps fixed-function GL calls to Citro
 
 ## Features
 
-- 85 GL ES 1.1 functions implemented
+- 225 GL ES 1.1 functions implemented
 - Matrix stacks (projection, modelview, texture)
 - VBO support with linearAlloc-backed GPU memory
 - Texture management with automatic Morton swizzle for PICA200
@@ -22,11 +22,11 @@ Requires [devkitPro](https://devkitpro.org/) with devkitARM, libctru, citro3d, a
 
 ```bash
 mkdir build && cd build
-cmake -DCMAKE_TOOLCHAIN_FILE=../cmake/DevkitArm3DS.cmake ..
+cmake ..
 make
 
 # Build without examples
-cmake -DCMAKE_TOOLCHAIN_FILE=../cmake/DevkitArm3DS.cmake -DGL2CITRO3D_BUILD_EXAMPLES=OFF ..
+cmake -DGL2CITRO3D_BUILD_EXAMPLES=OFF ..
 make
 ```
 ## Usage
