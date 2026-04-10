@@ -76,6 +76,16 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
         GSPGPU_FlushDataCache(g.static_quad_indices, g.static_quad_count * 6 * sizeof(uint16_t));
     }
 
+    for(int i=0; i<3; i++) {
+        g.tex_env_combine_rgb[i] = GL_MODULATE;
+        g.tex_env_src0_rgb[i] = GL_TEXTURE;
+        g.tex_env_src1_rgb[i] = GL_PREVIOUS;
+        g.tex_env_src2_rgb[i] = GL_CONSTANT;
+        g.tex_env_operand0_rgb[i] = GL_SRC_COLOR;
+        g.tex_env_operand1_rgb[i] = GL_SRC_COLOR;
+        g.tex_env_operand2_rgb[i] = GL_SRC_ALPHA;
+    }
+
     g.matrix_mode = GL_MODELVIEW;
     Mtx_Identity(&g.proj_stack[0]);
     Mtx_Identity(&g.mv_stack[0]);

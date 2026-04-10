@@ -182,6 +182,14 @@ extern struct NovaState{
     int static_quad_count;
 
     bool RenderTargetBottom;
+
+    GLint tex_env_combine_rgb[3];
+    GLint tex_env_src0_rgb[3];
+    GLint tex_env_src1_rgb[3];
+    GLint tex_env_src2_rgb[3];
+    GLint tex_env_operand0_rgb[3];
+    GLint tex_env_operand1_rgb[3];
+    GLint tex_env_operand2_rgb[3];
 } g;
 
 #endif //NOVAGL_CONTEXT_H

@@ -348,6 +348,21 @@ void apply_depth_map(void) {
     C3D_DepthMap(true, scale, offset);
 }
 
+static GPU_TEVSRC get_tev_src(GLint gl_src, GPU_TEVSRC tex_src, GPU_TEVSRC prev_src) {
+    if (gl_src == GL_TEXTURE) return tex_src;
+    if (gl_src == GL_PREVIOUS) return prev_src;
+    if (gl_src == GL_PRIMARY_COLOR) return GPU_PRIMARY_COLOR;
+    if (gl_src == GL_CONSTANT) return GPU_CONSTANT;
+    return GPU_PRIMARY_COLOR;
+}
+
+static int get_tev_op_rgb(GLint gl_op) {
+    if (gl_op == 0x8590 /* GL_SRC_COLOR */) return GPU_TEVOP_RGB_SRC_COLOR;
+    if (gl_op == 0x8598 /* GL_ONE_MINUS_SRC_COLOR */) return GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR;
+    if (gl_op == GL_SRC_ALPHA) return GPU_TEVOP_RGB_SRC_ALPHA;
+    if (gl_op == 0x859A /* GL_ONE_MINUS_SRC_ALPHA */) return GPU_TEVOP_RGB_ONE_MINUS_SRC_ALPHA;
+    return GPU_TEVOP_RGB_SRC_COLOR;
+}
 void apply_gpu_state(void) {
     if (g.matrices_dirty) {
         if (g.fog_enabled) g.fog_dirty = 1;
@@ -436,29 +451,64 @@ void apply_gpu_state(void) {
         int tev_stage = 0;
 
         for (int unit = 0; unit < 3; unit++) {
-            if (current_tex_state & (1 << unit)) {
-                C3D_TexEnv *env = C3D_GetTexEnv(tev_stage);
-                C3D_TexEnvInit(env);
+            if (!(current_tex_state & (1 << unit))) continue;
 
-                // Выбираем источник: TEXTURE0, TEXTURE1 или TEXTURE2
-                GPU_TEVSRC tex_src = (unit == 0) ? GPU_TEXTURE0 : ((unit == 1) ? GPU_TEXTURE1 : GPU_TEXTURE2);
-                // На первой стадии берем цвет вершины, на последующих - результат предыдущей стадии
-                GPU_TEVSRC prev_src = (tev_stage == 0) ? GPU_PRIMARY_COLOR : GPU_PREVIOUS;
+            C3D_TexEnv *env = C3D_GetTexEnv(tev_stage);
+            C3D_TexEnvInit(env);
 
+            GPU_TEVSRC tex_src = (unit == 0) ? GPU_TEXTURE0 : ((unit == 1) ? GPU_TEXTURE1 : GPU_TEXTURE2);
+            GPU_TEVSRC prev_src = (tev_stage == 0) ? GPU_PRIMARY_COLOR : GPU_PREVIOUS;
+
+            if (g.tex_env_mode[unit] == GL_COMBINE) {
+                // Используем наши Си-хелперы для трансляции
+                GPU_TEVSRC s0 = get_tev_src(g.tex_env_src0_rgb[unit], tex_src, prev_src);
+                GPU_TEVSRC s1 = get_tev_src(g.tex_env_src1_rgb[unit], tex_src, prev_src);
+                GPU_TEVSRC s2 = get_tev_src(g.tex_env_src2_rgb[unit], tex_src, prev_src);
+
+                int op0 = get_tev_op_rgb(g.tex_env_operand0_rgb[unit]);
+                int op1 = get_tev_op_rgb(g.tex_env_operand1_rgb[unit]);
+                int op2 = get_tev_op_rgb(g.tex_env_operand2_rgb[unit]);
+
+                switch(g.tex_env_combine_rgb[unit]) {
+                    case GL_REPLACE:
+                        C3D_TexEnvSrc(env, C3D_Both, s0, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+                        C3D_TexEnvOpRgb(env, op0, 0, 0);
+                        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+                        break;
+                    case GL_ADD:
+                        C3D_TexEnvSrc(env, C3D_Both, s0, s1, (GPU_TEVSRC)0);
+                        C3D_TexEnvOpRgb(env, op0, op1, 0);
+                        C3D_TexEnvFunc(env, C3D_Both, GPU_ADD);
+                        break;
+                    case GL_INTERPOLATE:
+                        C3D_TexEnvSrc(env, C3D_Both, s0, s1, s2);
+                        C3D_TexEnvOpRgb(env, op0, op1, op2);
+                        C3D_TexEnvFunc(env, C3D_Both, GPU_INTERPOLATE);
+                        break;
+                    case GL_MODULATE:
+                    default:
+                        C3D_TexEnvSrc(env, C3D_Both, s0, s1, (GPU_TEVSRC)0);
+                        C3D_TexEnvOpRgb(env, op0, op1, 0);
+                        C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
+                        break;
+                }
+            } else {
+                // Стандартный FFP (GL_MODULATE / GL_REPLACE)
                 switch (g.tex_env_mode[unit]) {
                     case GL_REPLACE:
                         C3D_TexEnvSrc(env, C3D_Both, tex_src, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
                         C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
                         break;
-                    case GL_DECAL:
-                        C3D_TexEnvSrc(env, C3D_RGB, tex_src, prev_src, tex_src);
-                        C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
-                        C3D_TexEnvSrc(env, C3D_Alpha, prev_src, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
-                        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
-                        break;
                     case GL_ADD:
                         C3D_TexEnvSrc(env, C3D_Both, tex_src, prev_src, (GPU_TEVSRC)0);
                         C3D_TexEnvFunc(env, C3D_Both, GPU_ADD);
+                        break;
+                    case GL_DECAL:
+                        C3D_TexEnvSrc(env, C3D_RGB, prev_src, tex_src, tex_src);
+                        C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA);
+                        C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
+                        C3D_TexEnvSrc(env, C3D_Alpha, prev_src, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+                        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
                         break;
                     case GL_MODULATE:
                     default:
@@ -466,11 +516,11 @@ void apply_gpu_state(void) {
                         C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
                         break;
                 }
-                tev_stage++;
             }
+            tev_stage++;
         }
 
-        // Если нет ни одной текстуры, всё равно нужна 1 стадия для передачи цвета вершины
+        // Заглушка, если текстуры выключены
         if (tev_stage == 0) {
             C3D_TexEnv *env = C3D_GetTexEnv(0);
             C3D_TexEnvInit(env);
@@ -479,7 +529,7 @@ void apply_gpu_state(void) {
             tev_stage++;
         }
 
-        // Выключаем (заглушаем) все оставшиеся стадии (в 3DS их 6)
+        // Отключаем мусорные стадии (2-5), пробрасывая цвет дальше
         for (int i = tev_stage; i < 6; i++) {
             C3D_TexEnv *env = C3D_GetTexEnv(i);
             C3D_TexEnvInit(env);
@@ -547,4 +597,28 @@ void draw_emulated_quads(int count) {
 
         quads_drawn += quads_to_draw;
     }
+}
+
+void nova_hardware_swizzle(C3D_Tex* tex, const void* linear_pixels, int width, int height, GPU_TEXCOLOR format) {
+    if (!linear_pixels || !tex->data) return;
+
+    u32 transfer_flags = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(1) | GX_TRANSFER_RAW_COPY(0) |
+                         GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
+
+    u32 in_fmt, out_fmt;
+    switch (format) {
+        case GPU_RGBA8:  in_fmt = GX_TRANSFER_FMT_RGBA8;  out_fmt = GX_TRANSFER_FMT_RGBA8; break;
+        case GPU_RGB8:   in_fmt = GX_TRANSFER_FMT_RGB8;   out_fmt = GX_TRANSFER_FMT_RGB8; break;
+        case GPU_RGB565: in_fmt = GX_TRANSFER_FMT_RGB565; out_fmt = GX_TRANSFER_FMT_RGB565; break;
+        case GPU_RGBA5551:in_fmt= GX_TRANSFER_FMT_RGB5A1; out_fmt = GX_TRANSFER_FMT_RGB5A1; break;
+        case GPU_RGBA4:  in_fmt = GX_TRANSFER_FMT_RGBA4;  out_fmt = GX_TRANSFER_FMT_RGBA4; break;
+        default: printf("Unsupported format: %x", format);
+    }
+
+    transfer_flags |= GX_TRANSFER_IN_FORMAT(in_fmt) | GX_TRANSFER_OUT_FORMAT(out_fmt);
+
+    GSPGPU_FlushDataCache(linear_pixels, width * height * gpu_texfmt_bpp(format));
+
+    C3D_SyncDisplayTransfer((u32*)linear_pixels, GX_BUFFER_DIM(width, height),
+                            (u32*)tex->data, GX_BUFFER_DIM(tex->width, tex->height), transfer_flags);
 }

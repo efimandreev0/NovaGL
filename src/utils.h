@@ -77,4 +77,10 @@ void apply_gpu_state(void);
 void cleanup_vbo_stream(void);
 
 void draw_emulated_quads(int count);
+
+static GPU_TEVSRC get_tev_src(GLint gl_src, GPU_TEVSRC tex_src, GPU_TEVSRC prev_src);
+
+static int get_tev_op_rgb(GLint gl_op);
+
+void nova_hardware_swizzle(C3D_Tex* tex, const void* linear_pixels, int width, int height, GPU_TEXCOLOR format);
 #endif //NOVAGL_UTILS_H

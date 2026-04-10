@@ -264,6 +264,20 @@ GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 #define GL_TEXTURE30_ARB            0x84DE
 #define GL_TEXTURE31_ARB            0x84DF
 
+#define GL_COMBINE                        0x8570
+#define GL_COMBINE_RGB                    0x8571
+#define GL_COMBINE_ALPHA                  0x8572
+#define GL_SRC0_RGB                       0x8580
+#define GL_SRC1_RGB                       0x8581
+#define GL_SRC2_RGB                       0x8582
+#define GL_OPERAND0_RGB                   0x8590
+#define GL_OPERAND1_RGB                   0x8591
+#define GL_OPERAND2_RGB                   0x8592
+#define GL_INTERPOLATE                    0x8575
+#define GL_CONSTANT                       0x8576
+#define GL_PRIMARY_COLOR                  0x8577
+#define GL_PREVIOUS                       0x8578
+
 //API
 void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_size, int tex_staging_size);
 void nova_init(void);

@@ -139,6 +139,31 @@ static void upload_page_8bit(C3D_Tex *tex, int pot_w, int pot_h,
     C3D_TexFlush(tex);
 }
 
+/*static void upload_texture_pixels(C3D_Tex *tex, GPU_TEXCOLOR fmt, int pot_w, int pot_h,
+                                  const GLvoid *pixels, int width, int height,
+                                  int src_x0, int src_y0, int copy_w, int copy_h,
+                                  GLenum format, GLenum type, GLint unpack_alignment) {
+    if (!pixels) {
+        memset(tex->data, 0, (size_t)pot_w * (size_t)pot_h * (size_t)gpu_texfmt_bpp(fmt));
+        C3D_TexFlush(tex);
+        return;
+    }
+
+    if (fmt == GPU_RGBA8) {
+        int row_stride = row_stride_bytes(width, format == GL_RGB ? 3 : 4, unpack_alignment);
+        upload_page_rgba8(tex, pot_w, pot_h, (const uint8_t*)pixels, row_stride,
+                          src_x0, src_y0, copy_w, copy_h, format);
+    } else if (gpu_texfmt_bpp(fmt) == 2) {
+        int row_stride = row_stride_bytes(width, 2, unpack_alignment);
+        upload_page_16bit(tex, pot_w, pot_h, (const uint8_t*)pixels, row_stride,
+                          src_x0, src_y0, copy_w, copy_h);
+    } else {
+        int row_stride = row_stride_bytes(width, 1, unpack_alignment);
+        upload_page_8bit(tex, pot_w, pot_h, (const uint8_t*)pixels, row_stride,
+                         src_x0, src_y0, copy_w, copy_h);
+    }
+}*/
+
 static void upload_texture_pixels(C3D_Tex *tex, GPU_TEXCOLOR fmt, int pot_w, int pot_h,
                                   const GLvoid *pixels, int width, int height,
                                   int src_x0, int src_y0, int copy_w, int copy_h,
@@ -508,16 +533,21 @@ void glClientActiveTexture(GLenum texture) {
 }
 
 void glTexEnvi(GLenum target, GLenum pname, GLint param) {
-    (void)target;
-    if (pname == GL_TEXTURE_ENV_MODE) {
-        int unit = g.active_texture_unit;
-        if (g.tex_env_mode[unit] != param) {
-            g.tex_env_mode[unit] = param;
-            g.tev_dirty = 1;
-        }
-    }
-}
+    if (target != GL_TEXTURE_ENV) return;
+    int unit = g.active_texture_unit;
 
+    switch (pname) {
+        case GL_TEXTURE_ENV_MODE: g.tex_env_mode[unit] = param; break;
+        case GL_COMBINE_RGB:      g.tex_env_combine_rgb[unit] = param; break;
+        case GL_SRC0_RGB:         g.tex_env_src0_rgb[unit] = param; break;
+        case GL_SRC1_RGB:         g.tex_env_src1_rgb[unit] = param; break;
+        case GL_SRC2_RGB:         g.tex_env_src2_rgb[unit] = param; break;
+        case GL_OPERAND0_RGB:     g.tex_env_operand0_rgb[unit] = param; break;
+        case GL_OPERAND1_RGB:     g.tex_env_operand1_rgb[unit] = param; break;
+        case GL_OPERAND2_RGB:     g.tex_env_operand2_rgb[unit] = param; break;
+    }
+    g.tev_dirty = 1;
+}
 void glTexEnvf(GLenum target, GLenum pname, GLfloat param) {
     glTexEnvi(target, pname, (GLint)param);
 }
