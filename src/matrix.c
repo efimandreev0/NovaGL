@@ -97,8 +97,8 @@ void glOrthof(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloat 
 }
 
 void glFrustumf(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloat near_val, GLfloat far_val) {
-    C3D_Mtx frustum; memset(&frustum, 0, sizeof(C3D_Mtx));
     float n = near_val; float f = far_val;
+    C3D_Mtx frustum; memset(&frustum, 0, sizeof(C3D_Mtx));
     frustum.r[0].x = (2.0f * n) / (right - left);
     frustum.r[0].z = (right + left) / (right - left);
     frustum.r[1].y = (2.0f * n) / (top - bottom);

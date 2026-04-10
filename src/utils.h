@@ -38,6 +38,14 @@ GPU_TEXCOLOR gl_to_gpu_texfmt(GLenum format, GLenum type);
 
 int gpu_texfmt_bpp(GPU_TEXCOLOR fmt);
 
+int vbo_is_packed_ptc(const VBOSlot *slot);
+
+void vbo_decode_packed_ptc_vertex(const VBOSlot *slot, int vertex_index, uint8_t *out_vertex);
+
+void vbo_decode_packed_ptc_span(const VBOSlot *slot, int first_vertex, int vertex_count, uint8_t *dst);
+
+void vbo_convert_slot_to_raw(VBOSlot *slot);
+
 C3D_Mtx* cur_mtx(void);
 
 int* cur_sp(void);

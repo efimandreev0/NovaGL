@@ -15,6 +15,7 @@ void* linear_alloc_ring(void *base, int *offset, int size, int capacity) {
     size = (size + 0x7F) & ~0x7F;
 
     if (*offset + size > capacity) {
+        C3D_FrameSplit(0);
         *offset = 0; // wrap
     }
 
@@ -226,8 +227,11 @@ C3D_Mtx* cur_stack(void) {
 void* get_tex_staging(int size)
 {
     if (g.tex_staging_size < size) {
-        linearFree(g.tex_staging);
-        g.tex_staging = linearAlloc(size);
+        void *new_buf = realloc(g.tex_staging, (size_t)size);
+        if (!new_buf) {
+            return NULL;
+        }
+        g.tex_staging = new_buf;
         g.tex_staging_size = size;
     }
     return g.tex_staging;
@@ -390,7 +394,11 @@ void apply_gpu_state(void) {
         g.fog_dirty = 0;
     }
 
-    GPU_WRITEMASK writemask = GPU_WRITE_COLOR;
+    GPU_WRITEMASK writemask = 0;
+    if (g.color_mask_r) writemask |= GPU_WRITE_RED;
+    if (g.color_mask_g) writemask |= GPU_WRITE_GREEN;
+    if (g.color_mask_b) writemask |= GPU_WRITE_BLUE;
+    if (g.color_mask_a) writemask |= GPU_WRITE_ALPHA;
     if (g.depth_mask && g.depth_test_enabled) writemask |= GPU_WRITE_DEPTH;
     C3D_DepthTest(g.depth_test_enabled, gl_to_gpu_testfunc(g.depth_func), writemask);
 
@@ -485,8 +493,11 @@ void apply_gpu_state(void) {
 
     for (int unit = 0; unit < 3; unit++) {
         if ((current_tex_state & (1 << unit)) && g.bound_texture[unit] < NOVA_MAX_TEXTURES) {
-            if (g.textures[g.bound_texture[unit]].allocated) {
-                C3D_TexBind(unit, &g.textures[g.bound_texture[unit]].tex);
+            TexSlot *slot = &g.textures[g.bound_texture[unit]];
+            if (slot->is_tiled && slot->pages && slot->pages[0].allocated) {
+                C3D_TexBind(unit, &slot->pages[0].tex);
+            } else if (slot->allocated) {
+                C3D_TexBind(unit, &slot->tex);
             }
         }
     }
@@ -498,7 +509,7 @@ void cleanup_vbo_stream(void) {
     if (g.bound_array_buffer) {
         VBOSlot *slot = &g.vbos[g.bound_array_buffer];
         if (slot->is_stream && slot->data) {
-            linearFree(slot->data);
+            free(slot->data);
             slot->data = NULL;
             slot->allocated = 0;
             slot->size = 0;
@@ -510,7 +521,7 @@ void cleanup_vbo_stream(void) {
     if (g.bound_element_array_buffer) {
         VBOSlot *slot = &g.vbos[g.bound_element_array_buffer];
         if (slot->is_stream && slot->data) {
-            linearFree(slot->data);
+            free(slot->data);
             slot->data = NULL;
             slot->allocated = 0;
             slot->size = 0;

@@ -5,9 +5,163 @@
 #include "NovaGL.h"
 #include "utils.h"
 
+#define NOVA_TEXTURE_PAGE_SIZE 1024
+
 /* Helper: get currently bound texture ID for the active unit */
 static inline GLuint active_bound_texture(void) {
     return g.bound_texture[g.active_texture_unit];
+}
+
+static int row_stride_bytes(int width, int bytes_per_pixel, int alignment) {
+    int row = width * bytes_per_pixel;
+    int align = alignment > 0 ? alignment : 1;
+    int mask = align - 1;
+    return (row + mask) & ~mask;
+}
+
+static inline int morton_offset_local(int x, int y, int pot_w, int pot_h) {
+    int fy = pot_h - 1 - y;
+    int tile_offset = ((fy >> 3) * (pot_w >> 3) + (x >> 3)) * 64;
+    return tile_offset + (int)morton_interleave((uint32_t)(x & 7), (uint32_t)(fy & 7));
+}
+
+static void apply_slot_params_to_tex(C3D_Tex *tex, const TexSlot *slot) {
+    GPU_TEXTURE_FILTER_PARAM mag = (slot->mag_filter == GL_LINEAR) ? GPU_LINEAR : GPU_NEAREST;
+    GPU_TEXTURE_FILTER_PARAM min_f =
+        (slot->min_filter == GL_LINEAR ||
+         slot->min_filter == GL_LINEAR_MIPMAP_LINEAR ||
+         slot->min_filter == GL_LINEAR_MIPMAP_NEAREST) ? GPU_LINEAR : GPU_NEAREST;
+    C3D_TexSetFilter(tex, mag, min_f);
+
+    GPU_TEXTURE_WRAP_PARAM ws =
+        (slot->wrap_s == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE :
+        ((slot->wrap_s == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
+    GPU_TEXTURE_WRAP_PARAM wt =
+        (slot->wrap_t == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE :
+        ((slot->wrap_t == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
+    C3D_TexSetWrap(tex, ws, wt);
+}
+
+static void free_texture_storage(TexSlot *slot) {
+    if (slot->is_tiled && slot->pages) {
+        int page_count = slot->tiles_x * slot->tiles_y;
+        for (int i = 0; i < page_count; i++) {
+            if (slot->pages[i].allocated) {
+                C3D_TexDelete(&slot->pages[i].tex);
+            }
+        }
+        free(slot->pages);
+        slot->pages = NULL;
+    } else if (slot->allocated) {
+        C3D_TexDelete(&slot->tex);
+    }
+
+    slot->allocated = 0;
+    slot->is_tiled = 0;
+    slot->tiles_x = 0;
+    slot->tiles_y = 0;
+    slot->tile_w = 0;
+    slot->tile_h = 0;
+    slot->width = 0;
+    slot->height = 0;
+    slot->pot_w = 0;
+    slot->pot_h = 0;
+}
+
+static void init_texture_defaults(TexSlot *slot) {
+    slot->min_filter = GL_NEAREST_MIPMAP_LINEAR;
+    slot->mag_filter = GL_LINEAR;
+    slot->wrap_s = GL_REPEAT;
+    slot->wrap_t = GL_REPEAT;
+}
+
+static void upload_page_rgba8(C3D_Tex *tex, int pot_w, int pot_h,
+                              const uint8_t *pixels, int row_stride,
+                              int src_x0, int src_y0, int copy_w, int copy_h,
+                              GLenum format) {
+    uint32_t *dst = (uint32_t*)tex->data;
+    for (int y = 0; y < pot_h; y++) {
+        for (int x = 0; x < pot_w; x++) {
+            uint32_t out_pixel = 0;
+            if (x < copy_w && y < copy_h) {
+                const uint8_t *row = pixels + (src_y0 + y) * row_stride;
+                if (format == GL_RGB) {
+                    const uint8_t *px = row + (src_x0 + x) * 3;
+                    out_pixel = ((uint32_t)px[0] << 24) |
+                                ((uint32_t)px[1] << 16) |
+                                ((uint32_t)px[2] << 8)  |
+                                0xFFu;
+                } else {
+                    const uint8_t *px = row + (src_x0 + x) * 4;
+                    out_pixel = ((uint32_t)px[0] << 24) |
+                                ((uint32_t)px[1] << 16) |
+                                ((uint32_t)px[2] << 8)  |
+                                (uint32_t)px[3];
+                }
+            }
+            dst[morton_offset_local(x, y, pot_w, pot_h)] = out_pixel;
+        }
+    }
+    C3D_TexFlush(tex);
+}
+
+static void upload_page_16bit(C3D_Tex *tex, int pot_w, int pot_h,
+                              const uint8_t *pixels, int row_stride,
+                              int src_x0, int src_y0, int copy_w, int copy_h) {
+    uint16_t *dst = (uint16_t*)tex->data;
+    for (int y = 0; y < pot_h; y++) {
+        for (int x = 0; x < pot_w; x++) {
+            uint16_t val = 0;
+            if (x < copy_w && y < copy_h) {
+                const uint8_t *row = pixels + (src_y0 + y) * row_stride;
+                memcpy(&val, row + (src_x0 + x) * 2, sizeof(uint16_t));
+            }
+            dst[morton_offset_local(x, y, pot_w, pot_h)] = val;
+        }
+    }
+    C3D_TexFlush(tex);
+}
+
+static void upload_page_8bit(C3D_Tex *tex, int pot_w, int pot_h,
+                             const uint8_t *pixels, int row_stride,
+                             int src_x0, int src_y0, int copy_w, int copy_h) {
+    uint8_t *dst = (uint8_t*)tex->data;
+    for (int y = 0; y < pot_h; y++) {
+        for (int x = 0; x < pot_w; x++) {
+            uint8_t val = 0;
+            if (x < copy_w && y < copy_h) {
+                const uint8_t *row = pixels + (src_y0 + y) * row_stride;
+                val = row[src_x0 + x];
+            }
+            dst[morton_offset_local(x, y, pot_w, pot_h)] = val;
+        }
+    }
+    C3D_TexFlush(tex);
+}
+
+static void upload_texture_pixels(C3D_Tex *tex, GPU_TEXCOLOR fmt, int pot_w, int pot_h,
+                                  const GLvoid *pixels, int width, int height,
+                                  int src_x0, int src_y0, int copy_w, int copy_h,
+                                  GLenum format, GLenum type, GLint unpack_alignment) {
+    if (!pixels) {
+        memset(tex->data, 0, (size_t)pot_w * (size_t)pot_h * (size_t)gpu_texfmt_bpp(fmt));
+        C3D_TexFlush(tex);
+        return;
+    }
+
+    if (fmt == GPU_RGBA8) {
+        int row_stride = row_stride_bytes(width, format == GL_RGB ? 3 : 4, unpack_alignment);
+        upload_page_rgba8(tex, pot_w, pot_h, (const uint8_t*)pixels, row_stride,
+                          src_x0, src_y0, copy_w, copy_h, format);
+    } else if (gpu_texfmt_bpp(fmt) == 2) {
+        int row_stride = row_stride_bytes(width, 2, unpack_alignment);
+        upload_page_16bit(tex, pot_w, pot_h, (const uint8_t*)pixels, row_stride,
+                          src_x0, src_y0, copy_w, copy_h);
+    } else {
+        int row_stride = row_stride_bytes(width, 1, unpack_alignment);
+        upload_page_8bit(tex, pot_w, pot_h, (const uint8_t*)pixels, row_stride,
+                         src_x0, src_y0, copy_w, copy_h);
+    }
 }
 
 void glGenTextures(GLsizei n, GLuint *textures) {
@@ -18,7 +172,9 @@ void glGenTextures(GLsizei n, GLuint *textures) {
         }
         if (id == NOVA_MAX_TEXTURES) { g.last_error = GL_OUT_OF_MEMORY; textures[i] = 0; break; }
 
+        memset(&g.textures[id], 0, sizeof(g.textures[id]));
         g.textures[id].in_use = 1;
+        init_texture_defaults(&g.textures[id]);
         textures[i] = id;
     }
 }
@@ -27,10 +183,7 @@ void glDeleteTextures(GLsizei n, const GLuint *textures) {
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = textures[i];
         if (id > 0 && id < NOVA_MAX_TEXTURES && g.textures[id].in_use) {
-            if (g.textures[id].allocated) {
-                C3D_TexDelete(&g.textures[id].tex);
-            }
-            g.textures[id].allocated = 0;
+            free_texture_storage(&g.textures[id]);
             g.textures[id].in_use = 0;
             for (int u = 0; u < 3; u++)
                 if (g.bound_texture[u] == id) g.bound_texture[u] = 0;
@@ -50,105 +203,106 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     TexSlot *slot = &g.textures[bound];
 
     GPU_TEXCOLOR gpu_fmt = gl_to_gpu_texfmt(format, type);
-    int pot_w = next_pow2(width); int pot_h = next_pow2(height);
-    if (pot_w < 8) pot_w = 8; if (pot_h < 8) pot_h = 8;
-    if (pot_w > 1024) pot_w = 1024; if (pot_h > 1024) pot_h = 1024;
+    if (width <= 0 || height <= 0) {
+        g.last_error = GL_INVALID_VALUE;
+        return;
+    }
 
-    int need_init = 1;
+    const int tiled = (width > NOVA_TEXTURE_PAGE_SIZE || height > NOVA_TEXTURE_PAGE_SIZE);
+    const int tiles_x = (width + NOVA_TEXTURE_PAGE_SIZE - 1) / NOVA_TEXTURE_PAGE_SIZE;
+    const int tiles_y = (height + NOVA_TEXTURE_PAGE_SIZE - 1) / NOVA_TEXTURE_PAGE_SIZE;
+
     if (slot->allocated) {
-        if (slot->pot_w == pot_w && slot->pot_h == pot_h && slot->fmt == gpu_fmt) {
-            need_init = 0;
-        } else {
-            C3D_TexDelete(&slot->tex);
-            slot->allocated = 0;
+        int compatible = (slot->fmt == gpu_fmt &&
+                          slot->width == width &&
+                          slot->height == height &&
+                          slot->is_tiled == tiled &&
+                          (!tiled ? (slot->pot_w == next_pow2(width) && slot->pot_h == next_pow2(height))
+                                  : (slot->tiles_x == tiles_x && slot->tiles_y == tiles_y)));
+        if (!compatible) {
+            free_texture_storage(slot);
         }
     }
 
-    if (need_init) {
-        if (!C3D_TexInit(&slot->tex, pot_w, pot_h, gpu_fmt)) { g.last_error = GL_OUT_OF_MEMORY; return; }
-        slot->allocated = 1;
+    slot->fmt = gpu_fmt;
+    slot->width = width;
+    slot->height = height;
+
+    if (!tiled) {
+        int pot_w = next_pow2(width);
+        int pot_h = next_pow2(height);
+        if (pot_w < 8) pot_w = 8;
+        if (pot_h < 8) pot_h = 8;
+
+        if (!slot->allocated) {
+            if (!C3D_TexInit(&slot->tex, pot_w, pot_h, gpu_fmt)) {
+                slot->allocated = 0;
+                g.last_error = GL_OUT_OF_MEMORY;
+                return;
+            }
+            slot->allocated = 1;
+        }
+
+        slot->is_tiled = 0;
+        slot->pot_w = pot_w;
+        slot->pot_h = pot_h;
+        apply_slot_params_to_tex(&slot->tex, slot);
+        upload_texture_pixels(&slot->tex, gpu_fmt, pot_w, pot_h, pixels,
+                              width, height, 0, 0, width, height,
+                              format, type, g.unpack_alignment);
+        return;
     }
-    slot->width = width; slot->height = height; slot->pot_w = pot_w; slot->pot_h = pot_h; slot->fmt = gpu_fmt;
 
-    GPU_TEXTURE_FILTER_PARAM mag = (slot->mag_filter == GL_LINEAR) ? GPU_LINEAR : GPU_NEAREST;
-    GPU_TEXTURE_FILTER_PARAM min_f = (slot->min_filter == GL_LINEAR || slot->min_filter == GL_LINEAR_MIPMAP_LINEAR || slot->min_filter == GL_LINEAR_MIPMAP_NEAREST) ? GPU_LINEAR : GPU_NEAREST;
-    C3D_TexSetFilter(&slot->tex, mag, min_f);
-    GPU_TEXTURE_WRAP_PARAM ws = (slot->wrap_s == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE : ((slot->wrap_s == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
-    GPU_TEXTURE_WRAP_PARAM wt = (slot->wrap_t == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE : ((slot->wrap_t == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
-    C3D_TexSetWrap(&slot->tex, ws, wt);
-
-    if (pixels)
-    {
-        int bpp = gpu_texfmt_bpp(gpu_fmt);
-        int src_w = width, src_h = height;
-        int needs_downscale = (src_w > pot_w || src_h > pot_h);
-        int ds_w = src_w > pot_w ? pot_w : src_w;
-        int ds_h = src_h > pot_h ? pot_h : src_h;
-
-        int staging_need = pot_w * pot_h * bpp;
-        if (gpu_fmt == GPU_RGBA8 && format == GL_RGB)
-            staging_need += src_w * src_h * 4;
-        if (needs_downscale)
-            staging_need += ds_w * ds_h * bpp;
-
-        void *staging = get_tex_staging(staging_need);
-
-        if (!staging) {
-            printf("[NovaGL][ERROR] texture.c: glTexImage2D staging.");
+    if (!slot->allocated) {
+        slot->pages = (TexPage*)calloc((size_t)(tiles_x * tiles_y), sizeof(TexPage));
+        if (!slot->pages) {
+            slot->allocated = 0;
             g.last_error = GL_OUT_OF_MEMORY;
             return;
         }
+        slot->allocated = 1;
+        slot->is_tiled = 1;
+        slot->tiles_x = tiles_x;
+        slot->tiles_y = tiles_y;
+        slot->tile_w = NOVA_TEXTURE_PAGE_SIZE;
+        slot->tile_h = NOVA_TEXTURE_PAGE_SIZE;
+    }
 
-        if (gpu_fmt == GPU_RGBA8)
-        {
-            const uint32_t *src = (const uint32_t*)pixels;
+    for (int ty = 0; ty < tiles_y; ty++) {
+        for (int tx = 0; tx < tiles_x; tx++) {
+            int page_index = ty * tiles_x + tx;
+            TexPage *page = &slot->pages[page_index];
+            int page_w = width - tx * NOVA_TEXTURE_PAGE_SIZE;
+            int page_h = height - ty * NOVA_TEXTURE_PAGE_SIZE;
+            if (page_w > NOVA_TEXTURE_PAGE_SIZE) page_w = NOVA_TEXTURE_PAGE_SIZE;
+            if (page_h > NOVA_TEXTURE_PAGE_SIZE) page_h = NOVA_TEXTURE_PAGE_SIZE;
 
-            if (format == GL_RGB)
-            {
-                const uint8_t *src8 = (const uint8_t*)pixels;
-                uint32_t *tmp = (uint32_t*)staging;
-                for (int i = 0; i < src_w * src_h; i++) {
-                    tmp[i] =
-                        (0xFFu << 24) |
-                        ((uint32_t)src8[i*3+2] << 16) |
-                        ((uint32_t)src8[i*3+1] << 8) |
-                        ((uint32_t)src8[i*3+0]);
+            int page_pot_w = next_pow2(page_w);
+            int page_pot_h = next_pow2(page_h);
+            if (page_pot_w < 8) page_pot_w = 8;
+            if (page_pot_h < 8) page_pot_h = 8;
+
+            if (!page->allocated) {
+                if (!C3D_TexInit(&page->tex, page_pot_w, page_pot_h, gpu_fmt)) {
+                    free_texture_storage(slot);
+                    g.last_error = GL_OUT_OF_MEMORY;
+                    return;
                 }
-                src = tmp;
+                page->allocated = 1;
             }
 
-            if (needs_downscale) {
-                uint32_t *ds_buf = (uint32_t*)((uint8_t*)staging + src_w * src_h * 4);
-                downscale_rgba8(ds_buf, src, src_w, src_h, ds_w, ds_h);
-                swizzle_rgba8((uint32_t*)slot->tex.data, ds_buf, ds_w, ds_h, pot_w, pot_h);
-            } else {
-                swizzle_rgba8((uint32_t*)slot->tex.data, src, src_w, src_h, pot_w, pot_h);
-            }
+            page->width = page_w;
+            page->height = page_h;
+            page->pot_w = page_pot_w;
+            page->pot_h = page_pot_h;
+            apply_slot_params_to_tex(&page->tex, slot);
+            upload_texture_pixels(&page->tex, gpu_fmt, page_pot_w, page_pot_h, pixels,
+                                  width, height,
+                                  tx * NOVA_TEXTURE_PAGE_SIZE,
+                                  ty * NOVA_TEXTURE_PAGE_SIZE,
+                                  page_w, page_h,
+                                  format, type, g.unpack_alignment);
         }
-        else if (bpp == 2)
-        {
-            if (needs_downscale) {
-                uint16_t *ds_buf = (uint16_t*)staging;
-                downscale_16bit(ds_buf, (const uint16_t*)pixels, src_w, src_h, ds_w, ds_h);
-                swizzle_16bit((uint16_t*)slot->tex.data, ds_buf, ds_w, ds_h, pot_w, pot_h);
-            } else {
-                swizzle_16bit((uint16_t*)slot->tex.data, (const uint16_t*)pixels,
-                              src_w, src_h, pot_w, pot_h);
-            }
-        }
-        else if (bpp == 1)
-        {
-            if (needs_downscale) {
-                uint8_t *ds_buf = (uint8_t*)staging;
-                downscale_8bit(ds_buf, (const uint8_t*)pixels, src_w, src_h, ds_w, ds_h);
-                swizzle_8bit((uint8_t*)slot->tex.data, ds_buf, ds_w, ds_h, pot_w, pot_h);
-            } else {
-                swizzle_8bit((uint8_t*)slot->tex.data, (const uint8_t*)pixels,
-                              src_w, src_h, pot_w, pot_h);
-            }
-        }
-
-        C3D_TexFlush(&slot->tex);
     }
 }
 
@@ -159,31 +313,141 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
     TexSlot *slot = &g.textures[bound];
     if (!slot->allocated || !pixels) return;
 
-    if (slot->fmt == GPU_RGBA8) {
-        const uint32_t *src = NULL;
-        uint32_t *temp_rgba = NULL;
-        int needs_free = 0;
-        if ((format == GL_RGBA || format == GL_RGBA8_OES) && type == GL_UNSIGNED_BYTE) { src = (const uint32_t*)pixels; }
-        else if (format == GL_RGB && type == GL_UNSIGNED_BYTE) { temp_rgba = rgb_to_rgba((const uint8_t*)pixels, width, height); src = temp_rgba; needs_free = 1; }
-        if (!src) return;
+    if (!slot->is_tiled) {
+        if (slot->fmt == GPU_RGBA8) {
+            int row_stride = row_stride_bytes(width, format == GL_RGB ? 3 : 4, g.unpack_alignment);
+            uint32_t *tex_data = (uint32_t*)slot->tex.data;
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    int dx = xoffset + x;
+                    int dy = yoffset + y;
+                    if (dx < 0 || dy < 0 || dx >= slot->pot_w || dy >= slot->pot_h) continue;
+                    const uint8_t *row = (const uint8_t*)pixels + y * row_stride;
+                    uint32_t out_pixel;
+                    if (format == GL_RGB) {
+                        const uint8_t *px = row + x * 3;
+                        out_pixel = ((uint32_t)px[0] << 24) |
+                                    ((uint32_t)px[1] << 16) |
+                                    ((uint32_t)px[2] << 8)  |
+                                    0xFFu;
+                    } else {
+                        const uint8_t *px = row + x * 4;
+                        out_pixel = ((uint32_t)px[0] << 24) |
+                                    ((uint32_t)px[1] << 16) |
+                                    ((uint32_t)px[2] << 8)  |
+                                    (uint32_t)px[3];
+                    }
+                    tex_data[morton_offset_local(dx, dy, slot->pot_w, slot->pot_h)] = out_pixel;
+                }
+            }
+            C3D_TexFlush(&slot->tex);
+        } else if (gpu_texfmt_bpp(slot->fmt) == 2) {
+            int row_stride = row_stride_bytes(width, 2, g.unpack_alignment);
+            uint16_t *tex_data = (uint16_t*)slot->tex.data;
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    int dx = xoffset + x;
+                    int dy = yoffset + y;
+                    if (dx < 0 || dy < 0 || dx >= slot->pot_w || dy >= slot->pot_h) continue;
+                    uint16_t val;
+                    const uint8_t *row = (const uint8_t*)pixels + y * row_stride;
+                    memcpy(&val, row + x * 2, sizeof(uint16_t));
+                    tex_data[morton_offset_local(dx, dy, slot->pot_w, slot->pot_h)] = val;
+                }
+            }
+            C3D_TexFlush(&slot->tex);
+        } else {
+            int row_stride = row_stride_bytes(width, 1, g.unpack_alignment);
+            uint8_t *tex_data = (uint8_t*)slot->tex.data;
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    int dx = xoffset + x;
+                    int dy = yoffset + y;
+                    if (dx < 0 || dy < 0 || dx >= slot->pot_w || dy >= slot->pot_h) continue;
+                    const uint8_t *row = (const uint8_t*)pixels + y * row_stride;
+                    tex_data[morton_offset_local(dx, dy, slot->pot_w, slot->pot_h)] = row[x];
+                }
+            }
+            C3D_TexFlush(&slot->tex);
+        }
+        return;
+    }
 
-        uint32_t *tex_data = (uint32_t*)slot->tex.data;
-        int pot_w = slot->pot_w; int pot_h = slot->pot_h;
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                int dx = xoffset + x; int dy = yoffset + y;
-                if (dx >= pot_w || dy >= pot_h) continue;
-                uint32_t pixel = src[y * width + x];
-                uint8_t r = (pixel >> 0) & 0xFF, gc = (pixel >> 8) & 0xFF, b = (pixel >> 16) & 0xFF, a = (pixel >> 24) & 0xFF;
-                uint32_t out_pixel = ((uint32_t)r << 24) | ((uint32_t)gc << 16) | ((uint32_t)b << 8) | (uint32_t)a;
-                int fy = pot_h - 1 - dy;
-                int tile_x = dx >> 3; int tile_y = fy >> 3; int lx = dx & 7; int ly = fy & 7;
-                int pixel_offset = (tile_y * (pot_w >> 3) + tile_x) * 64 + morton_interleave(lx, ly);
-                tex_data[pixel_offset] = out_pixel;
+    for (int ty = 0; ty < slot->tiles_y; ty++) {
+        for (int tx = 0; tx < slot->tiles_x; tx++) {
+            int page_x0 = tx * NOVA_TEXTURE_PAGE_SIZE;
+            int page_y0 = ty * NOVA_TEXTURE_PAGE_SIZE;
+            int page_x1 = page_x0 + slot->pages[ty * slot->tiles_x + tx].width;
+            int page_y1 = page_y0 + slot->pages[ty * slot->tiles_x + tx].height;
+
+            int upd_x0 = xoffset;
+            int upd_y0 = yoffset;
+            int upd_x1 = xoffset + width;
+            int upd_y1 = yoffset + height;
+
+            int ix0 = upd_x0 > page_x0 ? upd_x0 : page_x0;
+            int iy0 = upd_y0 > page_y0 ? upd_y0 : page_y0;
+            int ix1 = upd_x1 < page_x1 ? upd_x1 : page_x1;
+            int iy1 = upd_y1 < page_y1 ? upd_y1 : page_y1;
+
+            if (ix0 >= ix1 || iy0 >= iy1) continue;
+
+            int copy_w = ix1 - ix0;
+            int copy_h = iy1 - iy0;
+            int src_x0 = ix0 - xoffset;
+            int src_y0 = iy0 - yoffset;
+            int dst_x0 = ix0 - page_x0;
+            int dst_y0 = iy0 - page_y0;
+
+            TexPage *page = &slot->pages[ty * slot->tiles_x + tx];
+            if (slot->fmt == GPU_RGBA8) {
+                int row_stride = row_stride_bytes(width, format == GL_RGB ? 3 : 4, g.unpack_alignment);
+                uint32_t *tex_data = (uint32_t*)page->tex.data;
+                for (int y = 0; y < copy_h; y++) {
+                    for (int x = 0; x < copy_w; x++) {
+                        const uint8_t *row = (const uint8_t*)pixels + (src_y0 + y) * row_stride;
+                        uint32_t out_pixel;
+                        if (format == GL_RGB) {
+                            const uint8_t *px = row + (src_x0 + x) * 3;
+                            out_pixel = ((uint32_t)px[0] << 24) |
+                                        ((uint32_t)px[1] << 16) |
+                                        ((uint32_t)px[2] << 8)  |
+                                        0xFFu;
+                        } else {
+                            const uint8_t *px = row + (src_x0 + x) * 4;
+                            out_pixel = ((uint32_t)px[0] << 24) |
+                                        ((uint32_t)px[1] << 16) |
+                                        ((uint32_t)px[2] << 8)  |
+                                        (uint32_t)px[3];
+                        }
+                        tex_data[morton_offset_local(dst_x0 + x, dst_y0 + y, page->pot_w, page->pot_h)] = out_pixel;
+                    }
+                }
+                C3D_TexFlush(&page->tex);
+            } else if (gpu_texfmt_bpp(slot->fmt) == 2) {
+                int row_stride = row_stride_bytes(width, 2, g.unpack_alignment);
+                uint16_t *tex_data = (uint16_t*)page->tex.data;
+                for (int y = 0; y < copy_h; y++) {
+                    for (int x = 0; x < copy_w; x++) {
+                        uint16_t val;
+                        const uint8_t *row = (const uint8_t*)pixels + (src_y0 + y) * row_stride;
+                        memcpy(&val, row + (src_x0 + x) * 2, sizeof(uint16_t));
+                        tex_data[morton_offset_local(dst_x0 + x, dst_y0 + y, page->pot_w, page->pot_h)] = val;
+                    }
+                }
+                C3D_TexFlush(&page->tex);
+            } else {
+                int row_stride = row_stride_bytes(width, 1, g.unpack_alignment);
+                uint8_t *tex_data = (uint8_t*)page->tex.data;
+                for (int y = 0; y < copy_h; y++) {
+                    for (int x = 0; x < copy_w; x++) {
+                        const uint8_t *row = (const uint8_t*)pixels + (src_y0 + y) * row_stride;
+                        tex_data[morton_offset_local(dst_x0 + x, dst_y0 + y, page->pot_w, page->pot_h)] = row[src_x0 + x];
+                    }
+                }
+                C3D_TexFlush(&page->tex);
             }
         }
-        C3D_TexFlush(&slot->tex);
-        if (needs_free && temp_rgba) free(temp_rgba);
     }
 }
 
@@ -202,13 +466,16 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) {
     if (!slot->allocated) return;
 
     /* Apply to the live C3D texture */
-    GPU_TEXTURE_FILTER_PARAM mag = (slot->mag_filter == GL_LINEAR) ? GPU_LINEAR : GPU_NEAREST;
-    GPU_TEXTURE_FILTER_PARAM min_f = (slot->min_filter == GL_LINEAR || slot->min_filter == GL_LINEAR_MIPMAP_LINEAR || slot->min_filter == GL_LINEAR_MIPMAP_NEAREST) ? GPU_LINEAR : GPU_NEAREST;
-    C3D_TexSetFilter(&slot->tex, mag, min_f);
-
-    GPU_TEXTURE_WRAP_PARAM ws = (slot->wrap_s == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE : ((slot->wrap_s == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
-    GPU_TEXTURE_WRAP_PARAM wt = (slot->wrap_t == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE : ((slot->wrap_t == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
-    C3D_TexSetWrap(&slot->tex, ws, wt);
+    if (slot->is_tiled && slot->pages) {
+        int page_count = slot->tiles_x * slot->tiles_y;
+        for (int i = 0; i < page_count; i++) {
+            if (slot->pages[i].allocated) {
+                apply_slot_params_to_tex(&slot->pages[i].tex, slot);
+            }
+        }
+    } else {
+        apply_slot_params_to_tex(&slot->tex, slot);
+    }
 }
 
 void glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
@@ -265,7 +532,7 @@ void glTexEnvfv(GLenum target, GLenum pname, const GLfloat *params) {
 }
 
 GLboolean glIsTexture(GLuint texture) {
-    if (texture > 0 && texture < NOVA_MAX_TEXTURES && g.textures[texture].allocated) return GL_TRUE;
+    if (texture > 0 && texture < NOVA_MAX_TEXTURES && g.textures[texture].in_use) return GL_TRUE;
     return GL_FALSE;
 }
 

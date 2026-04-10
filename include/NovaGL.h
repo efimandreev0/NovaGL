@@ -190,6 +190,8 @@ GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 #define GL_TEXTURE_MATRIX           0x0BA8
 #define GL_VIEWPORT                 0x0BA2
 #define GL_MAX_TEXTURE_SIZE         0x0D33
+#define GL_PACK_ALIGNMENT           0x0D05
+#define GL_UNPACK_ALIGNMENT         0x0CF5
 
 #define GL_PERSPECTIVE_CORRECTION_HINT 0x0C50
 #define GL_FASTEST                  0x1101

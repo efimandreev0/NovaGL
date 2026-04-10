@@ -82,7 +82,9 @@ void glGetFloatv(GLenum pname, GLfloat *params) {
 void glGetIntegerv(GLenum pname, GLint *params) {
     if (pname == GL_VIEWPORT) {
         params[0] = g.vp_x; params[1] = g.vp_y; params[2] = g.vp_w; params[3] = g.vp_h;
-    } else if (pname == GL_MAX_TEXTURE_SIZE) params[0] = 1024;
+    } else if (pname == GL_MAX_TEXTURE_SIZE) params[0] = 4096;
+    else if (pname == GL_UNPACK_ALIGNMENT) params[0] = g.unpack_alignment;
+    else if (pname == GL_PACK_ALIGNMENT) params[0] = g.pack_alignment;
     else params[0] = 0;
 }
 

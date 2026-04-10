@@ -8,6 +8,13 @@
 
 //Structures
 typedef struct {
+    C3D_Tex tex;
+    int allocated;
+    int width, height;
+    int pot_w, pot_h;
+} TexPage;
+
+typedef struct {
     C3D_Tex     tex;
 
     // if not allocated then don't drawing it
@@ -22,6 +29,13 @@ typedef struct {
 
     int in_use;
 
+    int is_tiled;
+    int tiles_x;
+    int tiles_y;
+    int tile_w;
+    int tile_h;
+    TexPage *pages;
+
     //is wrapped
     int         wrap_s;
     int         wrap_t;
@@ -35,11 +49,9 @@ typedef struct {
     int     allocated;
 
     int in_use;
-
-#ifdef NOVA_VBO_STREAM
-    //using for CIRCULAR_VERTEX_POOL
     int     is_stream;
-#endif
+    uint8_t storage_kind;
+    uint8_t storage_stride;
 } VBOSlot;
 
 typedef enum {
@@ -156,6 +168,8 @@ extern struct NovaState{
     int        last_tex_state;
     GLint      tex_env_mode[3];
     int        client_active_texture_unit;
+    GLint      pack_alignment;
+    GLint      unpack_alignment;
 
     int polygon_offset_fill_enabled;
     GLfloat    depth_near;

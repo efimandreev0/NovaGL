@@ -32,9 +32,21 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
     if (pixels) memset(pixels, 0, width * height * 4);
 }
 
-void glPixelStorei(GLenum pname, GLint param) { (void)pname; (void)param; }
+void glPixelStorei(GLenum pname, GLint param) {
+    if (param != 1 && param != 2 && param != 4 && param != 8) {
+        g.last_error = GL_INVALID_VALUE;
+        return;
+    }
+    if (pname == GL_UNPACK_ALIGNMENT) {
+        g.unpack_alignment = param;
+    } else if (pname == GL_PACK_ALIGNMENT) {
+        g.pack_alignment = param;
+    }
+}
 
-void glPixelStoref(GLenum pname, GLfloat param) { (void)pname; (void)param; }
+void glPixelStoref(GLenum pname, GLfloat param) {
+    glPixelStorei(pname, (GLint)param);
+}
 
 void glDrawBuffer(GLenum mode) {
     (void)mode;
