@@ -6,7 +6,7 @@ Drop-in replacement for `<GLES/gl.h>` that maps fixed-function GL calls to Citro
 
 ## Features
 
-- 225 GL ES 1.1 functions implemented
+- 225 and 30+ stubbed GL ES 1.1 functions implemented
 - Matrix stacks (projection, modelview, texture)
 - VBO support with linearAlloc-backed GPU memory
 - Texture management with automatic Morton swizzle for PICA200
