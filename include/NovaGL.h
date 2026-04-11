@@ -270,9 +270,25 @@ GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 #define GL_SRC0_RGB                       0x8580
 #define GL_SRC1_RGB                       0x8581
 #define GL_SRC2_RGB                       0x8582
+/* Aliases required by GL_ARB_texture_env_combine / OpenGL 1.3+ */
+#define GL_SOURCE0_RGB                    GL_SRC0_RGB
+#define GL_SOURCE1_RGB                    GL_SRC1_RGB
+#define GL_SOURCE2_RGB                    GL_SRC2_RGB
 #define GL_OPERAND0_RGB                   0x8590
 #define GL_OPERAND1_RGB                   0x8591
 #define GL_OPERAND2_RGB                   0x8592
+/* Alpha combine sources / operands */
+#define GL_SRC0_ALPHA                     0x8588
+#define GL_SRC1_ALPHA                     0x8589
+#define GL_SRC2_ALPHA                     0x858A
+#define GL_SOURCE0_ALPHA                  GL_SRC0_ALPHA
+#define GL_SOURCE1_ALPHA                  GL_SRC1_ALPHA
+#define GL_SOURCE2_ALPHA                  GL_SRC2_ALPHA
+#define GL_OPERAND0_ALPHA                 0x8598
+#define GL_OPERAND1_ALPHA                 0x8599
+#define GL_OPERAND2_ALPHA                 0x859A
+/* Alpha combine function */
+#define GL_COMBINE_ALPHA_ARB              GL_COMBINE_ALPHA
 #define GL_INTERPOLATE                    0x8575
 #define GL_CONSTANT                       0x8576
 #define GL_PRIMARY_COLOR                  0x8577

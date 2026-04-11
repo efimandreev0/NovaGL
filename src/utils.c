@@ -69,7 +69,7 @@ GPU_TESTFUNC gl_to_gpu_alpha_testfunc(GLenum func) {
         case GL_GREATER:  return GPU_GREATER;
         case GL_NOTEQUAL: return GPU_NOTEQUAL;
         case GL_GEQUAL:   return GPU_GEQUAL;
-        case GL_ALWAYS:   return GPU_ALWAYS;
+        case GL_ALWAYS:
         default:          return GPU_ALWAYS;
     }
 }
@@ -82,7 +82,7 @@ GPU_TESTFUNC gl_to_gpu_depth_testfunc(GLenum func) {
         case GL_GREATER:  return GPU_LESS;
         case GL_NOTEQUAL: return GPU_NOTEQUAL;
         case GL_GEQUAL:   return GPU_LEQUAL;
-        case GL_ALWAYS:   return GPU_ALWAYS;
+        case GL_ALWAYS:
         default:          return GPU_ALWAYS;
     }
 }
@@ -95,7 +95,7 @@ GPU_TESTFUNC gl_to_gpu_testfunc(GLenum func) {
         case GL_GREATER:  return GPU_GREATER;
         case GL_NOTEQUAL: return GPU_NOTEQUAL;
         case GL_GEQUAL:   return GPU_GEQUAL;
-        case GL_ALWAYS:   return GPU_ALWAYS;
+        case GL_ALWAYS:
         default:          return GPU_ALWAYS;
     }
 }
@@ -128,8 +128,7 @@ int gl_type_size(GLenum type) {
         case GL_FLOAT:
         case GL_INT:
         case GL_UNSIGNED_INT:
-        case GL_FIXED:          return 4;
-
+        case GL_FIXED:
         default:                return 4;
     }
 }
@@ -145,7 +144,7 @@ void read_vertex_attrib_float(float *dst, const uint8_t *src, GLint size, GLenum
             break;
         case GL_FIXED:
             for (int j = 0; j < size; j++) {
-                // GL_FIXED (16.16)
+                // GL_FIXED is 16.16 fixed point
                 dst[j] = (float)((const int32_t*)src)[j] / 65536.0f;
             }
             break;
@@ -190,12 +189,12 @@ int gpu_texfmt_bpp(GPU_TEXCOLOR fmt) {
     switch (fmt) {
         case GPU_RGBA8:    return 4;
         case GPU_RGB8:     return 3;
-        case GPU_RGBA5551: return 2;
-        case GPU_RGB565:   return 2;
-        case GPU_RGBA4:    return 2;
+        case GPU_RGBA5551:
+        case GPU_RGB565:
+        case GPU_RGBA4:
         case GPU_LA8:      return 2;
-        case GPU_L8:       return 1;
-        case GPU_A8:       return 1;
+        case GPU_L8:
+        case GPU_A8:
         case GPU_LA4:      return 1;
         default:           return 4;
     }
@@ -244,7 +243,7 @@ uint32_t morton_interleave(uint32_t x, uint32_t y) {
 static inline int morton_offset(int x, int y, int pot_w, int pot_h) {
     int fy = pot_h - 1 - y;
     int tile_offset = ((fy >> 3) * (pot_w >> 3) + (x >> 3)) * 64;
-    return tile_offset + morton_interleave(x & 7, fy & 7);
+    return tile_offset + (int)morton_interleave(x & 7, fy & 7);
 }
 
 void swizzle_8bit(uint8_t *dst, const uint8_t *src, int src_w, int src_h, int pot_w, int pot_h) {
@@ -284,7 +283,7 @@ void swizzle_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src_h, int
 
 uint32_t* rgb_to_rgba(const uint8_t *rgb, int w, int h) {
     uint32_t *out = (uint32_t*)malloc(w * h * 4);
-    if (!out) return NULL;
+    if (!out) return nullptr;
     for (int i = 0; i < w * h; i++) {
         out[i] = (0xFF << 24) | (rgb[i*3+2] << 16) | (rgb[i*3+1] << 8) | rgb[i*3+0];
     }
@@ -292,46 +291,46 @@ uint32_t* rgb_to_rgba(const uint8_t *rgb, int w, int h) {
 }
 
 void downscale_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src_h, int dst_w, int dst_h) {
-    float x_ratio = (float)src_w / dst_w;
-    float y_ratio = (float)src_h / dst_h;
+    float x_ratio = (float)src_w / (float)dst_w;
+    float y_ratio = (float)src_h / (float)dst_h;
     for (int y = 0; y < dst_h; y++) {
-        int sy = (int)(y * y_ratio);
+        int sy = (int)((float)y * y_ratio);
         int sy1 = sy + 1 < src_h ? sy + 1 : sy;
         for (int x = 0; x < dst_w; x++) {
-            int sx = (int)(x * x_ratio);
+            int sx = (int)((float)x * x_ratio);
             int sx1 = sx + 1 < src_w ? sx + 1 : sx;
             uint32_t p00 = src[sy  * src_w + sx];
             uint32_t p10 = src[sy  * src_w + sx1];
             uint32_t p01 = src[sy1 * src_w + sx];
             uint32_t p11 = src[sy1 * src_w + sx1];
             uint8_t r = (uint8_t)(((p00>>0)&0xFF) + ((p10>>0)&0xFF) + ((p01>>0)&0xFF) + ((p11>>0)&0xFF)) / 4;
-            uint8_t g = (uint8_t)(((p00>>8)&0xFF) + ((p10>>8)&0xFF) + ((p01>>8)&0xFF) + ((p11>>8)&0xFF)) / 4;
+            uint8_t g_ = (uint8_t)(((p00>>8)&0xFF) + ((p10>>8)&0xFF) + ((p01>>8)&0xFF) + ((p11>>8)&0xFF)) / 4;
             uint8_t b = (uint8_t)(((p00>>16)&0xFF) + ((p10>>16)&0xFF) + ((p01>>16)&0xFF) + ((p11>>16)&0xFF)) / 4;
             uint8_t a = (uint8_t)(((p00>>24)&0xFF) + ((p10>>24)&0xFF) + ((p01>>24)&0xFF) + ((p11>>24)&0xFF)) / 4;
-            dst[y * dst_w + x] = ((uint32_t)a << 24) | ((uint32_t)b << 16) | ((uint32_t)g << 8) | r;
+            dst[y * dst_w + x] = ((uint32_t)a << 24) | ((uint32_t)b << 16) | ((uint32_t)g_ << 8) | r;
         }
     }
 }
 
 void downscale_16bit(uint16_t *dst, const uint16_t *src, int src_w, int src_h, int dst_w, int dst_h) {
-    float x_ratio = (float)src_w / dst_w;
-    float y_ratio = (float)src_h / dst_h;
+    float x_ratio = (float)src_w / (float)dst_w;
+    float y_ratio = (float)src_h / (float)dst_h;
     for (int y = 0; y < dst_h; y++) {
-        int sy = (int)(y * y_ratio);
+        int sy = (int)((float)y * y_ratio);
         for (int x = 0; x < dst_w; x++) {
-            int sx = (int)(x * x_ratio);
+            int sx = (int)((float)x * x_ratio);
             dst[y * dst_w + x] = src[sy * src_w + sx];
         }
     }
 }
 
 void downscale_8bit(uint8_t *dst, const uint8_t *src, int src_w, int src_h, int dst_w, int dst_h) {
-    float x_ratio = (float)src_w / dst_w;
-    float y_ratio = (float)src_h / dst_h;
+    float x_ratio = (float)src_w / (float)dst_w;
+    float y_ratio = (float)src_h / (float)dst_h;
     for (int y = 0; y < dst_h; y++) {
-        int sy = (int)(y * y_ratio);
+        int sy = (int)((float)y * y_ratio);
         for (int x = 0; x < dst_w; x++) {
-            int sx = (int)(x * x_ratio);
+            int sx = (int)((float)x * x_ratio);
             dst[y * dst_w + x] = src[sy * src_w + sx];
         }
     }
@@ -369,7 +368,7 @@ void apply_gpu_state(void) {
 
         if (g.uLoc_projection >= 0) {
             C3D_Mtx adj_proj = g.proj_stack[g.proj_sp];
-            // Хак для PICA200 (Z-range 3DS)
+            // hack for PICA200 (3DS Z-range)
             adj_proj.r[2].x = adj_proj.r[2].x * 0.4999f - adj_proj.r[3].x * 0.5f;
             adj_proj.r[2].y = adj_proj.r[2].y * 0.4999f - adj_proj.r[3].y * 0.5f;
             adj_proj.r[2].z = adj_proj.r[2].z * 0.4999f - adj_proj.r[3].z * 0.5f;
@@ -392,7 +391,7 @@ void apply_gpu_state(void) {
     if (g.fog_dirty) {
         if (g.uLoc_fogparams >= 0) {
             if (g.fog_enabled) {
-                // Защита от деления на ноль (если игра шлет одинаковые start и end)
+                // protect from div by zero (if game send same start and end)
                 float safe_end = g.fog_end;
                 if (fabsf(safe_end - g.fog_start) < 0.001f) {
                     safe_end = g.fog_start + 0.001f;
@@ -460,7 +459,7 @@ void apply_gpu_state(void) {
             GPU_TEVSRC prev_src = (tev_stage == 0) ? GPU_PRIMARY_COLOR : GPU_PREVIOUS;
 
             if (g.tex_env_mode[unit] == GL_COMBINE) {
-                // Используем наши Си-хелперы для трансляции
+                // use our C helpers for translation
                 GPU_TEVSRC s0 = get_tev_src(g.tex_env_src0_rgb[unit], tex_src, prev_src);
                 GPU_TEVSRC s1 = get_tev_src(g.tex_env_src1_rgb[unit], tex_src, prev_src);
                 GPU_TEVSRC s2 = get_tev_src(g.tex_env_src2_rgb[unit], tex_src, prev_src);
@@ -493,7 +492,7 @@ void apply_gpu_state(void) {
                         break;
                 }
             } else {
-                // Стандартный FFP (GL_MODULATE / GL_REPLACE)
+                // standard FFP (GL_MODULATE / GL_REPLACE)
                 switch (g.tex_env_mode[unit]) {
                     case GL_REPLACE:
                         C3D_TexEnvSrc(env, C3D_Both, tex_src, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
@@ -520,7 +519,7 @@ void apply_gpu_state(void) {
             tev_stage++;
         }
 
-        // Заглушка, если текстуры выключены
+        // stub if textures disabled
         if (tev_stage == 0) {
             C3D_TexEnv *env = C3D_GetTexEnv(0);
             C3D_TexEnvInit(env);
@@ -529,7 +528,7 @@ void apply_gpu_state(void) {
             tev_stage++;
         }
 
-        // Отключаем мусорные стадии (2-5), пробрасывая цвет дальше
+        // disable garbage stages (2-5), pass color through
         for (int i = tev_stage; i < 6; i++) {
             C3D_TexEnv *env = C3D_GetTexEnv(i);
             C3D_TexEnvInit(env);
@@ -584,7 +583,6 @@ void cleanup_vbo_stream(void) {
 
 void draw_emulated_quads(int count) {
     int num_quads = count / 4;
-    int idx_count = num_quads * 6;
 
     if (!g.static_quad_indices) return;
 
@@ -605,14 +603,14 @@ void nova_hardware_swizzle(C3D_Tex* tex, const void* linear_pixels, int width, i
     u32 transfer_flags = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(1) | GX_TRANSFER_RAW_COPY(0) |
                          GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
 
-    u32 in_fmt, out_fmt;
+    u32 in_fmt = 0, out_fmt = 0;
     switch (format) {
         case GPU_RGBA8:  in_fmt = GX_TRANSFER_FMT_RGBA8;  out_fmt = GX_TRANSFER_FMT_RGBA8; break;
         case GPU_RGB8:   in_fmt = GX_TRANSFER_FMT_RGB8;   out_fmt = GX_TRANSFER_FMT_RGB8; break;
         case GPU_RGB565: in_fmt = GX_TRANSFER_FMT_RGB565; out_fmt = GX_TRANSFER_FMT_RGB565; break;
         case GPU_RGBA5551:in_fmt= GX_TRANSFER_FMT_RGB5A1; out_fmt = GX_TRANSFER_FMT_RGB5A1; break;
         case GPU_RGBA4:  in_fmt = GX_TRANSFER_FMT_RGBA4;  out_fmt = GX_TRANSFER_FMT_RGBA4; break;
-        default: printf("Unsupported format: %x", format);
+        default: printf("Unsupported format: %x", format); return;
     }
 
     transfer_flags |= GX_TRANSFER_IN_FORMAT(in_fmt) | GX_TRANSFER_OUT_FORMAT(out_fmt);

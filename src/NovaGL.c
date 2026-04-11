@@ -435,7 +435,7 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
             packed_vertex_slot = v_slot;
             memcpy(dst, packed_vertex, 12);
         } else if (g.va_vertex.enabled && src_v && (uintptr_t)src_v > 0x1000) {
-            float pos[3] = {0.0f, 0.0f, 0.0f};
+            float pos[4] = {0.0f, 0.0f, 0.0f, 1.0f};
             read_vertex_attrib_float(pos, src_v + src_index * p_str, g.va_vertex.size, g.va_vertex.type);
             memcpy(dst, pos, 12);
         } else memset(dst, 0, 12);

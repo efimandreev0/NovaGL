@@ -191,6 +191,15 @@ extern struct NovaState{
     GLint tex_env_operand1_rgb[3];
     GLint tex_env_operand2_rgb[3];
 
+    /* Alpha combine state (GL_COMBINE_ALPHA path) */
+    GLint tex_env_combine_alpha[3];
+    GLint tex_env_src0_alpha[3];
+    GLint tex_env_src1_alpha[3];
+    GLint tex_env_src2_alpha[3];
+    GLint tex_env_operand0_alpha[3];
+    GLint tex_env_operand1_alpha[3];
+    GLint tex_env_operand2_alpha[3];
+
     int line_smooth_enabled;
 } g;
 

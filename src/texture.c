@@ -545,6 +545,13 @@ void glTexEnvi(GLenum target, GLenum pname, GLint param) {
         case GL_OPERAND0_RGB:     g.tex_env_operand0_rgb[unit] = param; break;
         case GL_OPERAND1_RGB:     g.tex_env_operand1_rgb[unit] = param; break;
         case GL_OPERAND2_RGB:     g.tex_env_operand2_rgb[unit] = param; break;
+        case GL_COMBINE_ALPHA:    g.tex_env_combine_alpha[unit] = param; break;
+        case GL_SRC0_ALPHA:       g.tex_env_src0_alpha[unit] = param; break;
+        case GL_SRC1_ALPHA:       g.tex_env_src1_alpha[unit] = param; break;
+        case GL_SRC2_ALPHA:       g.tex_env_src2_alpha[unit] = param; break;
+        case GL_OPERAND0_ALPHA:   g.tex_env_operand0_alpha[unit] = param; break;
+        case GL_OPERAND1_ALPHA:   g.tex_env_operand1_alpha[unit] = param; break;
+        case GL_OPERAND2_ALPHA:   g.tex_env_operand2_alpha[unit] = param; break;
     }
     g.tev_dirty = 1;
 }
