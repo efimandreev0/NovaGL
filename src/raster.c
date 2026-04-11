@@ -75,3 +75,72 @@ void glStencilMask(GLuint mask) {
 void glStencilOp(GLenum fail, GLenum zfail, GLenum zpass) {
     (void)fail; (void)zfail; (void)zpass;
 }
+
+/* ===[ GL 2.0+ Shader pipeline stubs ]=== */
+/* PICA200 uses fixed-function; these exist for source compatibility only */
+
+GLuint glCreateShader(GLenum type) { (void)type; return 1; }
+
+void glShaderSource(GLuint shader, GLsizei count, const char **string, const GLint *length) {
+    (void)shader; (void)count; (void)string; (void)length;
+}
+
+void glCompileShader(GLuint shader) { (void)shader; }
+
+void glGetShaderiv(GLuint shader, GLenum pname, GLint *params) {
+    (void)shader;
+    if (params) {
+        if (pname == GL_COMPILE_STATUS) *params = GL_TRUE;
+        else *params = 0;
+    }
+}
+
+void glGetShaderInfoLog(GLuint shader, GLsizei maxLength, GLsizei *length, char *infoLog) {
+    (void)shader;
+    if (length) *length = 0;
+    if (infoLog && maxLength > 0) infoLog[0] = '\0';
+}
+
+GLuint glCreateProgram(void) { return 1; }
+
+void glAttachShader(GLuint program, GLuint shader) { (void)program; (void)shader; }
+
+void glLinkProgram(GLuint program) { (void)program; }
+
+void glGetProgramiv(GLuint program, GLenum pname, GLint *params) {
+    (void)program;
+    if (params) {
+        if (pname == GL_LINK_STATUS) *params = GL_TRUE;
+        else *params = 0;
+    }
+}
+
+void glGetProgramInfoLog(GLuint program, GLsizei maxLength, GLsizei *length, char *infoLog) {
+    (void)program;
+    if (length) *length = 0;
+    if (infoLog && maxLength > 0) infoLog[0] = '\0';
+}
+
+void glDeleteShader(GLuint shader) { (void)shader; }
+
+void glDeleteProgram(GLuint program) { (void)program; }
+
+GLint glGetUniformLocation(GLuint program, const char *name) { (void)program; (void)name; return -1; }
+
+GLint glGetAttribLocation(GLuint program, const char *name) { (void)program; (void)name; return -1; }
+
+void glUseProgram(GLuint program) { (void)program; }
+
+void glUniform1i(GLint location, GLint v0) { (void)location; (void)v0; }
+
+void glUniform1f(GLint location, GLfloat v0) { (void)location; (void)v0; }
+
+void glUniform2f(GLint location, GLfloat v0, GLfloat v1) { (void)location; (void)v0; (void)v1; }
+
+void glUniform3f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2) { (void)location; (void)v0; (void)v1; (void)v2; }
+
+void glUniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) { (void)location; (void)v0; (void)v1; (void)v2; (void)v3; }
+
+void glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) {
+    (void)location; (void)count; (void)transpose; (void)value;
+}

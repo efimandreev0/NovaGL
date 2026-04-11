@@ -278,11 +278,26 @@ GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 #define GL_PRIMARY_COLOR                  0x8577
 #define GL_PREVIOUS                       0x8578
 
-
 #define GL_LINE_SMOOTH                    0x0B20
 #define GL_LINE_WIDTH                     0x0B21
 #define GL_SMOOTH_LINE_WIDTH_RANGE        0x0B22
 #define GL_ALIASED_LINE_WIDTH_RANGE       0x846E
+
+/* GL 2.0+ shader pipeline constants (stubs) */
+#define GL_VERTEX_SHADER                  0x8B31
+#define GL_FRAGMENT_SHADER                0x8B30
+#define GL_COMPILE_STATUS                 0x8B81
+#define GL_LINK_STATUS                    0x8B82
+#define GL_INFO_LOG_LENGTH                0x8B84
+#define GL_ACTIVE_UNIFORMS                0x8B86
+#define GL_ACTIVE_ATTRIBUTES              0x8B89
+
+/* Framebuffer extension constants */
+#define GL_READ_FRAMEBUFFER               0x8CA8
+#define GL_DRAW_FRAMEBUFFER               0x8CA9
+#define GL_FRAMEBUFFER_COMPLETE           0x8CD5
+#define GL_TEXTURE_2D_TARGET              0x0DE1
+
 //API
 void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_size, int tex_staging_size);
 void nova_init(void);
@@ -505,6 +520,44 @@ void glPopClientAttrib(void);
 void glBegin(GLenum mode);
 void glEnd(void);
 void glArrayElement(GLint i);
+
+/* GL 2.0+ Shader pipeline (stubs for compat) */
+GLuint glCreateShader(GLenum type);
+void glShaderSource(GLuint shader, GLsizei count, const char **string, const GLint *length);
+void glCompileShader(GLuint shader);
+void glGetShaderiv(GLuint shader, GLenum pname, GLint *params);
+void glGetShaderInfoLog(GLuint shader, GLsizei maxLength, GLsizei *length, char *infoLog);
+GLuint glCreateProgram(void);
+void glAttachShader(GLuint program, GLuint shader);
+void glLinkProgram(GLuint program);
+void glGetProgramiv(GLuint program, GLenum pname, GLint *params);
+void glGetProgramInfoLog(GLuint program, GLsizei maxLength, GLsizei *length, char *infoLog);
+void glDeleteShader(GLuint shader);
+void glDeleteProgram(GLuint program);
+GLint glGetUniformLocation(GLuint program, const char *name);
+GLint glGetAttribLocation(GLuint program, const char *name);
+void glUseProgram(GLuint program);
+void glUniform1i(GLint location, GLint v0);
+void glUniform1f(GLint location, GLfloat v0);
+void glUniform2f(GLint location, GLfloat v0, GLfloat v1);
+void glUniform3f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2);
+void glUniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3);
+void glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+
+/* GL 3.0+ VAO (stubs for compat) */
+void glGenVertexArrays(GLsizei n, GLuint *arrays);
+void glBindVertexArray(GLuint array);
+void glDeleteVertexArrays(GLsizei n, const GLuint *arrays);
+
+/* GL 2.0+ Vertex attrib pointers (stubs for compat) */
+void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const GLvoid *pointer);
+void glEnableVertexAttribArray(GLuint index);
+void glDisableVertexAttribArray(GLuint index);
+
+/* Framebuffer extensions */
+void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
+GLenum glCheckFramebufferStatus(GLenum target);
+void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter);
 
 /* Vertex functions */
 void glVertex2d(GLdouble x, GLdouble y);

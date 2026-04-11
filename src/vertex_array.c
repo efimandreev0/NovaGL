@@ -31,3 +31,21 @@ void glDisableClientState(GLenum cap) {
     else if (cap == GL_COLOR_ARRAY) g.va_color.enabled = 0;
     else if (cap == GL_NORMAL_ARRAY) g.va_normal.enabled = 0;
 }
+
+/* GL 3.0+ VAO stubs */
+void glGenVertexArrays(GLsizei n, GLuint *arrays) {
+    for (GLsizei i = 0; i < n; i++) arrays[i] = i + 1;
+}
+
+void glBindVertexArray(GLuint array) { (void)array; }
+
+void glDeleteVertexArrays(GLsizei n, const GLuint *arrays) { (void)n; (void)arrays; }
+
+/* GL 2.0+ vertex attrib pointer stubs */
+void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const GLvoid *pointer) {
+    (void)index; (void)size; (void)type; (void)normalized; (void)stride; (void)pointer;
+}
+
+void glEnableVertexAttribArray(GLuint index) { (void)index; }
+
+void glDisableVertexAttribArray(GLuint index) { (void)index; }

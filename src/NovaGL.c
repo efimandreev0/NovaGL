@@ -319,7 +319,7 @@ static int packed_ptc_attr_compatible(GLint size, GLenum type, GLsizei stride, c
 
 void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements, GLenum type, const GLvoid *indices) {
     if (count <= 0) return;
-    if (is_elements && type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_BYTE) {
+    if (is_elements && type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_BYTE && type != GL_UNSIGNED_INT) {
         g.last_error = GL_INVALID_ENUM;
         return;
     }
@@ -423,7 +423,8 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
 
     for (int i = 0; i < count; i++) {
         int src_index = is_elements ?
-            (type == GL_UNSIGNED_SHORT ? ((const uint16_t*)idx_src)[i] : ((const uint8_t*)idx_src)[i]) :
+            (type == GL_UNSIGNED_INT ? (int)((const uint32_t*)idx_src)[i] :
+             type == GL_UNSIGNED_SHORT ? ((const uint16_t*)idx_src)[i] : ((const uint8_t*)idx_src)[i]) :
             (first + i);
         uint8_t packed_vertex[24];
         const VBOSlot *packed_vertex_slot = NULL;

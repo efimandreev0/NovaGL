@@ -52,3 +52,18 @@ void glDrawBuffer(GLenum mode) {
     (void)mode;
     /* Only single buffer supported on 3DS */
 }
+
+void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
+    (void)target; (void)attachment; (void)textarget; (void)texture; (void)level;
+}
+
+GLenum glCheckFramebufferStatus(GLenum target) {
+    (void)target;
+    return GL_FRAMEBUFFER_COMPLETE;
+}
+
+void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter) {
+    (void)srcX0; (void)srcY0; (void)srcX1; (void)srcY1;
+    (void)dstX0; (void)dstY0; (void)dstX1; (void)dstY1;
+    (void)mask; (void)filter;
+}
