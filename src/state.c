@@ -28,6 +28,10 @@ void glEnable(GLenum cap) {
         case GL_LINE_SMOOTH:
             g.line_smooth_enabled = 1;
             break;
+        case GL_VERTEX_ARRAY:          g.va_vertex.enabled = 1; break;
+        case GL_COLOR_ARRAY:           g.va_color.enabled = 1; break;
+        case GL_TEXTURE_COORD_ARRAY:   g.va_texcoord.enabled = 1; break;
+        case GL_NORMAL_ARRAY:          g.va_normal.enabled = 1; break;
         default: break;
     }
 }
@@ -56,21 +60,29 @@ void glDisable(GLenum cap) {
         case GL_LINE_SMOOTH:
             g.line_smooth_enabled = 0;
             break;
+        case GL_VERTEX_ARRAY:          g.va_vertex.enabled = 0; break;
+        case GL_COLOR_ARRAY:           g.va_color.enabled = 0; break;
+        case GL_TEXTURE_COORD_ARRAY:   g.va_texcoord.enabled = 0; break;
+        case GL_NORMAL_ARRAY:          g.va_normal.enabled = 0; break;
         default: break;
     }
 }
 
 GLboolean glIsEnabled(GLenum cap) {
     switch (cap) {
-        case GL_DEPTH_TEST:    return g.depth_test_enabled;
-        case GL_BLEND:         return g.blend_enabled;
-        case GL_ALPHA_TEST:    return g.alpha_test_enabled;
-        case GL_CULL_FACE:     return g.cull_face_enabled;
-        case GL_TEXTURE_2D:    return g.texture_2d_enabled_unit[g.active_texture_unit];
-        case GL_SCISSOR_TEST:  return g.scissor_test_enabled;
-        case GL_FOG:           return g.fog_enabled;
-        case GL_LINE_SMOOTH:   return g.line_smooth_enabled ? GL_TRUE : GL_FALSE;
-        default:               return GL_FALSE;
+        case GL_DEPTH_TEST:          return g.depth_test_enabled;
+        case GL_BLEND:               return g.blend_enabled;
+        case GL_ALPHA_TEST:          return g.alpha_test_enabled;
+        case GL_CULL_FACE:           return g.cull_face_enabled;
+        case GL_TEXTURE_2D:          return g.texture_2d_enabled_unit[g.active_texture_unit];
+        case GL_SCISSOR_TEST:        return g.scissor_test_enabled;
+        case GL_FOG:                 return g.fog_enabled;
+        case GL_LINE_SMOOTH:         return g.line_smooth_enabled ? GL_TRUE : GL_FALSE;
+        case GL_VERTEX_ARRAY:        return g.va_vertex.enabled ? GL_TRUE : GL_FALSE;
+        case GL_COLOR_ARRAY:         return g.va_color.enabled ? GL_TRUE : GL_FALSE;
+        case GL_TEXTURE_COORD_ARRAY: return g.va_texcoord.enabled ? GL_TRUE : GL_FALSE;
+        case GL_NORMAL_ARRAY:        return g.va_normal.enabled ? GL_TRUE : GL_FALSE;
+        default:                     return GL_FALSE;
     }
 }
 
