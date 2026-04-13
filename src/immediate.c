@@ -7,15 +7,16 @@
 
 #include "NovaGL.h"
 #include "utils.h"
+#include <math.h>
 
 static struct {
     GLenum mode;
     int in_begin;
     int vertex_count;
 
-    uint8_t* mapped_ptr; // Прямой указатель на GPU Ring Buffer
+    uint8_t* mapped_ptr;
     int mapped_max_verts;
-    int start_offset;    // Смещение до начала записи
+    int start_offset;
 
     GLfloat current_color[4];
     GLfloat current_texcoord[4]; // [s, t, r, q]
@@ -27,7 +28,6 @@ void glBegin(GLenum mode) {
     imm.in_begin = 1;
     imm.vertex_count = 0;
 
-    // Синхронизируем стейт из глобального контекста
     imm.current_color[0] = g.cur_color[0];
     imm.current_color[1] = g.cur_color[1];
     imm.current_color[2] = g.cur_color[2];
@@ -38,11 +38,9 @@ void glBegin(GLenum mode) {
     imm.current_texcoord[2] = 0.0f;
     imm.current_texcoord[3] = 1.0f;
 
-    // Резервируем максимум 4096 вершин (по 24 байта: pos[12] + uv[8] + color[4])
     imm.mapped_max_verts = 4096;
     int req_size = imm.mapped_max_verts * 24;
 
-    // Оборачиваем буфер, если места не хватает
     if (g.client_array_buf_offset + req_size > g.client_array_buf_size) {
         C3D_FrameSplit(0);
         g.client_array_buf_offset = 0;
@@ -52,39 +50,127 @@ void glBegin(GLenum mode) {
     imm.mapped_ptr = (uint8_t*)g.client_array_buf + g.client_array_buf_offset;
 }
 
+/* --- Tiled texture helpers (shared with NovaGL.c) --- */
+
+static int imm_tiled_page_from_uv(const TexSlot *slot, float u, float v) {
+    int tx = (int)floorf((u * (float)slot->width) / (float)slot->tile_w);
+    int ty = (int)floorf((v * (float)slot->height) / (float)slot->tile_h);
+    if (tx < 0) tx = 0;
+    if (ty < 0) ty = 0;
+    if (tx >= slot->tiles_x) tx = slot->tiles_x - 1;
+    if (ty >= slot->tiles_y) ty = slot->tiles_y - 1;
+    return ty * slot->tiles_x + tx;
+}
+
+static int imm_tiled_page_for_primitive(const TexSlot *slot, const uint8_t *base, int prim_start, int prim_verts) {
+    const float *uv0 = (const float*)(base + prim_start * 24 + 12);
+    int page = imm_tiled_page_from_uv(slot, uv0[0], uv0[1]);
+    for (int i = 1; i < prim_verts; i++) {
+        const float *uv = (const float*)(base + (prim_start + i) * 24 + 12);
+        if (imm_tiled_page_from_uv(slot, uv[0], uv[1]) != page)
+            return page;
+    }
+    return page;
+}
+
+static void imm_remap_tiled_uvs(const TexSlot *slot, int page_index, uint8_t *base, int vert_count) {
+    int tx = page_index % slot->tiles_x;
+    int ty = page_index / slot->tiles_x;
+    const TexPage *page = &slot->pages[page_index];
+    const float page_x0 = (float)(tx * slot->tile_w);
+    const float page_y0 = (float)(ty * slot->tile_h);
+
+    for (int i = 0; i < vert_count; i++) {
+        float *uv = (float*)(base + i * 24 + 12);
+        float px = uv[0] * (float)slot->width;
+        float py = uv[1] * (float)slot->height;
+        uv[0] = (px - page_x0) / (float)page->pot_w;
+        uv[1] = (py - page_y0) / (float)page->pot_h;
+    }
+}
+
+static TexSlot* imm_get_active_tiled_texture(void) {
+    if (!g.texture_2d_enabled_unit[0]) return NULL;
+    GLuint tex_id = g.bound_texture[0];
+    if (tex_id == 0 || tex_id >= NOVA_MAX_TEXTURES) return NULL;
+    TexSlot *slot = &g.textures[tex_id];
+    if (!slot->allocated || !slot->is_tiled || !slot->pages) return NULL;
+    return slot;
+}
+
+static void imm_draw_packed_run(GLenum mode, GPU_Primitive_t prim, uint8_t *base, int count) {
+    C3D_BufInfo *bufInfo = C3D_GetBufInfo();
+    BufInfo_Init(bufInfo);
+    BufInfo_Add(bufInfo, base, 24, 3, 0x210);
+    if (mode == GL_QUADS) draw_emulated_quads(count);
+    else C3D_DrawArrays(prim, 0, count);
+}
+
+static void imm_draw_tiled_batches(GLenum mode, GPU_Primitive_t prim, TexSlot *slot, uint8_t *base, int count) {
+    int prim_verts;
+    switch (mode) {
+        case GL_TRIANGLES: prim_verts = 3; break;
+        case GL_QUADS:     prim_verts = 4; break;
+        case GL_LINES:     prim_verts = 2; break;
+        default:           prim_verts = 0; break;
+    }
+
+    if (prim_verts <= 0) {
+        C3D_TexBind(0, &slot->pages[0].tex);
+        GSPGPU_FlushDataCache(base, count * 24);
+        imm_draw_packed_run(mode, prim, base, count);
+        return;
+    }
+
+    for (int prim_start = 0; prim_start + prim_verts <= count; ) {
+        int page_index = imm_tiled_page_for_primitive(slot, base, prim_start, prim_verts);
+        int run_start = prim_start;
+        int run_end = prim_start + prim_verts;
+
+        while (run_end + prim_verts <= count &&
+               imm_tiled_page_for_primitive(slot, base, run_end, prim_verts) == page_index) {
+            run_end += prim_verts;
+        }
+
+        uint8_t *run_base = base + run_start * 24;
+        int run_count = run_end - run_start;
+        imm_remap_tiled_uvs(slot, page_index, run_base, run_count);
+        GSPGPU_FlushDataCache(run_base, run_count * 24);
+        C3D_TexBind(0, &slot->pages[page_index].tex);
+        imm_draw_packed_run(mode, prim, run_base, run_count);
+
+        prim_start = run_end;
+    }
+}
+
 void glEnd(void) {
     if (!imm.in_begin) return;
     imm.in_begin = 0;
 
     if (imm.vertex_count == 0) return;
 
-    // Сдвигаем оффсет только на реально использованное количество байт
     g.client_array_buf_offset = imm.start_offset + (imm.vertex_count * 24);
-
-    // Скармливаем GPU
-    GSPGPU_FlushDataCache(imm.mapped_ptr, imm.vertex_count * 24);
 
     apply_gpu_state();
 
-    C3D_BufInfo *bufInfo = C3D_GetBufInfo();
-    BufInfo_Init(bufInfo);
-    BufInfo_Add(bufInfo, imm.mapped_ptr, 24, 3, 0x210); // Позиция(0), UV(1), Цвет(2)
-
     GPU_Primitive_t prim = gl_to_gpu_primitive(imm.mode);
-    if (imm.mode == GL_QUADS) {
-        draw_emulated_quads(imm.vertex_count);
+
+    TexSlot *tiled_slot = imm_get_active_tiled_texture();
+    if (tiled_slot) {
+        imm_draw_tiled_batches(imm.mode, prim, tiled_slot, imm.mapped_ptr, imm.vertex_count);
     } else {
-        C3D_DrawArrays(prim, 0, imm.vertex_count);
+        GSPGPU_FlushDataCache(imm.mapped_ptr, imm.vertex_count * 24);
+        imm_draw_packed_run(imm.mode, prim, imm.mapped_ptr, imm.vertex_count);
     }
 }
 
 /* Helper function to add a vertex to the mapped ring buffer */
 static inline void add_vertex(GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
-    (void)w; // Пока игнорируем W, 3DS шейдер ждет vec3
+    (void)w;
     if (!imm.in_begin || imm.vertex_count >= imm.mapped_max_verts) return;
 
     float* out_f = (float*)(imm.mapped_ptr + imm.vertex_count * 24);
-    uint8_t* out_c = (uint8_t*)(out_f + 5); // Пропускаем 3(pos) + 2(uv) float'ов = 20 байт
+    uint8_t* out_c = (uint8_t*)(out_f + 5);
 
     out_f[0] = x; out_f[1] = y; out_f[2] = z;
     out_f[3] = imm.current_texcoord[0]; // s
