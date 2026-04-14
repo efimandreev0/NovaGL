@@ -543,9 +543,7 @@ void apply_gpu_state(void) {
     for (int unit = 0; unit < 3; unit++) {
         if ((current_tex_state & (1 << unit)) && g.bound_texture[unit] < NOVA_MAX_TEXTURES) {
             TexSlot *slot = &g.textures[g.bound_texture[unit]];
-            if (slot->is_tiled && slot->pages && slot->pages[0].allocated) {
-                C3D_TexBind(unit, &slot->pages[0].tex);
-            } else if (slot->allocated) {
+            if (slot->allocated) {
                 C3D_TexBind(unit, &slot->tex);
             }
         }

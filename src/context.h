@@ -6,39 +6,22 @@
 #define NOVAGL_CONTEXT_H
 #include "NovaGL.h"
 
-//Structures
-typedef struct {
-    C3D_Tex tex;
-    int allocated;
-    int width, height;
-    int pot_w, pot_h;
-} TexPage;
 
 typedef struct {
     C3D_Tex     tex;
-
-    // if not allocated then don't drawing it
     int         allocated;
-    int         width, height;
 
-    //power of two texture size. Needed for correct drawing
+    int         width, height;
     int         pot_w, pot_h;
+
+    int         orig_width, orig_height;
+
     GPU_TEXCOLOR fmt;
     int         min_filter;
     int         mag_filter;
-
-    int in_use;
-
-    int is_tiled;
-    int tiles_x;
-    int tiles_y;
-    int tile_w;
-    int tile_h;
-    TexPage *pages;
-
-    //is wrapped
     int         wrap_s;
     int         wrap_t;
+    int         in_use;
 } TexSlot;
 
 typedef struct {

@@ -171,17 +171,8 @@ void nova_fini(void) {
         g.tex_staging = NULL;
         g.tex_staging_size = 0;
     }
-
     for (int i = 0; i < NOVA_MAX_TEXTURES; i++) {
-        if (g.textures[i].is_tiled && g.textures[i].pages) {
-            for (int p = 0; p < g.textures[i].tiles_x * g.textures[i].tiles_y; p++) {
-                if (g.textures[i].pages[p].allocated) {
-                    C3D_TexDelete(&g.textures[i].pages[p].tex);
-                }
-            }
-            free(g.textures[i].pages);
-            g.textures[i].pages = NULL;
-        } else if (g.textures[i].allocated) {
+        if (g.textures[i].allocated) {
             C3D_TexDelete(&g.textures[i].tex);
         }
     }
@@ -210,61 +201,12 @@ void nova_set_render_target(int is_right_eye) {
     g.current_target = is_right_eye ? g.render_target_bot : g.render_target_top;
 }
 
-static TexSlot* get_active_tiled_texture_unit0(void) {
-    if (!g.texture_2d_enabled_unit[0]) return NULL;
-    GLuint tex_id = g.bound_texture[0];
-    if (tex_id == 0 || tex_id >= NOVA_MAX_TEXTURES) return NULL;
-    TexSlot *slot = &g.textures[tex_id];
-    if (!slot->allocated || !slot->is_tiled || !slot->pages) return NULL;
-    return slot;
-}
-
 static int primitive_vertex_count(GLenum mode) {
     switch (mode) {
         case GL_TRIANGLES: return 3;
         case GL_QUADS: return 4;
         case GL_LINES: return 2;
         default: return 0;
-    }
-}
-
-static int tiled_page_from_uv(const TexSlot *slot, float u, float v) {
-    int tx = (int)floorf((u * (float)slot->width) / (float)slot->tile_w);
-    int ty = (int)floorf((v * (float)slot->height) / (float)slot->tile_h);
-
-    if (tx < 0) tx = 0;
-    if (ty < 0) ty = 0;
-    if (tx >= slot->tiles_x) tx = slot->tiles_x - 1;
-    if (ty >= slot->tiles_y) ty = slot->tiles_y - 1;
-    return ty * slot->tiles_x + tx;
-}
-
-static int tiled_page_for_primitive(const TexSlot *slot, const uint8_t *base, int prim_start, int prim_verts) {
-    const float *uv0 = (const float*)(base + prim_start * 24 + 12);
-    int page = tiled_page_from_uv(slot, uv0[0], uv0[1]);
-
-    for (int i = 1; i < prim_verts; i++) {
-        const float *uv = (const float*)(base + (prim_start + i) * 24 + 12);
-        if (tiled_page_from_uv(slot, uv[0], uv[1]) != page) {
-            return page;
-        }
-    }
-    return page;
-}
-
-static void remap_tiled_uvs_in_place(const TexSlot *slot, int page_index, uint8_t *base, int vert_count) {
-    int tx = page_index % slot->tiles_x;
-    int ty = page_index / slot->tiles_x;
-    const TexPage *page = &slot->pages[page_index];
-    const float page_x0 = (float)(tx * slot->tile_w);
-    const float page_y0 = (float)(ty * slot->tile_h);
-
-    for (int i = 0; i < vert_count; i++) {
-        float *uv = (float*)(base + i * 24 + 12);
-        float px = uv[0] * (float)slot->width;
-        float py = uv[1] * (float)slot->height;
-        uv[0] = (px - page_x0) / (float)page->pot_w;
-        uv[1] = (py - page_y0) / (float)page->pot_h;
     }
 }
 
@@ -275,61 +217,6 @@ static void draw_packed_run(GLenum mode, GPU_Primitive_t prim, uint8_t *base, in
 
     if (mode == GL_QUADS) draw_emulated_quads(count);
     else C3D_DrawArrays(prim, 0, count);
-}
-
-static void draw_tiled_batches(GLenum mode, GPU_Primitive_t prim, TexSlot *slot, uint8_t *base, int count) {
-    if (count <= 0) return;
-
-    // === СПЕЦИАЛЬНАЯ ОБРАБОТКА ДЛЯ STRIP/FAN (самое частое место бага) ===
-    if (mode == GL_TRIANGLE_STRIP || mode == GL_TRIANGLE_FAN) {
-        int num_tris = (mode == GL_TRIANGLE_STRIP) ? (count - 2) : (count - 1);
-        if (num_tris <= 0) return;
-
-        for (int t = 0; t < num_tris; t++) {
-            int v0 = (mode == GL_TRIANGLE_STRIP) ? t : 0;
-            int v1 = t + 1;
-            int v2 = t + 2;
-
-            // Берём тайл по первой вершине треугольника (самый надёжный способ)
-            float u = *(float*)(base + v0 * 24 + 12);
-            float v = *(float*)(base + v0 * 24 + 16);
-            int page_index = tiled_page_from_uv(slot, u, v);
-
-            // Копируем 3 вершины во временный буфер
-            uint8_t temp[3 * 24];
-            memcpy(temp + 0*24, base + v0*24, 24);
-            memcpy(temp + 1*24, base + v1*24, 24);
-            memcpy(temp + 2*24, base + v2*24, 24);
-
-            remap_tiled_uvs_in_place(slot, page_index, temp, 3);
-
-            GSPGPU_FlushDataCache(temp, 3 * 24);
-            C3D_TexBind(0, &slot->pages[page_index].tex);
-            C3D_DrawArrays(GPU_TRIANGLES, 0, 3);   // всегда triangles
-        }
-        return;
-    }
-
-    // === Обычные list-режимы (TRIANGLES, QUADS, LINES) ===
-    int verts_per_prim = primitive_vertex_count(mode);
-    if (verts_per_prim <= 0) {
-        // fallback
-        C3D_TexBind(0, &slot->pages[0].tex);
-        GSPGPU_FlushDataCache(base, count * 24);
-        draw_packed_run(mode, prim, base, count);
-        return;
-    }
-
-    for (int i = 0; i + verts_per_prim <= count; i += verts_per_prim) {
-        int page_index = tiled_page_for_primitive(slot, base, i, verts_per_prim);
-
-        uint8_t *run_base = base + i * 24;
-        remap_tiled_uvs_in_place(slot, page_index, run_base, verts_per_prim);
-
-        GSPGPU_FlushDataCache(run_base, verts_per_prim * 24);
-        C3D_TexBind(0, &slot->pages[page_index].tex);
-        draw_packed_run(mode, prim, run_base, verts_per_prim);
-    }
 }
 
 static int packed_ptc_attr_compatible(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer, int expected_offset, int max_size) {
@@ -366,7 +253,7 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
     apply_gpu_state();
     GPU_Primitive_t prim = gl_to_gpu_primitive(mode);
     if (mode == GL_LINES || mode == GL_LINE_STRIP) prim = GPU_TRIANGLES;
-    TexSlot *tiled_slot = get_active_tiled_texture_unit0();
+    //TexSlot *tiled_slot = get_active_tiled_texture_unit0();
 
     // --- FAST PATH ---
     if (!is_elements &&
@@ -395,12 +282,9 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
             memcpy(dst_start, (const uint8_t*)vbo->data + first * 24, req_size);
         }
 
-        if (tiled_slot) {
-            draw_tiled_batches(mode, prim, tiled_slot, dst_start, count);
-        } else {
-            GSPGPU_FlushDataCache(dst_start, req_size);
-            draw_packed_run(mode, prim, dst_start, count);
-        }
+        GSPGPU_FlushDataCache(dst_start, req_size);
+        draw_packed_run(mode, prim, dst_start, count);
+
         cleanup_vbo_stream();
         return;
     }
@@ -530,12 +414,8 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
         }
     }
 
-    if (tiled_slot) {
-        draw_tiled_batches(mode, prim, tiled_slot, dst_start, count);
-    } else {
-        GSPGPU_FlushDataCache(dst_start, req_size);
-        draw_packed_run(mode, prim, dst_start, count);
-    }
+    GSPGPU_FlushDataCache(dst_start, req_size);
+    draw_packed_run(mode, prim, dst_start, count);
 
     cleanup_vbo_stream();
 }
