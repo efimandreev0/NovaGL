@@ -56,7 +56,6 @@ int main(void) {
             float y01 = sinf(x0 * 0.5f) * 1.5f + cosf(z1 * 0.5f) * 1.5f;
             float y11 = sinf(x1 * 0.5f) * 1.5f + cosf(z1 * 0.5f) * 1.5f;
 
-            // Треугольник 1
             vbo_data[v_idx] = (Vertex){x0, y00, z0,  0.0f, 0.0f,  0,0,0,0};
             set_vertex_color(&vbo_data[v_idx++], y00);
 

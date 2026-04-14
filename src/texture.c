@@ -44,7 +44,6 @@ static void init_texture_defaults(TexSlot *slot) {
     slot->wrap_t = GL_REPEAT;
 }
 
-// ИСПРАВЛЕНО: Байты пакуются как A, B, G, R (нативно для 3DS GPU_RGBA8)
 static void upload_page_rgba8(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t *pixels, int row_stride, int src_x0, int src_y0, int copy_w, int copy_h, GLenum format) {
     uint32_t *dst = (uint32_t*)tex->data;
     for (int y = 0; y < pot_h; y++) {
@@ -208,7 +207,6 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     if (temp_pixels) free(temp_pixels);
 }
 
-// ИСПРАВЛЕНО: Байты пакуются как A, B, G, R
 void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels) {
     (void)target; (void)level;
     GLuint bound = active_bound_texture();

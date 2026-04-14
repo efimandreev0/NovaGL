@@ -21,8 +21,7 @@
 .constf EPSILON (0.0001, 0.0001, 0.0001, 0.0001)
 
 .proc main
-    mov r15, CONST2
-    mov r15.xyz, inPosition.xyz
+    mov r15, inPosition
 
     ; Transform to View Space
     dp4 r0.x, modelview[0], r15
