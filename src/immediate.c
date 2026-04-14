@@ -107,39 +107,58 @@ static void imm_draw_packed_run(GLenum mode, GPU_Primitive_t prim, uint8_t *base
 }
 
 static void imm_draw_tiled_batches(GLenum mode, GPU_Primitive_t prim, TexSlot *slot, uint8_t *base, int count) {
-    int prim_verts;
-    switch (mode) {
-        case GL_TRIANGLES: prim_verts = 3; break;
-        case GL_QUADS:     prim_verts = 4; break;
-        case GL_LINES:     prim_verts = 2; break;
-        default:           prim_verts = 0; break;
+    if (count <= 0) return;
+
+    // === STRIP / FAN ===
+    if (mode == GL_TRIANGLE_STRIP || mode == GL_TRIANGLE_FAN) {
+        int num_tris = (mode == GL_TRIANGLE_STRIP) ? (count - 2) : (count - 1);
+        if (num_tris <= 0) return;
+
+        for (int t = 0; t < num_tris; t++) {
+            int v0 = (mode == GL_TRIANGLE_STRIP) ? t : 0;
+            int v1 = t + 1;
+            int v2 = t + 2;
+
+            float u = *(float*)(base + v0 * 24 + 12);
+            float v = *(float*)(base + v0 * 24 + 16);
+            int page_index = imm_tiled_page_from_uv(slot, u, v);
+
+            uint8_t temp[3 * 24];
+            memcpy(temp + 0*24, base + v0*24, 24);
+            memcpy(temp + 1*24, base + v1*24, 24);
+            memcpy(temp + 2*24, base + v2*24, 24);
+
+            imm_remap_tiled_uvs(slot, page_index, temp, 3);
+
+            GSPGPU_FlushDataCache(temp, 3 * 24);
+            C3D_TexBind(0, &slot->pages[page_index].tex);
+            imm_draw_packed_run(mode, GPU_TRIANGLES, temp, 3);  // всегда triangles
+        }
+        return;
     }
 
-    if (prim_verts <= 0) {
+    // === List-режимы ===
+    int verts_per_prim = 0;
+    if (mode == GL_TRIANGLES) verts_per_prim = 3;
+    else if (mode == GL_QUADS) verts_per_prim = 4;
+    else if (mode == GL_LINES) verts_per_prim = 2;
+
+    if (verts_per_prim <= 0) {
         C3D_TexBind(0, &slot->pages[0].tex);
         GSPGPU_FlushDataCache(base, count * 24);
         imm_draw_packed_run(mode, prim, base, count);
         return;
     }
 
-    for (int prim_start = 0; prim_start + prim_verts <= count; ) {
-        int page_index = imm_tiled_page_for_primitive(slot, base, prim_start, prim_verts);
-        int run_start = prim_start;
-        int run_end = prim_start + prim_verts;
+    for (int i = 0; i + verts_per_prim <= count; i += verts_per_prim) {
+        int page_index = imm_tiled_page_for_primitive(slot, base, i, verts_per_prim);
 
-        while (run_end + prim_verts <= count &&
-               imm_tiled_page_for_primitive(slot, base, run_end, prim_verts) == page_index) {
-            run_end += prim_verts;
-        }
+        uint8_t *run_base = base + i * 24;
+        imm_remap_tiled_uvs(slot, page_index, run_base, verts_per_prim);
 
-        uint8_t *run_base = base + run_start * 24;
-        int run_count = run_end - run_start;
-        imm_remap_tiled_uvs(slot, page_index, run_base, run_count);
-        GSPGPU_FlushDataCache(run_base, run_count * 24);
+        GSPGPU_FlushDataCache(run_base, verts_per_prim * 24);
         C3D_TexBind(0, &slot->pages[page_index].tex);
-        imm_draw_packed_run(mode, prim, run_base, run_count);
-
-        prim_start = run_end;
+        imm_draw_packed_run(mode, prim, run_base, verts_per_prim);
     }
 }
 
