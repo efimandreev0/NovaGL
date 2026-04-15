@@ -421,15 +421,15 @@ static const struct {
 	{"vglWaitVblankStart", (void *)vglWaitVblankStart},
 #endif
 	// *egl
-	//{"eglBindAPI", (void *)eglBindAPI},
-	//{"eglGetDisplay", (void *)eglGetDisplay},
-	//{"eglGetError", (void *)eglGetError},
-	//{"eglGetProcAddress", (void *)eglGetProcAddress},
-	//{"eglGetSystemTimeFrequencyNV", (void *)eglGetSystemTimeFrequencyNV},
-	//{"eglGetSystemTimeNV", (void *)eglGetSystemTimeNV},
-	//{"eglQueryAPI", (void *)eglQueryAPI},
-	//{"eglSwapInterval", (void *)eglSwapInterval},
-	//{"eglSwapBuffers", (void *)eglSwapBuffers},
+	{"eglBindAPI", (void *)eglBindAPI},
+	{"eglGetDisplay", (void *)eglGetDisplay},
+	{"eglGetError", (void *)eglGetError},
+	{"eglGetProcAddress", (void *)eglGetProcAddress},
+	{"eglGetSystemTimeFrequencyNV", (void *)eglGetSystemTimeFrequencyNV},
+	{"eglGetSystemTimeNV", (void *)eglGetSystemTimeNV},
+	{"eglQueryAPI", (void *)eglQueryAPI},
+	{"eglSwapInterval", (void *)eglSwapInterval},
+	{"eglSwapBuffers", (void *)eglSwapBuffers},
 };
 
 static const size_t novagl_numproc = sizeof(novagl_proctable) / sizeof(*novagl_proctable);
