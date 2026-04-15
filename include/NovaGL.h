@@ -314,6 +314,32 @@ GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 #define GL_FRAMEBUFFER_COMPLETE           0x8CD5
 #define GL_TEXTURE_2D_TARGET              0x0DE1
 
+#define EGLBoolean    int32_t
+#define EGLDisplay    void*
+#define EGLenum       uint32_t
+#define EGLSurface    void*
+#define EGLContext    void*
+#define EGLConfig     void*
+#define EGLint        int32_t
+
+#define EGLint64      int64_t
+#define EGLuint64     uint64_t
+
+#define NativeDisplayType void*
+
+#define EGL_FALSE                             0
+#define EGL_TRUE                              1
+
+#define EGL_SUCCESS                                  0x3000
+#define EGL_BAD_PARAMETER                            0x300C
+#define EGL_OPENGL_ES_API                            0x30A0
+#define EGL_OPENGL_API                               0x30A2
+
+#define EGL_DEFAULT_DISPLAY ((NativeDisplayType)0)
+#define EGL_NO_CONTEXT      ((EGLContext)0)
+#define EGL_NO_DISPLAY      ((EGLDisplay)0)
+#define EGL_NO_SURFACE      ((EGLSurface)0)
+
 //API
 void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_size, int tex_staging_size);
 void nova_init(void);
@@ -601,6 +627,19 @@ void glVertex4iv(const GLint *v);
 void glVertex4s(GLshort x, GLshort y, GLshort z, GLshort w);
 void glVertex4sv(const GLshort *v);
 
+// egl*
+EGLBoolean eglBindAPI(EGLenum api);
+EGLDisplay eglGetDisplay(NativeDisplayType native_display);
+EGLint eglGetError(void);
+void (*eglGetProcAddress(char const *procname))(void);
+EGLuint64 eglGetSystemTimeFrequencyNV(void);
+EGLuint64 eglGetSystemTimeNV(void);
+EGLenum eglQueryAPI(void);
+EGLBoolean eglSwapInterval(EGLDisplay display, EGLint interval);
+EGLBoolean eglSwapBuffers(EGLDisplay display, EGLSurface surface);
+
+void *novaglGetProcAddress(const char *name);
+char *novaglGetFuncName(uint32_t func);
 #ifdef __cplusplus
 }
 #endif
