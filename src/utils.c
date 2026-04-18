@@ -285,7 +285,8 @@ uint32_t* rgb_to_rgba(const uint8_t *rgb, int w, int h) {
     uint32_t *out = (uint32_t*)malloc(w * h * 4);
     if (!out) return nullptr;
     for (int i = 0; i < w * h; i++) {
-        out[i] = (0xFF << 24) | (rgb[i*3+2] << 16) | (rgb[i*3+1] << 8) | rgb[i*3+0];
+        //this color channels in C3D is really fucking fuck. PICA200 is fucking puzzle.
+        out[i] = (rgb[i*3+0] << 24) | (rgb[i*3+1] << 16) | (rgb[i*3+2] << 8) | 0xFF;
     }
     return out;
 }

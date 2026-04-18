@@ -53,10 +53,10 @@ static void upload_page_rgba8(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t 
                 const uint8_t *row = pixels + (src_y0 + y) * row_stride;
                 if (format == GL_RGB) {
                     const uint8_t *px = row + (src_x0 + x) * 3;
-                    out_pixel = (0xFFu << 24) | ((uint32_t)px[2] << 16) | ((uint32_t)px[1] << 8) | (uint32_t)px[0];
+                    out_pixel = ((uint32_t)px[0] << 24) | ((uint32_t)px[1] << 16) | ((uint32_t)px[2] << 8) | 0xFFu;
                 } else {
                     const uint8_t *px = row + (src_x0 + x) * 4;
-                    out_pixel = ((uint32_t)px[3] << 24) | ((uint32_t)px[2] << 16) | ((uint32_t)px[1] << 8) | (uint32_t)px[0];
+                    out_pixel = ((uint32_t)px[0] << 24) | ((uint32_t)px[1] << 16) | ((uint32_t)px[2] << 8) | (uint32_t)px[3];
                 }
             }
             dst[morton_offset_local(x, y, pot_w, pot_h)] = out_pixel;
@@ -65,7 +65,7 @@ static void upload_page_rgba8(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t 
     C3D_TexFlush(tex);
 }
 
-static void upload_page_16bit(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t *pixels, int row_stride, int src_x0, int src_y0, int copy_w, int copy_h) {
+static void upload_page_16bit(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t *pixels, int row_stride, int src_x0, int src_y0, int copy_w, int copy_h, GLenum type) {
     uint16_t *dst = (uint16_t*)tex->data;
     for (int y = 0; y < pot_h; y++) {
         for (int x = 0; x < pot_w; x++) {
@@ -73,6 +73,29 @@ static void upload_page_16bit(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t 
             if (x < copy_w && y < copy_h) {
                 const uint8_t *row = pixels + (src_y0 + y) * row_stride;
                 memcpy(&val, row + (src_x0 + x) * 2, sizeof(uint16_t));
+
+                // Reverting channels for fucking PICA200
+                if (type == GL_UNSIGNED_SHORT_4_4_4_4) {
+                    // OpenGL (R4 G4 B4 A4) -> PICA200 (A4 B4 G4 R4)
+                    uint16_t r = (val >> 12) & 0xF;
+                    uint16_t g = (val >> 8)  & 0xF;
+                    uint16_t b = (val >> 4)  & 0xF;
+                    uint16_t a = val & 0xF;
+                    val = (a << 12) | (b << 8) | (g << 4) | r;
+                } else if (type == GL_UNSIGNED_SHORT_5_5_5_1) {
+                    // OpenGL (R5 G5 B5 A1) -> PICA200 (A1 B5 G5 R5)
+                    uint16_t r = (val >> 11) & 0x1F;
+                    uint16_t g = (val >> 6)  & 0x1F;
+                    uint16_t b = (val >> 1)  & 0x1F;
+                    uint16_t a = val & 0x1;
+                    val = (a << 15) | (b << 10) | (g << 5) | r;
+                } else if (type == GL_UNSIGNED_SHORT_5_6_5) {
+                    // OpenGL (R5 G6 B5) -> PICA200 (B5 G6 R5)
+                    uint16_t r = (val >> 11) & 0x1F;
+                    uint16_t g = (val >> 5)  & 0x3F;
+                    uint16_t b = val & 0x1F;
+                    val = (b << 11) | (g << 5) | r;
+                }
             }
             dst[morton_offset_local(x, y, pot_w, pot_h)] = val;
         }
@@ -102,7 +125,7 @@ static void upload_texture_pixels(C3D_Tex *tex, GPU_TEXCOLOR fmt, int pot_w, int
         upload_page_rgba8(tex, pot_w, pot_h, (const uint8_t*)pixels, row_stride, src_x0, src_y0, copy_w, copy_h, format);
     } else if (gpu_texfmt_bpp(fmt) == 2) {
         int row_stride = row_stride_bytes(width, 2, unpack_alignment);
-        upload_page_16bit(tex, pot_w, pot_h, (const uint8_t*)pixels, row_stride, src_x0, src_y0, copy_w, copy_h);
+        upload_page_16bit(tex, pot_w, pot_h, (const uint8_t*)pixels, row_stride, src_x0, src_y0, copy_w, copy_h, type);
     } else {
         int row_stride = row_stride_bytes(width, 1, unpack_alignment);
         upload_page_8bit(tex, pot_w, pot_h, (const uint8_t*)pixels, row_stride, src_x0, src_y0, copy_w, copy_h);
@@ -245,10 +268,10 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
                 uint32_t out_pixel;
                 if (format == GL_RGB) {
                     const uint8_t *px = row + src_x * 3;
-                    out_pixel = (0xFFu << 24) | ((uint32_t)px[2] << 16) | ((uint32_t)px[1] << 8) | (uint32_t)px[0];
+                    out_pixel = ((uint32_t)px[0] << 24) | ((uint32_t)px[1] << 16) | ((uint32_t)px[2] << 8) | 0xFFu;
                 } else {
                     const uint8_t *px = row + src_x * 4;
-                    out_pixel = ((uint32_t)px[3] << 24) | ((uint32_t)px[2] << 16) | ((uint32_t)px[1] << 8) | (uint32_t)px[0];
+                    out_pixel = ((uint32_t)px[0] << 24) | ((uint32_t)px[1] << 16) | ((uint32_t)px[2] << 8) | (uint32_t)px[3];
                 }
                 tex_data[morton_offset_local(dx, dy, slot->pot_w, slot->pot_h)] = out_pixel;
             }
@@ -268,13 +291,34 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
                 if (src_x >= width) src_x = width - 1;
                 int dx = real_xoffset + x;
                 if (dx < 0 || dy < 0 || dx >= slot->pot_w || dy >= slot->pot_h) continue;
+
                 uint16_t val;
                 memcpy(&val, row + src_x * 2, sizeof(uint16_t));
+
+                // Переворачиваем каналы под PICA200
+                if (type == GL_UNSIGNED_SHORT_4_4_4_4) {
+                    uint16_t r = (val >> 12) & 0xF;
+                    uint16_t g = (val >> 8)  & 0xF;
+                    uint16_t b = (val >> 4)  & 0xF;
+                    uint16_t a = val & 0xF;
+                    val = (a << 12) | (b << 8) | (g << 4) | r;
+                } else if (type == GL_UNSIGNED_SHORT_5_5_5_1) {
+                    uint16_t r = (val >> 11) & 0x1F;
+                    uint16_t g = (val >> 6)  & 0x1F;
+                    uint16_t b = (val >> 1)  & 0x1F;
+                    uint16_t a = val & 0x1;
+                    val = (a << 15) | (b << 10) | (g << 5) | r;
+                } else if (type == GL_UNSIGNED_SHORT_5_6_5) {
+                    uint16_t r = (val >> 11) & 0x1F;
+                    uint16_t g = (val >> 5)  & 0x3F;
+                    uint16_t b = val & 0x1F;
+                    val = (b << 11) | (g << 5) | r;
+                }
+
                 tex_data[morton_offset_local(dx, dy, slot->pot_w, slot->pot_h)] = val;
             }
         }
         C3D_TexFlush(&slot->tex);
-
     } else {
         int row_stride = row_stride_bytes(width, 1, g.unpack_alignment);
         uint8_t *tex_data = (uint8_t*)slot->tex.data;
@@ -411,9 +455,10 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
                 tex_data[morton_offset_local(dst_x, dst_y, slot->pot_w, slot->pot_h)] = pixel;
             } else if (gpu_texfmt_bpp(slot->fmt) == 2) {
                 uint16_t* tex16 = (uint16_t*)slot->tex.data;
-                uint8_t r = pixel & 0xFF;
-                uint8_t g_c = (pixel >> 8) & 0xFF;
-                uint8_t b = (pixel >> 16) & 0xFF;
+                // Bruh, C3D-framebuffer have 0xRRGGBBAA format...
+                uint8_t r   = (pixel >> 24) & 0xFF;
+                uint8_t g_c = (pixel >> 16) & 0xFF;
+                uint8_t b   = (pixel >> 8)  & 0xFF;
                 tex16[morton_offset_local(dst_x, dst_y, slot->pot_w, slot->pot_h)] =
                     ((r >> 3) << 11) | ((g_c >> 2) << 5) | (b >> 3);
             }
