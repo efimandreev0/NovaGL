@@ -6,7 +6,7 @@
 #define NOVAGL_UTILS_H
 #include <stdint.h>
 #include "context.h"
-unsigned int next_pow2(unsigned int v);
+unsigned int nova_next_pow2(unsigned int v);
 
 void* linear_alloc_ring(void *base, int *offset, int size, int capacity);
 

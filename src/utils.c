@@ -4,7 +4,7 @@
 #include "NovaGL.h"
 #include "utils.h"
 
-unsigned int next_pow2(unsigned int v) {
+unsigned int nova_next_pow2(unsigned int v) {
     v--;
     v |= v >> 1; v |= v >> 2; v |= v >> 4;
     v |= v >> 8; v |= v >> 16;
@@ -303,10 +303,10 @@ void downscale_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src_h, i
             uint32_t p10 = src[sy  * src_w + sx1];
             uint32_t p01 = src[sy1 * src_w + sx];
             uint32_t p11 = src[sy1 * src_w + sx1];
-            uint8_t r = (uint8_t)(((p00>>0)&0xFF) + ((p10>>0)&0xFF) + ((p01>>0)&0xFF) + ((p11>>0)&0xFF)) / 4;
-            uint8_t g_ = (uint8_t)(((p00>>8)&0xFF) + ((p10>>8)&0xFF) + ((p01>>8)&0xFF) + ((p11>>8)&0xFF)) / 4;
-            uint8_t b = (uint8_t)(((p00>>16)&0xFF) + ((p10>>16)&0xFF) + ((p01>>16)&0xFF) + ((p11>>16)&0xFF)) / 4;
-            uint8_t a = (uint8_t)(((p00>>24)&0xFF) + ((p10>>24)&0xFF) + ((p01>>24)&0xFF) + ((p11>>24)&0xFF)) / 4;
+            uint8_t r  = (uint8_t)((((p00>> 0)&0xFF) + ((p10>> 0)&0xFF) + ((p01>> 0)&0xFF) + ((p11>> 0)&0xFF)) / 4);
+            uint8_t g_ = (uint8_t)((((p00>> 8)&0xFF) + ((p10>> 8)&0xFF) + ((p01>> 8)&0xFF) + ((p11>> 8)&0xFF)) / 4);
+            uint8_t b  = (uint8_t)((((p00>>16)&0xFF) + ((p10>>16)&0xFF) + ((p01>>16)&0xFF) + ((p11>>16)&0xFF)) / 4);
+            uint8_t a  = (uint8_t)((((p00>>24)&0xFF) + ((p10>>24)&0xFF) + ((p01>>24)&0xFF) + ((p11>>24)&0xFF)) / 4);
             dst[y * dst_w + x] = ((uint32_t)a << 24) | ((uint32_t)b << 16) | ((uint32_t)g_ << 8) | r;
         }
     }
@@ -469,6 +469,11 @@ void apply_gpu_state(void) {
                 int op2 = get_tev_op_rgb(g.tex_env_operand2_rgb[unit]);
 
                 switch(g.tex_env_combine_rgb[unit]) {
+                    case GL_DOT3_RGBA_ARB:
+                        C3D_TexEnvSrc(env, C3D_Both, s0, s1, (GPU_TEVSRC)0);
+                        C3D_TexEnvOpRgb(env, op0, op1, 0);
+                        C3D_TexEnvFunc(env, C3D_Both, GPU_DOT3_RGBA);
+                        break;
                     case GL_REPLACE:
                         C3D_TexEnvSrc(env, C3D_Both, s0, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
                         C3D_TexEnvOpRgb(env, op0, 0, 0);

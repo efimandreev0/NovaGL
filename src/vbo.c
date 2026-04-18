@@ -328,3 +328,7 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
 
     GSPGPU_FlushDataCache(slot->data, (u32)slot->size);
 }
+
+void glReadBuffer(int x) {
+    printf("[Nova]: Trying to read buffer");
+}

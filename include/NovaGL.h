@@ -109,6 +109,7 @@ GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 #define GL_RESCALE_NORMAL           0x803A
 #define GL_NORMALIZE                0x0BA1
 #define GL_COLOR_MATERIAL           0x0B57
+#define GL_KEEP                     0x1E00
 
 #define GL_FOG_MODE                 0x0B65
 #define GL_FOG_DENSITY              0x0B62
@@ -152,6 +153,7 @@ GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 #define GL_LINEAR_MIPMAP_NEAREST    0x2701
 #define GL_NEAREST_MIPMAP_LINEAR    0x2702
 #define GL_LINEAR_MIPMAP_LINEAR     0x2703
+#define GL_CLAMP                    0x2900
 #define GL_REPEAT                   0x2901
 #define GL_CLAMP_TO_EDGE            0x812F
 #define GL_MIRRORED_REPEAT          0x8370
@@ -313,6 +315,13 @@ GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 #define GL_DRAW_FRAMEBUFFER               0x8CA9
 #define GL_FRAMEBUFFER_COMPLETE           0x8CD5
 #define GL_TEXTURE_2D_TARGET              0x0DE1
+
+#define GL_COMBINE_ARB                    GL_COMBINE_RGB
+#define GL_COMBINE_RGB_ARB                GL_COMBINE_RGB
+#define GL_SOURCE0_RGB_ARB                GL_SOURCE0_RGB
+#define GL_SOURCE1_RGB_ARB                GL_SOURCE1_RGB
+#define GL_PRIMARY_COLOR_ARB              GL_PRIMARY_COLOR
+#define GL_DOT3_RGBA_ARB                  0x86AF
 
 #define EGLBoolean    int32_t
 #define EGLDisplay    void*
@@ -627,6 +636,9 @@ void glVertex4iv(const GLint *v);
 void glVertex4s(GLshort x, GLshort y, GLshort z, GLshort w);
 void glVertex4sv(const GLshort *v);
 
+void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height);
+void glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border);
+void glReadBuffer(int x);
 // egl*
 EGLBoolean eglBindAPI(EGLenum api);
 EGLDisplay eglGetDisplay(NativeDisplayType native_display);

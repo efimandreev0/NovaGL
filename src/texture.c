@@ -25,8 +25,8 @@ static void apply_slot_params_to_tex(C3D_Tex *tex, const TexSlot *slot) {
     GPU_TEXTURE_FILTER_PARAM min_f = (slot->min_filter == GL_LINEAR || slot->min_filter == GL_LINEAR_MIPMAP_LINEAR || slot->min_filter == GL_LINEAR_MIPMAP_NEAREST) ? GPU_LINEAR : GPU_NEAREST;
     C3D_TexSetFilter(tex, mag, min_f);
 
-    GPU_TEXTURE_WRAP_PARAM ws = (slot->wrap_s == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE : ((slot->wrap_s == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
-    GPU_TEXTURE_WRAP_PARAM wt = (slot->wrap_t == GL_CLAMP_TO_EDGE) ? GPU_CLAMP_TO_EDGE : ((slot->wrap_t == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
+    GPU_TEXTURE_WRAP_PARAM ws = (slot->wrap_s == GL_CLAMP_TO_EDGE || slot->wrap_s == GL_CLAMP) ? GPU_CLAMP_TO_EDGE : ((slot->wrap_s == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
+    GPU_TEXTURE_WRAP_PARAM wt = (slot->wrap_t == GL_CLAMP_TO_EDGE || slot->wrap_t == GL_CLAMP) ? GPU_CLAMP_TO_EDGE : ((slot->wrap_t == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
     C3D_TexSetWrap(tex, ws, wt);
 }
 
@@ -171,8 +171,8 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     slot->width = target_w;
     slot->height = target_h;
 
-    int pot_w = next_pow2(target_w);
-    int pot_h = next_pow2(target_h);
+    int pot_w = nova_next_pow2(target_w);
+    int pot_h = nova_next_pow2(target_h);
     if (pot_w < 8) pot_w = 8;
     if (pot_h < 8) pot_h = 8;
 
@@ -368,6 +368,65 @@ void glTexImage1D(GLenum target, GLint level, GLint internalformat, GLsizei widt
 void glTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const GLvoid *pixels) {
     (void)target; (void)level;
     glTexSubImage2D(GL_TEXTURE_2D, level, xoffset, 0, width, 1, format, type, pixels);
+}
+void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
+    (void)level;
+    if (target != GL_TEXTURE_2D) return;
+
+    GLuint bound = active_bound_texture();
+    if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return;
+    TexSlot *slot = &g.textures[bound];
+    if (!slot->allocated || !g.current_target) return;
+
+    C3D_FrameBuf* fb = &g.current_target->frameBuf;
+    uint32_t* fb_data = (uint32_t*)fb->colorBuf;
+    if (!fb_data) return;
+
+    int fb_w = fb->width;
+    int fb_h = fb->height;
+
+    uint32_t* tex_data = (uint32_t*)slot->tex.data;
+    if (!tex_data) return;
+
+    gspWaitForP3D();
+
+    for (int cy = 0; cy < height; cy++) {
+        for (int cx = 0; cx < width; cx++) {
+            int logical_x = x + cx;
+            int logical_y = y + cy;
+
+            int phys_x = logical_y;
+            int phys_y = logical_x;
+
+            if (phys_x < 0 || phys_x >= fb_w || phys_y < 0 || phys_y >= fb_h) continue;
+
+            int dst_x = xoffset + cx;
+            int dst_y = yoffset + cy;
+
+            if (dst_x < 0 || dst_x >= slot->pot_w || dst_y < 0 || dst_y >= slot->pot_h) continue;
+
+            uint32_t pixel = fb_data[morton_offset_local(phys_x, phys_y, fb_w, fb_h)];
+
+            if (slot->fmt == GPU_RGBA8) {
+                tex_data[morton_offset_local(dst_x, dst_y, slot->pot_w, slot->pot_h)] = pixel;
+            } else if (gpu_texfmt_bpp(slot->fmt) == 2) {
+                uint16_t* tex16 = (uint16_t*)slot->tex.data;
+                uint8_t r = pixel & 0xFF;
+                uint8_t g_c = (pixel >> 8) & 0xFF;
+                uint8_t b = (pixel >> 16) & 0xFF;
+                tex16[morton_offset_local(dst_x, dst_y, slot->pot_w, slot->pot_h)] =
+                    ((r >> 3) << 11) | ((g_c >> 2) << 5) | (b >> 3);
+            }
+        }
+    }
+
+    C3D_TexFlush(&slot->tex);
+}
+
+void glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border) {
+    glTexImage2D(target, level, internalformat, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+
+    glCopyTexSubImage2D(target, level, 0, 0, x, y, width, height);
 }
 void glTexGend(GLenum coord, GLenum pname, GLdouble param) { (void)coord; (void)pname; (void)param; }
 void glTexGendv(GLenum coord, GLenum pname, const GLdouble *params) { (void)coord; (void)pname; (void)params; }
