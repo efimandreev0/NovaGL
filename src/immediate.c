@@ -18,7 +18,6 @@ static struct {
     int mapped_max_verts;
     int start_offset;
 
-    GLfloat current_color[4];
     GLfloat current_texcoord[4]; // [s, t, r, q]
 } imm;
 
@@ -27,11 +26,6 @@ void glBegin(GLenum mode) {
     imm.mode = mode;
     imm.in_begin = 1;
     imm.vertex_count = 0;
-
-    imm.current_color[0] = g.cur_color[0];
-    imm.current_color[1] = g.cur_color[1];
-    imm.current_color[2] = g.cur_color[2];
-    imm.current_color[3] = g.cur_color[3];
 
     imm.current_texcoord[0] = 0.0f;
     imm.current_texcoord[1] = 0.0f;
@@ -93,10 +87,12 @@ static inline void add_vertex(GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
     out_f[3] = imm.current_texcoord[0]; // s
     out_f[4] = imm.current_texcoord[1]; // t
 
-    out_c[0] = (uint8_t)(imm.current_color[0] * 255.0f);
-    out_c[1] = (uint8_t)(imm.current_color[1] * 255.0f);
-    out_c[2] = (uint8_t)(imm.current_color[2] * 255.0f);
-    out_c[3] = (uint8_t)(imm.current_color[3] * 255.0f);
+    // Read color from global state directly so glColor* calls between vertices
+    // take effect within the current glBegin/glEnd block.
+    out_c[0] = (uint8_t)(g.cur_color[0] * 255.0f);
+    out_c[1] = (uint8_t)(g.cur_color[1] * 255.0f);
+    out_c[2] = (uint8_t)(g.cur_color[2] * 255.0f);
+    out_c[3] = (uint8_t)(g.cur_color[3] * 255.0f);
 
     imm.vertex_count++;
 }
@@ -107,7 +103,7 @@ void glArrayElement(GLint i) {
     if (g.va_color.enabled && g.va_color.pointer) {
         float c[4] = {0,0,0,1};
         read_vertex_attrib_float(c, (const uint8_t*)g.va_color.pointer + i * calc_stride(g.va_color.stride, g.va_color.size, g.va_color.type), g.va_color.size, g.va_color.type);
-        imm.current_color[0] = c[0]; imm.current_color[1] = c[1]; imm.current_color[2] = c[2]; imm.current_color[3] = c[3];
+        g.cur_color[0] = c[0]; g.cur_color[1] = c[1]; g.cur_color[2] = c[2]; g.cur_color[3] = c[3];
     }
 
     if (g.va_texcoord.enabled && g.va_texcoord.pointer) {

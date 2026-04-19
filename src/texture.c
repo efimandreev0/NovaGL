@@ -145,6 +145,8 @@ void glGenTextures(GLsizei n, GLuint *textures) {
 }
 
 void glDeleteTextures(GLsizei n, const GLuint *textures) {
+
+    gspWaitForP3D();
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = textures[i];
         if (id > 0 && id < NOVA_MAX_TEXTURES && g.textures[id].in_use) {

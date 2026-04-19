@@ -16,6 +16,8 @@ void* linear_alloc_ring(void *base, int *offset, int size, int capacity) {
 
     if (*offset + size > capacity) {
         C3D_FrameSplit(0);
+
+        gspWaitForP3D();
         *offset = 0; // wrap
     }
 
