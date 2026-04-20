@@ -22,6 +22,8 @@ typedef struct {
     int         wrap_s;
     int         wrap_t;
     int         in_use;
+
+    int         is_solid_optimized; //if texture have only 1 color -> creating 1x1 stub.
 } TexSlot;
 
 typedef struct {

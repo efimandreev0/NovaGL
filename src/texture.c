@@ -245,6 +245,66 @@ static void init_texture_defaults(TexSlot *slot) {
     slot->wrap_t = GL_REPEAT;
 }
 
+static int is_texture_solid(const void* pixels, int width, int height, GLenum format, GLenum type, int alignment) {
+    if (!pixels || width <= 0 || height <= 0) return 0;
+
+    int bpp = 4;
+    if (type == GL_UNSIGNED_SHORT_4_4_4_4 || type == GL_UNSIGNED_SHORT_5_5_5_1 || type == GL_UNSIGNED_SHORT_5_6_5) bpp = 2;
+    else if (format == GL_LUMINANCE || format == GL_ALPHA) bpp = 1;
+    else if (format == GL_RGB && type == GL_UNSIGNED_BYTE) bpp = 3;
+
+    int stride = row_stride_bytes(width, bpp, alignment);
+    const uint8_t* p8 = (const uint8_t*)pixels;
+
+    uint8_t first_px[4] = {0};
+    memcpy(first_px, p8, bpp);
+
+    for (int y = 0; y < height; y++) {
+        const uint8_t* row = p8 + y * stride;
+        for (int x = 0; x < width; x++) {
+            if (memcmp(first_px, row + x * bpp, bpp) != 0) {
+                return 0; // Tex isn't solid
+            }
+        }
+    }
+    return 1;
+}
+
+static void upload_solid_texture(C3D_Tex *tex, GPU_TEXCOLOR fmt, const GLvoid *pixels, GLenum format, GLenum type) {
+    const uint8_t *px = (const uint8_t*)pixels; // Only 1st px
+    int num_pixels = tex->width * tex->height;
+
+    if (fmt == GPU_RGBA8) {
+        uint32_t out_pixel = 0;
+        if (format == GL_RGB) {
+            out_pixel = ((uint32_t)px[0] << 24) | ((uint32_t)px[1] << 16) | ((uint32_t)px[2] << 8) | 0xFFu;
+        } else {
+            out_pixel = ((uint32_t)px[0] << 24) | ((uint32_t)px[1] << 16) | ((uint32_t)px[2] << 8) | (uint32_t)px[3];
+        }
+        uint32_t *dst = (uint32_t*)tex->data;
+        for (int i = 0; i < num_pixels; i++) dst[i] = out_pixel;
+    } else if (gpu_texfmt_bpp(fmt) == 2) {
+        uint16_t val;
+        memcpy(&val, px, sizeof(uint16_t));
+        if (type == GL_UNSIGNED_SHORT_4_4_4_4) {
+            uint16_t r = (val >> 12) & 0xF; uint16_t g = (val >> 8) & 0xF; uint16_t b = (val >> 4) & 0xF; uint16_t a = val & 0xF;
+            val = (a << 12) | (b << 8) | (g << 4) | r;
+        } else if (type == GL_UNSIGNED_SHORT_5_5_5_1) {
+            uint16_t r = (val >> 11) & 0x1F; uint16_t g = (val >> 6) & 0x1F; uint16_t b = (val >> 1) & 0x1F; uint16_t a = val & 0x1;
+            val = (a << 15) | (b << 10) | (g << 5) | r;
+        } else if (type == GL_UNSIGNED_SHORT_5_6_5) {
+            uint16_t r = (val >> 11) & 0x1F; uint16_t g = (val >> 5) & 0x3F; uint16_t b = val & 0x1F;
+            val = (b << 11) | (g << 5) | r;
+        }
+        uint16_t *dst = (uint16_t*)tex->data;
+        for (int i = 0; i < num_pixels; i++) dst[i] = val;
+    } else {
+        uint8_t val = px[0];
+        memset(tex->data, val, num_pixels);
+    }
+    C3D_TexFlush(tex);
+}
+
 static void upload_page_rgba8(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t *pixels, int row_stride, int src_x0, int src_y0, int copy_w, int copy_h, GLenum format) {
     uint32_t *dst = (uint32_t*)tex->data;
     for (int y = 0; y < pot_h; y++) {
@@ -374,33 +434,44 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     slot->orig_width = width;
     slot->orig_height = height;
 
+    // ПРОВЕРЯЕМ: Сплошная ли текстура?
+    int is_solid = is_texture_solid(pixels, width, height, format, type, g.unpack_alignment);
+
     int target_w = width;
     int target_h = height;
 
-    if (width > 1024 || height > 1024) {
-        float scale_w = 1024.0f / width;
-        float scale_h = 1024.0f / height;
-        float scale = (scale_w < scale_h) ? scale_w : scale_h;
-        target_w = (int)(width * scale);
-        target_h = (int)(height * scale);
-        if (target_w < 1) target_w = 1;
-        if (target_h < 1) target_h = 1;
-    }
-
-    if (slot->allocated) {
-        if (slot->fmt != gpu_fmt || slot->width != target_w || slot->height != target_h) {
-            free_texture_storage(slot);
+    if (is_solid) {
+        target_w = 8; // Сжимаем до аппаратного минимума 3DS
+        target_h = 8;
+        slot->is_solid_optimized = 1;
+    } else {
+        slot->is_solid_optimized = 0;
+        if (width > 1024 || height > 1024) {
+            float scale_w = 1024.0f / width;
+            float scale_h = 1024.0f / height;
+            float scale = (scale_w < scale_h) ? scale_w : scale_h;
+            target_w = (int)(width * scale);
+            target_h = (int)(height * scale);
+            if (target_w < 1) target_w = 1;
+            if (target_h < 1) target_h = 1;
         }
     }
-
-    slot->fmt = gpu_fmt;
-    slot->width = target_w;
-    slot->height = target_h;
 
     int pot_w = nova_next_pow2(target_w);
     int pot_h = nova_next_pow2(target_h);
     if (pot_w < 8) pot_w = 8;
     if (pot_h < 8) pot_h = 8;
+
+    if (slot->allocated) {
+        if (slot->fmt != gpu_fmt || slot->pot_w != pot_w || slot->pot_h != pot_h) {
+            free_texture_storage(slot);
+        }
+    }
+
+    slot->fmt = gpu_fmt;
+    // Оставляем логический размер оригинальным, чтобы glGet и UV-координаты работали корректно
+    slot->width = is_solid ? width : target_w;
+    slot->height = is_solid ? height : target_h;
 
     if (!slot->allocated) {
         if (!C3D_TexInit(&slot->tex, pot_w, pot_h, gpu_fmt)) { g.last_error = GL_OUT_OF_MEMORY; return; }
@@ -411,26 +482,27 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     slot->pot_h = pot_h;
     apply_slot_params_to_tex(&slot->tex, slot);
 
-    const GLvoid *upload_pixels = pixels;
-    void *temp_pixels = NULL;
+    // УМНАЯ ЗАГРУЗКА
+    if (is_solid) {
+        upload_solid_texture(&slot->tex, gpu_fmt, pixels, format, type);
+    } else {
+        const GLvoid *upload_pixels = pixels;
+        void *temp_pixels = NULL;
 
-    if ((width > 1024 || height > 1024) && pixels) {
-        int bpp = gpu_texfmt_bpp(gpu_fmt);
-        temp_pixels = malloc(target_w * target_h * bpp);
-        if (temp_pixels) {
-            if (gpu_fmt == GPU_RGBA8) {
-                downscale_rgba8((uint32_t*)temp_pixels, (const uint32_t*)pixels, width, height, target_w, target_h);
-            } else if (bpp == 2) {
-                downscale_16bit((uint16_t*)temp_pixels, (const uint16_t*)pixels, width, height, target_w, target_h);
-            } else {
-                downscale_8bit((uint8_t*)temp_pixels, (const uint8_t*)pixels, width, height, target_w, target_h);
+        if ((width > 1024 || height > 1024) && pixels) {
+            int bpp = gpu_texfmt_bpp(gpu_fmt);
+            temp_pixels = malloc(target_w * target_h * bpp);
+            if (temp_pixels) {
+                if (gpu_fmt == GPU_RGBA8) downscale_rgba8((uint32_t*)temp_pixels, (const uint32_t*)pixels, width, height, target_w, target_h);
+                else if (bpp == 2)        downscale_16bit((uint16_t*)temp_pixels, (const uint16_t*)pixels, width, height, target_w, target_h);
+                else                      downscale_8bit((uint8_t*)temp_pixels, (const uint8_t*)pixels, width, height, target_w, target_h);
+                upload_pixels = temp_pixels;
             }
-            upload_pixels = temp_pixels;
         }
-    }
 
-    upload_texture_pixels(&slot->tex, gpu_fmt, pot_w, pot_h, upload_pixels, target_w, target_h, 0, 0, target_w, target_h, format, type, g.unpack_alignment);
-    if (temp_pixels) free(temp_pixels);
+        upload_texture_pixels(&slot->tex, gpu_fmt, pot_w, pot_h, upload_pixels, target_w, target_h, 0, 0, target_w, target_h, format, type, g.unpack_alignment);
+        if (temp_pixels) free(temp_pixels);
+    }
 }
 
 void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels) {
@@ -440,6 +512,49 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
     TexSlot *slot = &g.textures[bound];
     if (!slot->allocated || !pixels) return;
 
+    // If game wanna draw on full tex -> uncompressing it.
+    if (slot->is_solid_optimized) {
+        C3D_Tex old_tex = slot->tex;
+
+        int full_target_w = slot->orig_width;
+        int full_target_h = slot->orig_height;
+        if (full_target_w > 1024 || full_target_h > 1024) {
+            float sw = 1024.0f / full_target_w;
+            float sh = 1024.0f / full_target_h;
+            float s = (sw < sh) ? sw : sh;
+            full_target_w = (int)(full_target_w * s);
+            full_target_h = (int)(full_target_h * s);
+        }
+
+        int full_pot_w = nova_next_pow2(full_target_w);
+        int full_pot_h = nova_next_pow2(full_target_h);
+        if (full_pot_w < 8) full_pot_w = 8;
+        if (full_pot_h < 8) full_pot_h = 8;
+
+        C3D_Tex new_tex;
+        if (C3D_TexInit(&new_tex, full_pot_w, full_pot_h, slot->fmt)) {
+            int bpp = gpu_texfmt_bpp(slot->fmt);
+            if (bpp == 4) {
+                uint32_t col = ((uint32_t*)old_tex.data)[0];
+                for (int i = 0; i < full_pot_w * full_pot_h; i++) ((uint32_t*)new_tex.data)[i] = col;
+            } else if (bpp == 2) {
+                uint16_t col = ((uint16_t*)old_tex.data)[0];
+                for (int i = 0; i < full_pot_w * full_pot_h; i++) ((uint16_t*)new_tex.data)[i] = col;
+            } else {
+                uint8_t col = ((uint8_t*)old_tex.data)[0];
+                memset(new_tex.data, col, full_pot_w * full_pot_h);
+            }
+
+            C3D_TexDelete(&old_tex);
+            slot->tex = new_tex;
+            slot->pot_w = full_pot_w;
+            slot->pot_h = full_pot_h;
+            slot->width = full_target_w;
+            slot->height = full_target_h;
+            slot->is_solid_optimized = 0;
+            apply_slot_params_to_tex(&slot->tex, slot);
+        }
+    }
     float scale_x = slot->orig_width > 0 ? ((float)slot->width / (float)slot->orig_width) : 1.0f;
     float scale_y = slot->orig_height > 0 ? ((float)slot->height / (float)slot->orig_height) : 1.0f;
     float step_x = slot->width > 0 ? ((float)slot->orig_width / (float)slot->width) : 1.0f;
