@@ -354,7 +354,7 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
 void nova_init(void);
 void nova_fini(void);
 void novaSwapBuffers(void);
-void nova_set_render_target(int is_right_eye);
+void nova_set_render_target(int target_mode); // 0 = Top Left, 1 = Top Right, 2 = Bottom
 void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements, GLenum type, const GLvoid *indices);
 
 // ===[ Persistent texture cache ]===

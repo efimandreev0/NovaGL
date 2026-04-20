@@ -27,9 +27,15 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
 
     C3D_Init(cmd_buf_size);
 
+    gfxSet3D(true);
     g.render_target_top = C3D_RenderTargetCreate(NOVA_SCREEN_H, NOVA_SCREEN_W,
                                                   GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
     C3D_RenderTargetSetOutput(g.render_target_top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+
+    g.render_target_top_right = C3D_RenderTargetCreate(NOVA_SCREEN_H, NOVA_SCREEN_W,
+                                              GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+    C3D_RenderTargetSetOutput(g.render_target_top_right, GFX_TOP, GFX_RIGHT, DISPLAY_TRANSFER_FLAGS);
+
     g.current_target = g.render_target_top;
 
     g.render_target_bot = C3D_RenderTargetCreate(NOVA_SCREEN_BOTTOM_W, NOVA_SCREEN_BOTTOM_H,
@@ -172,9 +178,7 @@ void nova_fini(void) {
         g.tex_staging_size = 0;
     }
     for (int i = 0; i < NOVA_MAX_TEXTURES; i++) {
-        if (g.textures[i].allocated) {
-            C3D_TexDelete(&g.textures[i].tex);
-        }
+        if (g.textures[i].allocated) C3D_TexDelete(&g.textures[i].tex);
     }
     for (int i = 0; i < NOVA_MAX_VBOS; i++) {
         if (g.vbos[i].allocated && g.vbos[i].data) linearFree(g.vbos[i].data);
@@ -190,15 +194,25 @@ void nova_fini(void) {
         shaderProgramFree(&g.shader_program);
         DVLB_Free(g.shader_dvlb);
     }
+
     C3D_RenderTargetDelete(g.render_target_top);
+    C3D_RenderTargetDelete(g.render_target_top_right); // <- Добавлено
     C3D_RenderTargetDelete(g.render_target_bot);
     C3D_Fini();
     g.initialized = 0;
 }
 
-void nova_set_render_target(int is_right_eye) {
-    C3D_FrameDrawOn(is_right_eye ? g.render_target_bot : g.render_target_top);
-    g.current_target = is_right_eye ? g.render_target_bot : g.render_target_top;
+void nova_set_render_target(int target_mode) {
+    if (target_mode == 1) {
+        C3D_FrameDrawOn(g.render_target_top_right);
+        g.current_target = g.render_target_top_right;
+    } else if (target_mode == 2) {
+        C3D_FrameDrawOn(g.render_target_bot);
+        g.current_target = g.render_target_bot;
+    } else {
+        C3D_FrameDrawOn(g.render_target_top);
+        g.current_target = g.render_target_top;
+    }
 }
 
 static int primitive_vertex_count(GLenum mode) {

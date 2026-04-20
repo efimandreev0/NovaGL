@@ -149,6 +149,7 @@ int nova_texture_cache_load(uint32_t hash, int* out_orig_w, int* out_orig_h) {
     slot->orig_width = (int) hdr.orig_w;
     slot->orig_height = (int) hdr.orig_h;
 
+    slot->is_solid_optimized = (slot->pot_w == 8 && slot->pot_h == 8 && (slot->orig_width > 8 || slot->orig_height > 8));
     // Slurp the pre-swizzled payload straight into the C3D linear buffer.
     size_t got = fread(slot->tex.data, 1, hdr.data_size, f);
     fclose(f);
@@ -254,17 +255,48 @@ static int is_texture_solid(const void* pixels, int width, int height, GLenum fo
     else if (format == GL_RGB && type == GL_UNSIGNED_BYTE) bpp = 3;
 
     int stride = row_stride_bytes(width, bpp, alignment);
-    const uint8_t* p8 = (const uint8_t*)pixels;
 
+    // БЫСТРЫЙ ПУТЬ: Если данные лежат плотно (без паддинга), читаем целыми массивами
+    if (bpp == 4 && stride == width * 4) {
+        const uint32_t* p32 = (const uint32_t*)pixels;
+        uint32_t first = p32[0];
+        int total = width * height;
+        for (int i = 1; i < total; i++) {
+            if (p32[i] != first) return 0; // Нашли другой пиксель - отмена
+        }
+        return 1; // Текстура сплошная!
+    } else if (bpp == 2 && stride == width * 2) {
+        const uint16_t* p16 = (const uint16_t*)pixels;
+        uint16_t first = p16[0];
+        int total = width * height;
+        for (int i = 1; i < total; i++) {
+            if (p16[i] != first) return 0;
+        }
+        return 1;
+    } else if (bpp == 1 && stride == width) {
+        const uint8_t* p8 = (const uint8_t*)pixels;
+        uint8_t first = p8[0];
+        int total = width * height;
+        for (int i = 1; i < total; i++) {
+            if (p8[i] != first) return 0;
+        }
+        return 1;
+    }
+
+    // МЕДЛЕННЫЙ ПУТЬ: Только для экзотических 24-битных RGB текстур или если есть паддинг
+    const uint8_t* p8 = (const uint8_t*)pixels;
     uint8_t first_px[4] = {0};
     memcpy(first_px, p8, bpp);
 
     for (int y = 0; y < height; y++) {
         const uint8_t* row = p8 + y * stride;
-        for (int x = 0; x < width; x++) {
-            if (memcmp(first_px, row + x * bpp, bpp) != 0) {
-                return 0; // Tex isn't solid
-            }
+        int start_x = (y == 0) ? 1 : 0;
+        for (int x = start_x; x < width; x++) {
+            const uint8_t* px = row + x * bpp;
+            if (px[0] != first_px[0]) return 0;
+            if (bpp > 1 && px[1] != first_px[1]) return 0;
+            if (bpp > 2 && px[2] != first_px[2]) return 0;
+            if (bpp > 3 && px[3] != first_px[3]) return 0;
         }
     }
     return 1;
@@ -533,6 +565,7 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
 
         C3D_Tex new_tex;
         if (C3D_TexInit(&new_tex, full_pot_w, full_pot_h, slot->fmt)) {
+            // Заливаем новую текстуру старым цветом
             int bpp = gpu_texfmt_bpp(slot->fmt);
             if (bpp == 4) {
                 uint32_t col = ((uint32_t*)old_tex.data)[0];
@@ -545,7 +578,10 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
                 memset(new_tex.data, col, full_pot_w * full_pot_h);
             }
 
+            // ВАЖНО: Ждем пока GPU закончит работу, чтобы не удалить память во время рендера
+            gspWaitForP3D();
             C3D_TexDelete(&old_tex);
+
             slot->tex = new_tex;
             slot->pot_w = full_pot_w;
             slot->pot_h = full_pot_h;
@@ -555,6 +591,7 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
             apply_slot_params_to_tex(&slot->tex, slot);
         }
     }
+
     float scale_x = slot->orig_width > 0 ? ((float)slot->width / (float)slot->orig_width) : 1.0f;
     float scale_y = slot->orig_height > 0 ? ((float)slot->height / (float)slot->orig_height) : 1.0f;
     float step_x = slot->width > 0 ? ((float)slot->orig_width / (float)slot->width) : 1.0f;

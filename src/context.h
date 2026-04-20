@@ -58,7 +58,8 @@ typedef struct {
 
 extern struct NovaState{
     //C3D targets
-    C3D_RenderTarget *render_target_top;
+    C3D_RenderTarget *render_target_top;        // Left eye
+    C3D_RenderTarget *render_target_top_right;  // Right eye
     C3D_RenderTarget *render_target_bot;
     C3D_RenderTarget *current_target;
 
