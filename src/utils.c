@@ -431,6 +431,20 @@ void apply_gpu_state(void) {
 
         if (g.uLoc_projection >= 0) {
             C3D_Mtx adj_proj = g.proj_stack[g.proj_sp];
+
+            float slider = osGet3DSliderState();
+            if (slider > 0.0f && g.stereo_depth > 0.0f) {
+                float shift = slider * g.stereo_depth;
+                float offset = (g.current_eye == 0) ? shift : -shift;
+
+                C3D_Mtx trans;
+                Mtx_Identity(&trans);
+                trans.r[0].w = offset;
+
+                C3D_Mtx temp_proj;
+                Mtx_Multiply(&temp_proj, &adj_proj, &trans);
+                adj_proj = temp_proj;
+            }
             // hack for PICA200 (3DS Z-range)
             adj_proj.r[2].x = adj_proj.r[2].x * 0.4999f - adj_proj.r[3].x * 0.5f;
             adj_proj.r[2].y = adj_proj.r[2].y * 0.4999f - adj_proj.r[3].y * 0.5f;

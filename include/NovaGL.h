@@ -353,10 +353,14 @@ GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_size, int tex_staging_size);
 void nova_init(void);
 void nova_fini(void);
-void novaSwapBuffers(void);
+
 void nova_set_render_target(int target_mode); // 0 = Top Left, 1 = Top Right, 2 = Bottom
 void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements, GLenum type, const GLvoid *indices);
 
+void novaSwapBuffers(void);
+int  novaGetEyeCount(void);
+void novaBeginEye(int eye);
+void novaSet3DDepth(float depth);
 // ===[ Persistent texture cache ]===
 // When enabled, NovaGL can persist the final swizzled + downscaled texture payload
 // (i.e. the bytes it just wrote into C3D_Tex->data after morton tiling) to a caller-

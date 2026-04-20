@@ -92,6 +92,8 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
         g.tex_env_operand2_rgb[i] = GL_SRC_ALPHA;
     }
 
+    g.stereo_depth = 0.05f;
+
     g.matrix_mode = GL_MODELVIEW;
     Mtx_Identity(&g.proj_stack[0]);
     Mtx_Identity(&g.mv_stack[0]);
@@ -154,6 +156,21 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
 
     C3D_FrameDrawOn(g.render_target_top);
     g.current_target = g.render_target_top;
+}
+int novaGetEyeCount(void) {
+    return (osGet3DSliderState() > 0.0f) ? 2 : 1;
+}
+
+void novaSet3DDepth(float depth) {
+    g.stereo_depth = depth;
+}
+
+void novaBeginEye(int eye) {
+    g.current_eye = eye;
+
+    nova_set_render_target(eye);
+
+    g.matrices_dirty = 1;
 }
 void novaSwapBuffers(void) {
     C3D_FrameEnd(0);

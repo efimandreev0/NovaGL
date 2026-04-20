@@ -187,6 +187,9 @@ extern struct NovaState{
     GLint tex_env_operand2_alpha[3];
 
     int line_smooth_enabled;
+
+    int        current_eye; // 0 = left, 1 = right
+    float      stereo_depth;
 } g;
 
 #endif //NOVAGL_CONTEXT_H

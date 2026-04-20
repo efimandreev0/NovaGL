@@ -60,7 +60,30 @@ int main(void) {
     return 0;
 }
 ```
+### 3D Usage
+```c
+void RenderFrame() {
+    int eyes = novaGetEyeCount();
 
+    for (int i = 0; i < eyes; i++) {
+        novaBeginEye(i); 
+
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        DrawWorld(); 
+
+        // Setting 3D to 0.0 to the UI doesn't corrupt.
+        novaSet3DDepth(0.0f);
+        DrawUI();
+        
+        // 3D for next frame
+        novaSet3DDepth(0.05f); 
+    }
+
+    // Buffer swap
+    novaSwapBuffers();
+}
+```
 ### Vertex Format
 
 The translator uses a fixed vertex layout matching MCPE's `VertexDeclPTC`:
