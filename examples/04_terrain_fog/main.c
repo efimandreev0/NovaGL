@@ -1,135 +1,65 @@
 #include <3ds.h>
 #include <citro3d.h>
 #include <stdlib.h>
-#include <math.h>
-#include <stddef.h> // Для offsetof
 #include <NovaGL.h>
 
-/*
- * 1. ИЗМЕНЕНИЕ: Используем явные байты r, g, b, a вместо целого int.
- * Это убивает любые проблемы с Endianness (порядком байтов) при передаче в GPU.
- * Размер структуры остается ровно 24 байта, как того требует NovaGL.
- */
-typedef struct {
-    float x, y, z;
-    float u, v;
-    u8 r, g, b, a;
-} Vertex;
-
-/* 2. ИЗМЕНЕНИЕ: Функция покраски теперь пишет напрямую в байты */
-void set_vertex_color(Vertex* v, float y) {
-    v->a = 255; // Непрозрачный
-
-    if (y > 1.5f) {
-        // Снег на вершинах (Белый)
-        v->r = 255; v->g = 255; v->b = 255;
-    } else if (y < -0.5f) {
-        // Низины (Темно-зеленый/Землистый)
-        v->r = 40; v->g = 100; v->b = 40;
-    } else {
-        // Склоны (Ярко-зеленый)
-        v->r = 80; v->g = 200; v->b = 80;
-    }
-}
-
-#define GRID_SIZE 32
-#define VERTICES_PER_QUAD 6
-#define TOTAL_VERTICES ((GRID_SIZE - 1) * (GRID_SIZE - 1) * VERTICES_PER_QUAD)
+typedef struct { float x,y,z, u,v; unsigned int color; } Vertex;
 
 int main(void) {
-    gfxInitDefault();
-    gl2c3d_init();
+    gfxInitDefault(); nova_init();
+    novaSet3DDepth(0.08f);
 
-    Vertex *vbo_data = (Vertex*)linearAlloc(TOTAL_VERTICES * sizeof(Vertex));
-    int v_idx = 0;
-
-    for(int x = 0; x < GRID_SIZE - 1; x++) {
-        for(int z = 0; z < GRID_SIZE - 1; z++) {
-
-            float x0 = x - GRID_SIZE/2.0f;
-            float z0 = z - GRID_SIZE/2.0f;
-            float x1 = x0 + 1.0f;
-            float z1 = z0 + 1.0f;
-
-            float y00 = sinf(x0 * 0.5f) * 1.5f + cosf(z0 * 0.5f) * 1.5f;
-            float y10 = sinf(x1 * 0.5f) * 1.5f + cosf(z0 * 0.5f) * 1.5f;
-            float y01 = sinf(x0 * 0.5f) * 1.5f + cosf(z1 * 0.5f) * 1.5f;
-            float y11 = sinf(x1 * 0.5f) * 1.5f + cosf(z1 * 0.5f) * 1.5f;
-
-            vbo_data[v_idx] = (Vertex){x0, y00, z0,  0.0f, 0.0f,  0,0,0,0};
-            set_vertex_color(&vbo_data[v_idx++], y00);
-
-            vbo_data[v_idx] = (Vertex){x0, y01, z1,  0.0f, 0.0f,  0,0,0,0};
-            set_vertex_color(&vbo_data[v_idx++], y01);
-
-            vbo_data[v_idx] = (Vertex){x1, y10, z0,  0.0f, 0.0f,  0,0,0,0};
-            set_vertex_color(&vbo_data[v_idx++], y10);
-
-            // Треугольник 2
-            vbo_data[v_idx] = (Vertex){x1, y10, z0,  0.0f, 0.0f,  0,0,0,0};
-            set_vertex_color(&vbo_data[v_idx++], y10);
-
-            vbo_data[v_idx] = (Vertex){x0, y01, z1,  0.0f, 0.0f,  0,0,0,0};
-            set_vertex_color(&vbo_data[v_idx++], y01);
-
-            vbo_data[v_idx] = (Vertex){x1, y11, z1,  0.0f, 0.0f,  0,0,0,0};
-            set_vertex_color(&vbo_data[v_idx++], y11);
-        }
+    unsigned char tex[32*32*4];
+    for(int y=0;y<32;y++) for(int x=0;x<32;x++) {
+        int idx = (y*32+x)*4; int hole = ((x/8)+(y/8)) % 2 == 0;
+        tex[idx]=0; tex[idx+1]=255; tex[idx+2]=0;
+        tex[idx+3]= hole ? 0 : 255;
     }
+    GLuint texture; glGenTextures(1, &texture); glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 32, 32, 0, GL_RGBA, GL_UNSIGNED_BYTE, tex);
 
-    GLuint vbo;
-    glGenBuffers(1, &vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, v_idx * sizeof(Vertex), vbo_data, GL_STATIC_DRAW);
-
-    float angle_y = 0.0f;
+    Vertex quad[6] = {{-1,-1,0, 0,0, 0xFFFFFFFF},{1,-1,0, 1,0, 0xFFFFFFFF},{1,1,0, 1,1, 0xFFFFFFFF},
+                      {-1,-1,0, 0,0, 0xFFFFFFFF},{1,1,0, 1,1, 0xFFFFFFFF},{-1,1,0, 0,1, 0xFFFFFFFF}};
 
     while (aptMainLoop()) {
-        hidScanInput();
-        if (hidKeysDown() & KEY_START) break;
+        hidScanInput(); if (hidKeysDown() & KEY_START) break;
 
-        angle_y += 0.5f;
+        int eyes = novaGetEyeCount();
+        for (int i = 0; i < eyes; i++) {
+            novaBeginEye(i);
 
-        gl2c3d_frame_begin();
-        gl2c3d_set_render_target(0);
+            glClearColor(0.8f, 0.3f, 0.3f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        glClearColor(0.6f, 0.8f, 1.0f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            glMatrixMode(GL_PROJECTION); glLoadIdentity();
+            glFrustumf(-0.83f, 0.83f, -0.5f, 0.5f, 1.0f, 100.0f);
+            glMatrixMode(GL_MODELVIEW); glLoadIdentity();
 
-        glMatrixMode(GL_PROJECTION);
-        glLoadIdentity();
-        glFrustumf(-0.83f, 0.83f, -0.5f, 0.5f, 1.0f, 50.0f);
+            glEnable(GL_DEPTH_TEST); glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, texture);
+            glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_TEXTURE_COORD_ARRAY); glEnableClientState(GL_COLOR_ARRAY);
+            glVertexPointer(3, GL_FLOAT, sizeof(Vertex), &quad[0].x);
+            glTexCoordPointer(2, GL_FLOAT, sizeof(Vertex), &quad[0].u);
+            glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), &quad[0].color);
 
-        glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
-        glTranslatef(0.0f, -4.0f, -20.0f);
-        glRotatef(30.0f, 1.0f, 0.0f, 0.0f);
-        glRotatef(angle_y, 0.0f, 1.0f, 0.0f);
+            glPushMatrix();
+                glTranslatef(-1.5f, 0.0f, -4.0f);
+                glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+                glDisable(GL_ALPHA_TEST);
+            glPopMatrix();
 
-        glEnable(GL_DEPTH_TEST);
+            glPushMatrix();
+                glTranslatef(1.5f, 0.0f, -4.0f);
+                glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                for(int j=0;j<6;j++) quad[j].color = 0x80FF0000;
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+                glDisable(GL_BLEND);
+                for(int j=0;j<6;j++) quad[j].color = 0xFFFFFFFF;
+            glPopMatrix();
 
-        glDisable(GL_FOG);
-
-        glDisable(GL_TEXTURE_2D);
-
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glEnableClientState(GL_VERTEX_ARRAY);
-        glEnableClientState(GL_COLOR_ARRAY);
-
-        glVertexPointer(3, GL_FLOAT, sizeof(Vertex), (void*)offsetof(Vertex, x));
-        glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), (void*)offsetof(Vertex, r));
-
-        glDrawArrays(GL_TRIANGLES, 0, v_idx);
-
-        glDisableClientState(GL_VERTEX_ARRAY);
-        glDisableClientState(GL_COLOR_ARRAY);
-
-        gl2c3d_frame_end();
+            glDisableClientState(GL_VERTEX_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY); glDisableClientState(GL_COLOR_ARRAY);
+        }
+        novaSwapBuffers();
     }
-
-    glDeleteBuffers(1, &vbo);
-    linearFree(vbo_data);
-    gl2c3d_fini();
-    gfxExit();
-    return 0;
+    glDeleteTextures(1, &texture); nova_fini(); gfxExit(); return 0;
 }

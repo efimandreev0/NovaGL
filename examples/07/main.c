@@ -1,66 +1,69 @@
 #include <3ds.h>
 #include <citro3d.h>
-#include <math.h>
+#include <stdlib.h>
 #include <NovaGL.h>
 
 typedef struct { float x,y,z; unsigned int color; } Vertex;
 unsigned int make_color(u8 r, u8 g, u8 b, u8 a) { return (a << 24) | (b << 16) | (g << 8) | r; }
 
-/* Рисует простой вытянутый блок (как рука/нога Стива) */
-void draw_limb(float w, float h, float d, u8 r, u8 g_c, u8 b) {
-    Vertex limb[6] = { /* Используем квад для простоты */
-        {-w, 0, 0, make_color(r,g_c,b,255)}, { w, 0, 0, make_color(r,g_c,b,255)}, { w, h, 0, make_color(r,g_c,b,255)},
-        {-w, 0, 0, make_color(r,g_c,b,255)}, { w, h, 0, make_color(r,g_c,b,255)}, {-w, h, 0, make_color(r,g_c,b,255)}
-    };
-    glVertexPointer(3, GL_FLOAT, sizeof(Vertex), &limb[0].x);
-    glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), &limb[0].color);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-}
+#define MAX_PARTICLES 500
+typedef struct { float x, y, z, vx, vy, vz, life, max_life; } Particle;
+float randf() { return (float)rand() / (float)RAND_MAX; }
 
 int main(void) {
-    gfxInitDefault(); gl2c3d_init();
-    float time = 0.0f;
+    gfxInitDefault(); nova_init();
+    Particle particles[MAX_PARTICLES];
+    for(int i=0; i<MAX_PARTICLES; i++) particles[i].life = -1.0f;
+    Vertex *vertex_data = (Vertex*)linearAlloc(MAX_PARTICLES * 6 * sizeof(Vertex));
 
     while (aptMainLoop()) {
         hidScanInput(); if (hidKeysDown() & KEY_START) break;
-        time += 0.05f;
 
-        gl2c3d_frame_begin(); gl2c3d_set_render_target(0);
-        glClearColor(0.2f, 0.2f, 0.2f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        // --- ФИЗИКА ЧАСТИЦ 1 РАЗ ЗА КАДР ---
+        int v_idx = 0;
+        for(int i=0; i<MAX_PARTICLES; i++) {
+            if (particles[i].life <= 0.0f) {
+                particles[i].x = (randf()-0.5f)*1.5f; particles[i].y = -2.0f; particles[i].z = (randf()-0.5f)*1.5f;
+                particles[i].vx = (randf()-0.5f)*0.05f; particles[i].vy = 0.05f+randf()*0.05f; particles[i].vz = (randf()-0.5f)*0.05f;
+                particles[i].max_life = 1.0f+randf(); particles[i].life = particles[i].max_life;
+            }
+            particles[i].x += particles[i].vx; particles[i].y += particles[i].vy; particles[i].z += particles[i].vz;
+            particles[i].life -= 0.016f;
 
-        glMatrixMode(GL_PROJECTION); glLoadIdentity();
-        glFrustumf(-0.83f, 0.83f, -0.5f, 0.5f, 1.0f, 100.0f);
-        glMatrixMode(GL_MODELVIEW); glLoadIdentity();
-        glTranslatef(0.0f, -1.0f, -5.0f);
+            if (particles[i].life > 0.0f) {
+                float fade = particles[i].life / particles[i].max_life;
+                unsigned int col = make_color(255, (u8)(255*fade), 0, (u8)(255*fade));
+                float s = 0.1f + (1.0f - fade)*0.1f;
+                float px = particles[i].x, py = particles[i].y, pz = particles[i].z;
 
-        glDisable(GL_TEXTURE_2D);
-        glEnableClientState(GL_VERTEX_ARRAY);
-        glEnableClientState(GL_COLOR_ARRAY);
+                vertex_data[v_idx++] = (Vertex){px-s, py-s, pz, col}; vertex_data[v_idx++] = (Vertex){px+s, py-s, pz, col}; vertex_data[v_idx++] = (Vertex){px+s, py+s, pz, col};
+                vertex_data[v_idx++] = (Vertex){px-s, py-s, pz, col}; vertex_data[v_idx++] = (Vertex){px+s, py+s, pz, col}; vertex_data[v_idx++] = (Vertex){px-s, py+s, pz, col};
+            }
+        }
+        // ----------------------------------
 
-        /* --- ТЕЛО (Иерархия матриц) --- */
-        glPushMatrix();
-            glTranslatef(0.0f, sinf(time*2.0f)*0.2f, 0.0f); /* Тело "дышит" (прыгает) */
-            draw_limb(0.5f, 1.5f, 0.5f, 0, 0, 255); /* Синее тело */
+        int eyes = novaGetEyeCount();
+        for (int i = 0; i < eyes; i++) {
+            novaBeginEye(i);
+            glClearColor(0.05f, 0.05f, 0.1f, 1.0f); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-            /* ПРАВАЯ РУКА (прикреплена к плечу) */
-            glPushMatrix();
-                glTranslatef(0.5f, 1.3f, 0.0f); /* Сдвиг к правому плечу */
-                glRotatef(sinf(time)*45.0f, 0, 0, 1); /* Взмах рукой */
-                draw_limb(0.2f, -1.0f, 0.2f, 255, 200, 150); /* Рука вниз */
-            glPopMatrix();
+            glMatrixMode(GL_PROJECTION); glLoadIdentity(); glFrustumf(-0.83f, 0.83f, -0.5f, 0.5f, 1.0f, 100.0f);
+            glMatrixMode(GL_MODELVIEW); glLoadIdentity(); glTranslatef(0.0f, 0.0f, -6.0f);
 
-            /* ЛЕВАЯ РУКА */
-            glPushMatrix();
-                glTranslatef(-0.5f, 1.3f, 0.0f); /* Сдвиг к левому плечу */
-                glRotatef(-sinf(time)*45.0f, 0, 0, 1); /* Взмах в противофазе */
-                draw_limb(0.2f, -1.0f, 0.2f, 255, 200, 150);
-            glPopMatrix();
+            glEnable(GL_DEPTH_TEST); glDepthMask(GL_FALSE);
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE); glDisable(GL_TEXTURE_2D);
 
-        glPopMatrix(); /* Возврат к миру */
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+            glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY);
+            glVertexPointer(3, GL_FLOAT, sizeof(Vertex), &vertex_data[0].x);
+            glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), &vertex_data[0].color);
 
-        glDisableClientState(GL_VERTEX_ARRAY); glDisableClientState(GL_COLOR_ARRAY);
-        gl2c3d_frame_end();
+            glDrawArrays(GL_TRIANGLES, 0, v_idx);
+
+            glDisableClientState(GL_VERTEX_ARRAY); glDisableClientState(GL_COLOR_ARRAY);
+            glDepthMask(GL_TRUE); glDisable(GL_BLEND);
+        }
+        novaSwapBuffers();
     }
-    gl2c3d_fini(); gfxExit(); return 0;
+    linearFree(vertex_data); nova_fini(); gfxExit(); return 0;
 }

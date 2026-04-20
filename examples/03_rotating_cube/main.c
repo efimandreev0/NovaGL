@@ -1,13 +1,13 @@
 /*
- * gl2citro3d Example 03: Rotating Cube
+ * NovaGL Example: Rotating Cube in 3D (Stereoscopic)
  *
  * Demonstrates:
+ *   - Automatic Stereoscopic 3D via NovaGL (novaGetEyeCount, novaBeginEye)
  *   - Perspective projection (glFrustumf)
  *   - Model transformations (glTranslatef, glRotatef)
  *   - Depth testing (GL_DEPTH_TEST)
  *   - Textured 3D geometry
  *   - Per-face vertex colors
- *   - Animation via frame counter
  */
 
 #include <3ds.h>
@@ -15,7 +15,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
-#include <NovaGL.h>
+#include <NovaGL.h> // Меняем заголовок на NovaGL
 
 typedef struct {
     float x, y, z;
@@ -27,6 +27,7 @@ static unsigned int make_color(unsigned char r, unsigned char g,
                                unsigned char b, unsigned char a) {
     return (a << 24) | (b << 16) | (g << 8) | r;
 }
+
 /* Generate a simple 32x32 checkerboard */
 static unsigned char* generate_texture(int size) {
     unsigned char *pixels = (unsigned char*)malloc(size * size * 4);
@@ -56,18 +57,12 @@ static void build_cube(Vertex *out, float s) {
 
     /* Face positions: each face = 4 corners, we expand to 2 triangles */
     float faces[6][4][3] = {
-        /* Front (+Z) */
-        {{-s,-s, s},{ s,-s, s},{ s, s, s},{-s, s, s}},
-        /* Back (-Z) */
-        {{ s,-s,-s},{-s,-s,-s},{-s, s,-s},{ s, s,-s}},
-        /* Top (+Y) */
-        {{-s, s, s},{ s, s, s},{ s, s,-s},{-s, s,-s}},
-        /* Bottom (-Y) */
-        {{-s,-s,-s},{ s,-s,-s},{ s,-s, s},{-s,-s, s}},
-        /* Right (+X) */
-        {{ s,-s, s},{ s,-s,-s},{ s, s,-s},{ s, s, s}},
-        /* Left (-X) */
-        {{-s,-s,-s},{-s,-s, s},{-s, s, s},{-s, s,-s}},
+        {{-s,-s, s},{ s,-s, s},{ s, s, s},{-s, s, s}}, /* Front (+Z) */
+        {{ s,-s,-s},{-s,-s,-s},{-s, s,-s},{ s, s,-s}}, /* Back (-Z) */
+        {{-s, s, s},{ s, s, s},{ s, s,-s},{-s, s,-s}}, /* Top (+Y) */
+        {{-s,-s,-s},{ s,-s,-s},{ s,-s, s},{-s,-s, s}}, /* Bottom (-Y) */
+        {{ s,-s, s},{ s,-s,-s},{ s, s,-s},{ s, s, s}}, /* Right (+X) */
+        {{-s,-s,-s},{-s,-s, s},{-s, s, s},{-s, s,-s}}, /* Left (-X) */
     };
 
     float uvs[4][2] = {{0,1},{1,1},{1,0},{0,0}};
@@ -89,8 +84,12 @@ static void build_cube(Vertex *out, float s) {
 }
 
 int main(void) {
+    // Инициализация сервисов и NovaGL
     gfxInitDefault();
-    gl2c3d_init();
+    nova_init();
+
+    // Задаем комфортную глубину 3D-эффекта (опционально, по дефолту уже 0.05f)
+    novaSet3DDepth(0.06f);
 
     /* Create texture */
     const int TEX_SIZE = 32;
@@ -130,54 +129,67 @@ int main(void) {
         angle_x += 1.0f;
         angle_y += 0.7f;
 
-        gl2c3d_frame_begin();
-        gl2c3d_set_render_target(0);
+        // =================================================================
+        // Вся магия 3D здесь:
+        // Узнаем, сколько раз нам рисовать кадр. Если ползунок опущен = 1.
+        // Если ползунок поднят = 2.
+        int eyes = novaGetEyeCount();
 
-        glClearColor(0.05f, 0.05f, 0.15f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        for (int i = 0; i < eyes; i++) {
+            // NovaGL сама переключит буфер и незаметно "подвинет" матрицу!
+            novaBeginEye(i);
 
-        /* Perspective projection */
-        glMatrixMode(GL_PROJECTION);
-        glLoadIdentity();
-        /* Simple perspective: fov ~60 deg, aspect ~5:3 (400x240) */
-        glFrustumf(-0.83f, 0.83f, -0.5f, 0.5f, 1.0f, 100.0f);
+            // Дальше идет абсолютно стандартный OpenGL код
+            glClearColor(0.05f, 0.05f, 0.15f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        /* Modelview: pull back and rotate */
-        glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
-        glTranslatef(0.0f, 0.0f, -3.0f);
-        glRotatef(angle_x, 1.0f, 0.0f, 0.0f);
-        glRotatef(angle_y, 0.0f, 1.0f, 0.0f);
+            /* Perspective projection */
+            glMatrixMode(GL_PROJECTION);
+            glLoadIdentity();
+            /* Simple perspective: fov ~60 deg, aspect ~5:3 (400x240) */
+            glFrustumf(-0.83f, 0.83f, -0.5f, 0.5f, 1.0f, 100.0f);
 
-        /* Enable depth test and texturing */
-        glEnable(GL_DEPTH_TEST);
-        glDepthFunc(GL_LESS);
-        glEnable(GL_TEXTURE_2D);
-        glBindTexture(GL_TEXTURE_2D, texture);
+            /* Modelview: pull back and rotate */
+            glMatrixMode(GL_MODELVIEW);
+            glLoadIdentity();
+            glTranslatef(0.0f, 0.0f, -3.0f); // Отодвигаем куб назад
+            glRotatef(angle_x, 1.0f, 0.0f, 0.0f);
+            glRotatef(angle_y, 0.0f, 1.0f, 0.0f);
 
-        /* Draw cube */
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glEnableClientState(GL_VERTEX_ARRAY);
-        glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-        glEnableClientState(GL_COLOR_ARRAY);
+            /* Enable depth test and texturing */
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_LESS);
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, texture);
 
-        glVertexPointer(3, GL_FLOAT, sizeof(Vertex), (void*)0);
-        glTexCoordPointer(2, GL_FLOAT, sizeof(Vertex), (void*)(3 * 4));
-        glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), (void*)(5 * 4));
+            /* Draw cube */
+            glBindBuffer(GL_ARRAY_BUFFER, vbo);
+            glEnableClientState(GL_VERTEX_ARRAY);
+            glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+            glEnableClientState(GL_COLOR_ARRAY);
 
-        glDrawArrays(GL_TRIANGLES, 0, 36);
+            glVertexPointer(3, GL_FLOAT, sizeof(Vertex), (void*)0);
+            glTexCoordPointer(2, GL_FLOAT, sizeof(Vertex), (void*)(3 * 4));
+            glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), (void*)(5 * 4));
 
-        glDisableClientState(GL_VERTEX_ARRAY);
-        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-        glDisableClientState(GL_COLOR_ARRAY);
+            glDrawArrays(GL_TRIANGLES, 0, 36);
 
-        gl2c3d_frame_end();
+            glDisableClientState(GL_VERTEX_ARRAY);
+            glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+            glDisableClientState(GL_COLOR_ARRAY);
+        }
+        // =================================================================
+
+        // Завершаем кадр и передаем его на экран (вместо C3D_FrameBegin/End)
+        novaSwapBuffers();
     }
 
+    // Очистка
     glDeleteTextures(1, &texture);
     glDeleteBuffers(1, &vbo);
     linearFree(vbo_data);
-    gl2c3d_fini();
+
+    nova_fini();
     gfxExit();
     return 0;
 }
