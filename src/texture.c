@@ -1,7 +1,208 @@
 ﻿#include "NovaGL.h"
 #include "utils.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
+
 #define NOVA_TEXTURE_PAGE_SIZE 1024
+
+// Forward declarations for helpers used by the cache block below (defined later in this TU).
+static inline GLuint active_bound_texture(void);
+static void apply_slot_params_to_tex(C3D_Tex *tex, const TexSlot *slot);
+
+// ===[ Persistent texture cache (see NovaGL.h for API contract) ]===
+//
+// Cache file layout (little-endian):
+//   magic        = 'NVSW' (0x5753564E)
+//   version      = 1
+//   fmt          = GPU_TEXCOLOR
+//   pot_w, pot_h = hardware texture size (power of two, post-downscale)
+//   tgt_w, tgt_h = logical texture size used for UV math in the caller
+//   orig_w, orig_h = original image size before any downscale
+//   data_size    = pot_w * pot_h * bpp
+// body:
+//   <data_size> bytes of morton-swizzled pixels (byte-for-byte what goes into C3D_Tex->data)
+
+#define NOVA_TEXCACHE_MAGIC    0x5753564Eu   // 'NVSW' LE
+#define NOVA_TEXCACHE_VERSION  1u
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t fmt;
+    uint32_t pot_w;
+    uint32_t pot_h;
+    uint32_t tgt_w;
+    uint32_t tgt_h;
+    uint32_t orig_w;
+    uint32_t orig_h;
+    uint32_t data_size;
+} NovaTexCacheHeader;
+
+static char g_tex_cache_dir[256] = {0};
+static int  g_tex_cache_dir_ready = 0;
+
+static void nova_mkdir_p(const char* path) {
+    // Walk the path and mkdir each "/"-terminated prefix. Any failure (including
+    // EEXIST on already-existing segments, or mkdir("sdmc:") which is just the SD
+    // drive name on 3DS) is silently ignored — if the *leaf* ends up unwritable
+    // we'll find out at fopen time and degrade gracefully.
+    char buf[256];
+    size_t n = strnlen(path, sizeof(buf) - 1);
+    memcpy(buf, path, n);
+    buf[n] = 0;
+    for (size_t i = 1; i < n; i++) {
+        if (buf[i] == '/') {
+            buf[i] = 0;
+            mkdir(buf, 0777);
+            buf[i] = '/';
+        }
+    }
+    mkdir(buf, 0777);
+}
+
+static void nova_tex_cache_ensure_dir(void) {
+    if (g_tex_cache_dir_ready) return;
+    if (g_tex_cache_dir[0] == 0) return;
+    nova_mkdir_p(g_tex_cache_dir);
+    g_tex_cache_dir_ready = 1;
+}
+
+static int nova_tex_cache_path(char* buf, size_t bufSize, uint32_t hash) {
+    if (g_tex_cache_dir[0] == 0) return 0;
+    int n = snprintf(buf, bufSize, "%s/%08x.nsw", g_tex_cache_dir, hash);
+    return (n > 0 && (size_t)n < bufSize);
+}
+
+void nova_texture_cache_set_directory(const char* dir) {
+    if (dir == NULL || dir[0] == 0) {
+        g_tex_cache_dir[0] = 0;
+        g_tex_cache_dir_ready = 0;
+        return;
+    }
+    size_t n = strnlen(dir, sizeof(g_tex_cache_dir) - 1);
+    memcpy(g_tex_cache_dir, dir, n);
+    g_tex_cache_dir[n] = 0;
+    // Strip trailing slash for consistent concatenation.
+    if (n > 0 && g_tex_cache_dir[n - 1] == '/') g_tex_cache_dir[n - 1] = 0;
+    g_tex_cache_dir_ready = 0;  // lazily mkdir on first save
+}
+
+int nova_texture_cache_has(uint32_t hash) {
+    char path[320];
+    if (!nova_tex_cache_path(path, sizeof(path), hash)) return 0;
+    FILE* f = fopen(path, "rb");
+    if (f == NULL) return 0;
+    NovaTexCacheHeader hdr;
+    int ok = (fread(&hdr, sizeof(hdr), 1, f) == 1)
+          && hdr.magic == NOVA_TEXCACHE_MAGIC
+          && hdr.version == NOVA_TEXCACHE_VERSION;
+    fclose(f);
+    return ok;
+}
+
+int nova_texture_cache_load(uint32_t hash, int* out_orig_w, int* out_orig_h) {
+    char path[320];
+    if (!nova_tex_cache_path(path, sizeof(path), hash)) return 0;
+
+    GLuint bound = active_bound_texture();
+    if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return 0;
+    TexSlot* slot = &g.textures[bound];
+
+    FILE* f = fopen(path, "rb");
+    if (f == NULL) return 0;
+
+    NovaTexCacheHeader hdr;
+    if (fread(&hdr, sizeof(hdr), 1, f) != 1) { fclose(f); return 0; }
+    if (hdr.magic != NOVA_TEXCACHE_MAGIC || hdr.version != NOVA_TEXCACHE_VERSION) { fclose(f); return 0; }
+    if (hdr.pot_w < 8 || hdr.pot_h < 8 || hdr.pot_w > 1024 || hdr.pot_h > 1024) { fclose(f); return 0; }
+
+    GPU_TEXCOLOR fmt = (GPU_TEXCOLOR) hdr.fmt;
+    size_t expected = (size_t) hdr.pot_w * (size_t) hdr.pot_h * (size_t) gpu_texfmt_bpp(fmt);
+    if (hdr.data_size != expected) { fclose(f); return 0; }
+
+    // (Re)allocate linear storage if dimensions/format changed.
+    if (slot->allocated) {
+        if (slot->fmt != fmt || slot->pot_w != (int) hdr.pot_w || slot->pot_h != (int) hdr.pot_h) {
+            C3D_TexDelete(&slot->tex);
+            slot->allocated = 0;
+        }
+    }
+    if (!slot->allocated) {
+        if (!C3D_TexInit(&slot->tex, hdr.pot_w, hdr.pot_h, fmt)) {
+            fclose(f);
+            g.last_error = GL_OUT_OF_MEMORY;
+            return 0;
+        }
+        slot->allocated = 1;
+    }
+
+    slot->fmt = fmt;
+    slot->pot_w = (int) hdr.pot_w;
+    slot->pot_h = (int) hdr.pot_h;
+    slot->width = (int) hdr.tgt_w;
+    slot->height = (int) hdr.tgt_h;
+    slot->orig_width = (int) hdr.orig_w;
+    slot->orig_height = (int) hdr.orig_h;
+
+    // Slurp the pre-swizzled payload straight into the C3D linear buffer.
+    size_t got = fread(slot->tex.data, 1, hdr.data_size, f);
+    fclose(f);
+    if (got != hdr.data_size) return 0;
+
+    apply_slot_params_to_tex(&slot->tex, slot);
+    C3D_TexFlush(&slot->tex);
+
+    if (out_orig_w) *out_orig_w = slot->orig_width;
+    if (out_orig_h) *out_orig_h = slot->orig_height;
+    return 1;
+}
+
+void nova_texture_cache_save(uint32_t hash) {
+    if (g_tex_cache_dir[0] == 0) return;
+
+    GLuint bound = active_bound_texture();
+    if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return;
+    TexSlot* slot = &g.textures[bound];
+    if (!slot->allocated || slot->tex.data == NULL) return;
+
+    nova_tex_cache_ensure_dir();
+
+    char path[320];
+    if (!nova_tex_cache_path(path, sizeof(path), hash)) return;
+
+    size_t data_size = (size_t) slot->pot_w * (size_t) slot->pot_h * (size_t) gpu_texfmt_bpp(slot->fmt);
+
+    FILE* f = fopen(path, "wb");
+    if (f == NULL) {
+        // First write failure: try to mkdir again in case the enable happened before
+        // the fs was mounted, then retry once.
+        g_tex_cache_dir_ready = 0;
+        nova_tex_cache_ensure_dir();
+        f = fopen(path, "wb");
+        if (f == NULL) return;
+    }
+
+    NovaTexCacheHeader hdr = {
+        .magic = NOVA_TEXCACHE_MAGIC,
+        .version = NOVA_TEXCACHE_VERSION,
+        .fmt = (uint32_t) slot->fmt,
+        .pot_w = (uint32_t) slot->pot_w,
+        .pot_h = (uint32_t) slot->pot_h,
+        .tgt_w = (uint32_t) slot->width,
+        .tgt_h = (uint32_t) slot->height,
+        .orig_w = (uint32_t) slot->orig_width,
+        .orig_h = (uint32_t) slot->orig_height,
+        .data_size = (uint32_t) data_size,
+    };
+    fwrite(&hdr, sizeof(hdr), 1, f);
+    fwrite(slot->tex.data, 1, data_size, f);
+    fclose(f);
+}
 
 static inline GLuint active_bound_texture(void) {
     return g.bound_texture[g.active_texture_unit];

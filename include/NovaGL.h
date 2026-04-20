@@ -357,6 +357,49 @@ void novaSwapBuffers(void);
 void nova_set_render_target(int is_right_eye);
 void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements, GLenum type, const GLvoid *indices);
 
+// ===[ Persistent texture cache ]===
+// When enabled, NovaGL can persist the final swizzled + downscaled texture payload
+// (i.e. the bytes it just wrote into C3D_Tex->data after morton tiling) to a caller-
+// provided directory on disk (typically an SD card). Subsequent boots can then read
+// those bytes straight back into linear heap memory, skipping BOTH the caller's PNG
+// decode AND NovaGL's CPU downscale + morton-interleave — a ~300ms → ~30ms saving
+// on a 268MHz ARM11.
+//
+// The hash key is caller-chosen; the caller is expected to hash whatever source bytes
+// uniquely identify this texture (e.g. the original PNG blob). NovaGL never decodes
+// the PNG itself, so it cannot compute that hash.
+//
+// Typical lifecycle in a homebrew app:
+//     nova_texture_cache_set_directory("sdmc:/Nova/cache/MyGame");
+//     ...
+//     uint32_t hash = my_hash_of_png_blob(blob, blobSize);
+//     glBindTexture(GL_TEXTURE_2D, texId);
+//     int origW, origH;
+//     if (!nova_texture_cache_load(hash, &origW, &origH)) {
+//         uint8_t* pixels = stbi_load_from_memory(blob, blobSize, ...);
+//         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+//         stbi_image_free(pixels);
+//         nova_texture_cache_save(hash);
+//     }
+
+// Configure the directory where cached texture blobs live. Pass NULL or "" to disable.
+// The directory (and its parents up to and including the last "/"-terminated segment)
+// will be created on the first save.
+void nova_texture_cache_set_directory(const char* dir);
+
+// Check whether a cache entry exists for `hash` without loading it.
+// Returns 1 if present, 0 otherwise.
+int nova_texture_cache_has(uint32_t hash);
+
+// Try to populate the currently-bound texture from the cache. On success returns 1
+// and writes the texture's *original* (pre-downscale) width/height to the out-params
+// so the caller can compute UVs correctly. Returns 0 on miss or malformed entry.
+int nova_texture_cache_load(uint32_t hash, int* out_orig_w, int* out_orig_h);
+
+// Save the currently-bound texture (its swizzled C3D_Tex->data plus the metadata
+// needed to restore it) under the given hash. No-op if caching isn't enabled.
+void nova_texture_cache_save(uint32_t hash);
+
 GLenum glGetError(void);
 void glClear(GLbitfield mask);
 void glClearColor(GLclampf r, GLclampf g, GLclampf b, GLclampf a);
