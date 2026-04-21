@@ -627,7 +627,11 @@ void apply_gpu_state(void) {
             TexSlot *slot = &g.textures[g.bound_texture[unit]];
             if (slot->allocated) {
                 C3D_TexBind(unit, &slot->tex);
+            } else {
+                C3D_TexBind(unit, NULL);
             }
+        } else {
+            C3D_TexBind(unit, NULL);
         }
     }
 }

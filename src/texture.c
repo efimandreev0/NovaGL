@@ -439,13 +439,18 @@ void glGenTextures(GLsizei n, GLuint *textures) {
 
 void glDeleteTextures(GLsizei n, const GLuint *textures) {
 
-    gspWaitForP3D();
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = textures[i];
-        if (id > 0 && id < NOVA_MAX_TEXTURES && g.textures[id].in_use) {
+        if (id > 0 && (int)id < NOVA_MAX_VBOS && g.textures[id].in_use) {
             free_texture_storage(&g.textures[id]);
             g.textures[id].in_use = 0;
-            for (int u = 0; u < 3; u++) if (g.bound_texture[u] == id) g.bound_texture[u] = 0;
+
+            for (int u = 0; u < 3; u++) {
+                if (g.bound_texture[u] == id) {
+                    g.bound_texture[u] = 0;
+                    C3D_TexBind(u, NULL);
+                }
+            }
         }
     }
 }
