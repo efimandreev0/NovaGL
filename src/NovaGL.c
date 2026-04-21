@@ -213,7 +213,7 @@ void nova_fini(void) {
     }
 
     C3D_RenderTargetDelete(g.render_target_top);
-    C3D_RenderTargetDelete(g.render_target_top_right); // <- Добавлено
+    C3D_RenderTargetDelete(g.render_target_top_right);
     C3D_RenderTargetDelete(g.render_target_bot);
     C3D_Fini();
     g.initialized = 0;
