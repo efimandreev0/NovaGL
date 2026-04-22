@@ -318,16 +318,6 @@ static void upload_solid_texture(C3D_Tex *tex, GPU_TEXCOLOR fmt, const GLvoid *p
     } else if (gpu_texfmt_bpp(fmt) == 2) {
         uint16_t val;
         memcpy(&val, px, sizeof(uint16_t));
-        if (type == GL_UNSIGNED_SHORT_4_4_4_4) {
-            uint16_t r = (val >> 12) & 0xF; uint16_t g = (val >> 8) & 0xF; uint16_t b = (val >> 4) & 0xF; uint16_t a = val & 0xF;
-            val = (a << 12) | (b << 8) | (g << 4) | r;
-        } else if (type == GL_UNSIGNED_SHORT_5_5_5_1) {
-            uint16_t r = (val >> 11) & 0x1F; uint16_t g = (val >> 6) & 0x1F; uint16_t b = (val >> 1) & 0x1F; uint16_t a = val & 0x1;
-            val = (a << 15) | (b << 10) | (g << 5) | r;
-        } else if (type == GL_UNSIGNED_SHORT_5_6_5) {
-            uint16_t r = (val >> 11) & 0x1F; uint16_t g = (val >> 5) & 0x3F; uint16_t b = val & 0x1F;
-            val = (b << 11) | (g << 5) | r;
-        }
         uint16_t *dst = (uint16_t*)tex->data;
         for (int i = 0; i < num_pixels; i++) dst[i] = val;
     } else {
@@ -366,29 +356,6 @@ static void upload_page_16bit(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t 
             if (x < copy_w && y < copy_h) {
                 const uint8_t *row = pixels + (src_y0 + y) * row_stride;
                 memcpy(&val, row + (src_x0 + x) * 2, sizeof(uint16_t));
-
-                // Reverting channels for fucking PICA200
-                if (type == GL_UNSIGNED_SHORT_4_4_4_4) {
-                    // OpenGL (R4 G4 B4 A4) -> PICA200 (A4 B4 G4 R4)
-                    uint16_t r = (val >> 12) & 0xF;
-                    uint16_t g = (val >> 8)  & 0xF;
-                    uint16_t b = (val >> 4)  & 0xF;
-                    uint16_t a = val & 0xF;
-                    val = (a << 12) | (b << 8) | (g << 4) | r;
-                } else if (type == GL_UNSIGNED_SHORT_5_5_5_1) {
-                    // OpenGL (R5 G5 B5 A1) -> PICA200 (A1 B5 G5 R5)
-                    uint16_t r = (val >> 11) & 0x1F;
-                    uint16_t g = (val >> 6)  & 0x1F;
-                    uint16_t b = (val >> 1)  & 0x1F;
-                    uint16_t a = val & 0x1;
-                    val = (a << 15) | (b << 10) | (g << 5) | r;
-                } else if (type == GL_UNSIGNED_SHORT_5_6_5) {
-                    // OpenGL (R5 G6 B5) -> PICA200 (B5 G6 R5)
-                    uint16_t r = (val >> 11) & 0x1F;
-                    uint16_t g = (val >> 5)  & 0x3F;
-                    uint16_t b = val & 0x1F;
-                    val = (b << 11) | (g << 5) | r;
-                }
             }
             dst[morton_offset_local(x, y, pot_w, pot_h)] = val;
         }
@@ -653,27 +620,7 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
 
                 uint16_t val;
                 memcpy(&val, row + src_x * 2, sizeof(uint16_t));
-
-                // Переворачиваем каналы под PICA200
-                if (type == GL_UNSIGNED_SHORT_4_4_4_4) {
-                    uint16_t r = (val >> 12) & 0xF;
-                    uint16_t g = (val >> 8)  & 0xF;
-                    uint16_t b = (val >> 4)  & 0xF;
-                    uint16_t a = val & 0xF;
-                    val = (a << 12) | (b << 8) | (g << 4) | r;
-                } else if (type == GL_UNSIGNED_SHORT_5_5_5_1) {
-                    uint16_t r = (val >> 11) & 0x1F;
-                    uint16_t g = (val >> 6)  & 0x1F;
-                    uint16_t b = (val >> 1)  & 0x1F;
-                    uint16_t a = val & 0x1;
-                    val = (a << 15) | (b << 10) | (g << 5) | r;
-                } else if (type == GL_UNSIGNED_SHORT_5_6_5) {
-                    uint16_t r = (val >> 11) & 0x1F;
-                    uint16_t g = (val >> 5)  & 0x3F;
-                    uint16_t b = val & 0x1F;
-                    val = (b << 11) | (g << 5) | r;
-                }
-
+                // И здесь убран переворот
                 tex_data[morton_offset_local(dx, dy, slot->pot_w, slot->pot_h)] = val;
             }
         }
@@ -814,12 +761,23 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
                 tex_data[morton_offset_local(dst_x, dst_y, slot->pot_w, slot->pot_h)] = pixel;
             } else if (gpu_texfmt_bpp(slot->fmt) == 2) {
                 uint16_t* tex16 = (uint16_t*)slot->tex.data;
-                // Bruh, C3D-framebuffer have 0xRRGGBBAA format...
                 uint8_t r   = (pixel >> 24) & 0xFF;
                 uint8_t g_c = (pixel >> 16) & 0xFF;
                 uint8_t b   = (pixel >> 8)  & 0xFF;
-                tex16[morton_offset_local(dst_x, dst_y, slot->pot_w, slot->pot_h)] =
-                    ((r >> 3) << 11) | ((g_c >> 2) << 5) | (b >> 3);
+                uint8_t a   = pixel & 0xFF;
+
+                uint16_t val = 0;
+                if (slot->fmt == GPU_RGBA4) {
+                    val = ((r >> 4) << 12) | ((g_c >> 4) << 8) | ((b >> 4) << 4) | (a >> 4);
+                } else if (slot->fmt == GPU_RGB565) {
+                    val = ((r >> 3) << 11) | ((g_c >> 2) << 5) | (b >> 3);
+                } else if (slot->fmt == GPU_RGBA5551) {
+                    val = ((r >> 3) << 11) | ((g_c >> 3) << 6) | ((b >> 3) << 1) | (a >> 7);
+                } else {
+                    val = ((r >> 3) << 11) | ((g_c >> 2) << 5) | (b >> 3); // Fallback
+                }
+
+                tex16[morton_offset_local(dst_x, dst_y, slot->pot_w, slot->pot_h)] = val;
             }
         }
     }
