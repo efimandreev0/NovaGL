@@ -12,7 +12,7 @@
 struct NovaState g;
 
 void nova_init() {
-    nova_init_ex(NOVA_CMD_BUF_SIZE, 8 * 1024 * 1024, 512 * 1024, 512 * 1024);
+    nova_init_ex(NOVA_CMD_BUF_SIZE, 2 * 1024 * 1024, 512 * 1024, 512 * 1024);
 }
 
 void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_size, int tex_staging_size) {
