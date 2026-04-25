@@ -34,6 +34,7 @@ add_library(NovaGL STATIC
         immediate.c
         lookup.c
         egl.c
+        nova_stb_ds_impl.c
 )
 
 target_include_directories(NovaGL
