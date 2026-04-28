@@ -7,6 +7,7 @@
 
 #ifdef __cplusplus
 extern "C" {
+
 #endif
 #include <3ds.h>
 #include <citro3d.h>
@@ -17,24 +18,24 @@ extern "C" {
 #include <stddef.h>
 
 /* GL Types */
-typedef unsigned int    GLenum;
-typedef unsigned char   GLboolean;
-typedef unsigned int    GLbitfield;
-typedef void            GLvoid;
-typedef int8_t          GLbyte;
-typedef uint8_t         GLubyte;
-typedef int16_t         GLshort;
-typedef uint16_t        GLushort;
-typedef int             GLint;
-typedef unsigned int    GLuint;
-typedef int             GLsizei;
-typedef float           GLfloat;
-typedef float           GLclampf;
-typedef double          GLclampd;
-typedef int             GLfixed;
-typedef ptrdiff_t       GLintptr;
-typedef ptrdiff_t       GLsizeiptr;
-typedef float           GLdouble;
+typedef unsigned int GLenum;
+typedef unsigned char GLboolean;
+typedef unsigned int GLbitfield;
+typedef void GLvoid;
+typedef int8_t GLbyte;
+typedef uint8_t GLubyte;
+typedef int16_t GLshort;
+typedef uint16_t GLushort;
+typedef int GLint;
+typedef unsigned int GLuint;
+typedef int GLsizei;
+typedef float GLfloat;
+typedef float GLclampf;
+typedef double GLclampd;
+typedef int GLfixed;
+typedef ptrdiff_t GLintptr;
+typedef ptrdiff_t GLsizeiptr;
+typedef float GLdouble;
 //nova_constants
 #define NOVA_MAX_TEXTURES     2048
 #define NOVA_MAX_VBOS         32768
@@ -354,16 +355,22 @@ GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
 //API
 void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_size, int tex_staging_size);
+
 void nova_init(void);
+
 void nova_fini(void);
 
 void nova_set_render_target(int target_mode); // 0 = Top Left, 1 = Top Right, 2 = Bottom
 void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements, GLenum type, const GLvoid *indices);
 
 void novaSwapBuffers(void);
-int  novaGetEyeCount(void);
+
+int novaGetEyeCount(void);
+
 void novaBeginEye(int eye);
+
 void novaSet3DDepth(float depth);
+
 // ===[ Persistent texture cache ]===
 // When enabled, NovaGL can persist the final swizzled + downscaled texture payload
 // (i.e. the bytes it just wrote into C3D_Tex->data after morton tiling) to a caller-
@@ -392,7 +399,7 @@ void novaSet3DDepth(float depth);
 // Configure the directory where cached texture blobs live. Pass NULL or "" to disable.
 // The directory (and its parents up to and including the last "/"-terminated segment)
 // will be created on the first save.
-void nova_texture_cache_set_directory(const char* dir);
+void nova_texture_cache_set_directory(const char *dir);
 
 // Check whether a cache entry exists for `hash` without loading it.
 // Returns 1 if present, 0 otherwise.
@@ -401,306 +408,564 @@ int nova_texture_cache_has(uint32_t hash);
 // Try to populate the currently-bound texture from the cache. On success returns 1
 // and writes the texture's *original* (pre-downscale) width/height to the out-params
 // so the caller can compute UVs correctly. Returns 0 on miss or malformed entry.
-int nova_texture_cache_load(uint32_t hash, int* out_orig_w, int* out_orig_h);
+int nova_texture_cache_load(uint32_t hash, int *out_orig_w, int *out_orig_h);
 
 // Save the currently-bound texture (its swizzled C3D_Tex->data plus the metadata
 // needed to restore it) under the given hash. No-op if caching isn't enabled.
 void nova_texture_cache_save(uint32_t hash);
 
 GLenum glGetError(void);
+
 void glClear(GLbitfield mask);
+
 void glClearColor(GLclampf r, GLclampf g, GLclampf b, GLclampf a);
+
 void glClearDepthf(GLclampf depth);
+
 void glClearDepth(GLclampd depth);
+
 void glClearStencil(GLint s);
+
 void glViewport(GLint x, GLint y, GLsizei width, GLsizei height);
+
 void glScissor(GLint x, GLint y, GLsizei width, GLsizei height);
 
 void glDepthFunc(GLenum func);
+
 void glDepthMask(GLboolean flag);
+
 void glDepthRangef(GLclampf near_val, GLclampf far_val);
+
 void glDepthRange(GLclampd near_val, GLclampd far_val);
+
 void glBlendFunc(GLenum sfactor, GLenum dfactor);
+
 void glAlphaFunc(GLenum func, GLclampf ref);
+
 void glCullFace(GLenum mode);
+
 void glFrontFace(GLenum mode);
+
 void glColor4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a);
+
 void glColor3f(GLfloat r, GLfloat g, GLfloat b);
+
 void glColor4ub(GLubyte r, GLubyte g, GLubyte b, GLubyte a);
+
 void glColor3ub(GLubyte r, GLubyte g, GLubyte b);
 
 /* Additional glColor variants */
 void glColor3b(GLbyte r, GLbyte g, GLbyte b);
+
 void glColor3bv(const GLbyte *v);
+
 void glColor3d(GLdouble r, GLdouble g, GLdouble b);
+
 void glColor3dv(const GLdouble *v);
+
 void glColor3fv(const GLfloat *v);
+
 void glColor3i(GLint r, GLint g, GLint b);
+
 void glColor3iv(const GLint *v);
+
 void glColor3s(GLshort r, GLshort g, GLshort b);
+
 void glColor3sv(const GLshort *v);
+
 void glColor3ubv(const GLubyte *v);
+
 void glColor3ui(GLuint r, GLuint g, GLuint b);
+
 void glColor3uiv(const GLuint *v);
+
 void glColor3us(GLushort r, GLushort g, GLushort b);
+
 void glColor3usv(const GLushort *v);
+
 void glColor4b(GLbyte r, GLbyte g, GLbyte b, GLbyte a);
+
 void glColor4bv(const GLbyte *v);
+
 void glColor4d(GLdouble r, GLdouble g, GLdouble b, GLdouble a);
+
 void glColor4dv(const GLdouble *v);
+
 void glColor4fv(const GLfloat *v);
+
 void glColor4i(GLint r, GLint g, GLint b, GLint a);
+
 void glColor4iv(const GLint *v);
+
 void glColor4s(GLshort r, GLshort g, GLshort b, GLshort a);
+
 void glColor4sv(const GLshort *v);
+
 void glColor4ubv(const GLubyte *v);
+
 void glColor4ui(GLuint r, GLuint g, GLuint b, GLuint a);
+
 void glColor4uiv(const GLuint *v);
+
 void glColor4us(GLushort r, GLushort g, GLushort b, GLushort a);
+
 void glColor4usv(const GLushort *v);
 
 void glColorMask(GLboolean r, GLboolean g, GLboolean b, GLboolean a);
+
 void glColorMaterial(GLenum face, GLenum mode);
+
 void glShadeModel(GLenum mode);
 
 //matrix.c
 void glMatrixMode(GLenum mode);
+
 void glLoadIdentity(void);
+
 void glPushMatrix(void);
+
 void glPopMatrix(void);
+
 void glTranslatef(GLfloat x, GLfloat y, GLfloat z);
+
 void glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z);
+
 void glScalef(GLfloat x, GLfloat y, GLfloat z);
+
 void glMultMatrixf(const GLfloat *m);
+
 void glLoadMatrixf(const GLfloat *m);
+
 void glLoadMatrixd(const GLdouble *m);
+
 void glMultMatrixd(const GLdouble *m);
+
 void glRotated(GLdouble angle, GLdouble x, GLdouble y, GLdouble z);
+
 void glScaled(GLdouble x, GLdouble y, GLdouble z);
+
 void glTranslated(GLdouble x, GLdouble y, GLdouble z);
+
 void glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble near_val, GLdouble far_val);
+
 void glOrthof(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloat near_val, GLfloat far_val);
+
 void glFrustumf(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloat near_val, GLfloat far_val);
+
 void glFrustum(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble near_val, GLdouble far_val);
+
 void glFrustumx(GLfixed left, GLfixed right, GLfixed bottom, GLfixed top, GLfixed near_val, GLfixed far_val);
 
 void glGenTextures(GLsizei n, GLuint *textures);
+
 void glDeleteTextures(GLsizei n, const GLuint *textures);
+
 void glBindTexture(GLenum target, GLuint texture);
-void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels);
-void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels);
+
+void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border,
+                  GLenum format, GLenum type, const GLvoid *pixels);
+
+void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height,
+                     GLenum format, GLenum type, const GLvoid *pixels);
+
 void glTexParameteri(GLenum target, GLenum pname, GLint param);
+
 void glTexParameterf(GLenum target, GLenum pname, GLfloat param);
+
 void glTexParameterfv(GLenum target, GLenum pname, const GLfloat *params);
+
 void glTexParameteriv(GLenum target, GLenum pname, const GLint *params);
-void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const GLvoid *data);
-void glTexImage1D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLint border, GLenum format, GLenum type, const GLvoid *pixels);
-void glTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const GLvoid *pixels);
+
+void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height,
+                            GLint border, GLsizei imageSize, const GLvoid *data);
+
+void glTexImage1D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLint border, GLenum format,
+                  GLenum type, const GLvoid *pixels);
+
+void glTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type,
+                     const GLvoid *pixels);
+
 void glTexGend(GLenum coord, GLenum pname, GLdouble param);
+
 void glTexGendv(GLenum coord, GLenum pname, const GLdouble *params);
+
 void glTexGenf(GLenum coord, GLenum pname, GLfloat param);
+
 void glTexGenfv(GLenum coord, GLenum pname, const GLfloat *params);
+
 void glTexGeni(GLenum coord, GLenum pname, GLint param);
+
 void glTexGeniv(GLenum coord, GLenum pname, const GLint *params);
+
 void glGenBuffers(GLsizei n, GLuint *buffers);
+
 void glDeleteBuffers(GLsizei n, const GLuint *buffers);
+
 void glBindBuffer(GLenum target, GLuint buffer);
+
 void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usage);
+
 void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvoid *data);
+
 void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer);
+
 void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer);
+
 void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer);
+
 void glNormalPointer(GLenum type, GLsizei stride, const GLvoid *pointer);
+
 void glEnableClientState(GLenum cap);
+
 void glDisableClientState(GLenum cap);
+
 void glDrawArrays(GLenum mode, GLint first, GLsizei count);
+
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices);
+
 void glFogf(GLenum pname, GLfloat param);
+
 void glFogfv(GLenum pname, const GLfloat *params);
+
 void glFogi(GLenum pname, GLint param);
+
 void glFogiv(GLenum pname, const GLint *params);
+
 void glFogx(GLenum pname, GLfixed param);
+
 void glNormal3f(GLfloat nx, GLfloat ny, GLfloat nz);
+
 void glNormal3b(GLbyte nx, GLbyte ny, GLbyte nz);
+
 void glNormal3bv(const GLbyte *v);
+
 void glNormal3d(GLdouble nx, GLdouble ny, GLdouble nz);
+
 void glNormal3dv(const GLdouble *v);
+
 void glNormal3fv(const GLfloat *v);
+
 void glNormal3i(GLint nx, GLint ny, GLint nz);
+
 void glNormal3iv(const GLint *v);
+
 void glNormal3s(GLshort nx, GLshort ny, GLshort nz);
+
 void glNormal3sv(const GLshort *v);
+
 void glGetFloatv(GLenum pname, GLfloat *params);
+
 void glGetIntegerv(GLenum pname, GLint *params);
-const GLubyte* glGetString(GLenum name);
+
+const GLubyte *glGetString(GLenum name);
+
 void glHint(GLenum target, GLenum mode);
+
 void glPolygonOffset(GLfloat factor, GLfloat units);
+
 void glLineWidth(GLfloat width);
+
 void glPolygonMode(GLenum face, GLenum mode);
+
 void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *pixels);
+
 void glFlush(void);
+
 void glFinish(void);
+
 void glPixelStorei(GLenum pname, GLint param);
+
 void glPixelStoref(GLenum pname, GLfloat param);
+
 void glDrawBuffer(GLenum mode);
+
 void glClipPlane(GLenum plane, const GLdouble *equation);
+
 void glStencilFunc(GLenum func, GLint ref, GLuint mask);
+
 void glStencilMask(GLuint mask);
+
 void glStencilOp(GLenum fail, GLenum zfail, GLenum zpass);
+
 void glGenFramebuffers(GLsizei n, GLuint *ids);
+
 void glDeleteFramebuffers(GLsizei n, const GLuint *ids);
+
 void glBindFramebuffer(GLenum target, GLuint framebuffer);
+
 void glGenRenderbuffers(GLsizei n, GLuint *ids);
+
 void glDeleteRenderbuffers(GLsizei n, const GLuint *ids);
+
 void glBindRenderbuffer(GLenum target, GLuint renderbuffer);
+
 void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height);
+
 void glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer);
+
 GLuint glGenLists(GLsizei range);
+
 void glNewList(GLuint list, GLenum mode);
+
 void glEndList(void);
+
 void glCallList(GLuint list);
+
 void glCallLists(GLsizei n, GLenum type, const GLvoid *lists);
+
 void glDeleteLists(GLuint list, GLsizei range);
 
 void glActiveTexture(GLenum texture);
+
 void glClientActiveTexture(GLenum texture);
+
 void glMultiTexCoord4f(GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q);
+
 void glMultiTexCoord2fARB(GLenum target, GLfloat s, GLfloat t);
+
 void glActiveTextureARB(GLenum texture);
+
 void glClientActiveTextureARB(GLenum texture);
 
 /* glTexCoord variants */
 void glTexCoord1d(GLdouble s);
+
 void glTexCoord1dv(const GLdouble *v);
+
 void glTexCoord1f(GLfloat s);
+
 void glTexCoord1fv(const GLfloat *v);
+
 void glTexCoord1i(GLint s);
+
 void glTexCoord1iv(const GLint *v);
+
 void glTexCoord1s(GLshort s);
+
 void glTexCoord1sv(const GLshort *v);
+
 void glTexCoord2d(GLdouble s, GLdouble t);
+
 void glTexCoord2dv(const GLdouble *v);
+
 void glTexCoord2f(GLfloat s, GLfloat t);
+
 void glTexCoord2fv(const GLfloat *v);
+
 void glTexCoord2i(GLint s, GLint t);
+
 void glTexCoord2iv(const GLint *v);
+
 void glTexCoord2s(GLshort s, GLshort t);
+
 void glTexCoord2sv(const GLshort *v);
+
 void glTexCoord3d(GLdouble s, GLdouble t, GLdouble r);
+
 void glTexCoord3dv(const GLdouble *v);
+
 void glTexCoord3f(GLfloat s, GLfloat t, GLfloat r);
+
 void glTexCoord3fv(const GLfloat *v);
+
 void glTexCoord3i(GLint s, GLint t, GLint r);
+
 void glTexCoord3iv(const GLint *v);
+
 void glTexCoord3s(GLshort s, GLshort t, GLshort r);
+
 void glTexCoord3sv(const GLshort *v);
+
 void glTexCoord4d(GLdouble s, GLdouble t, GLdouble r, GLdouble q);
+
 void glTexCoord4dv(const GLdouble *v);
+
 void glTexCoord4f(GLfloat s, GLfloat t, GLfloat r, GLfloat q);
+
 void glTexCoord4fv(const GLfloat *v);
+
 void glTexCoord4i(GLint s, GLint t, GLint r, GLint q);
+
 void glTexCoord4iv(const GLint *v);
+
 void glTexCoord4s(GLshort s, GLshort t, GLshort r, GLshort q);
+
 void glTexCoord4sv(const GLshort *v);
+
 void glTexEnvi(GLenum target, GLenum pname, GLint param);
+
 void glTexEnvf(GLenum target, GLenum pname, GLfloat param);
+
 void glTexEnvfv(GLenum target, GLenum pname, const GLfloat *params);
 
 void glEnable(GLenum cap);
+
 void glDisable(GLenum cap);
+
 GLboolean glIsEnabled(GLenum cap);
+
 GLboolean glIsTexture(GLuint texture);
 
 /* Attribute stack */
 void glPushAttrib(GLbitfield mask);
+
 void glPopAttrib(void);
+
 void glPushClientAttrib(GLbitfield mask);
+
 void glPopClientAttrib(void);
 
 /* Immediate mode (emulated via vertex arrays) */
 void glBegin(GLenum mode);
+
 void glEnd(void);
+
 void glArrayElement(GLint i);
 
 /* GL 2.0+ Shader pipeline (stubs for compat) */
 GLuint glCreateShader(GLenum type);
+
 void glShaderSource(GLuint shader, GLsizei count, const char **string, const GLint *length);
+
 void glCompileShader(GLuint shader);
+
 void glGetShaderiv(GLuint shader, GLenum pname, GLint *params);
+
 void glGetShaderInfoLog(GLuint shader, GLsizei maxLength, GLsizei *length, char *infoLog);
+
 GLuint glCreateProgram(void);
+
 void glAttachShader(GLuint program, GLuint shader);
+
 void glLinkProgram(GLuint program);
+
 void glGetProgramiv(GLuint program, GLenum pname, GLint *params);
+
 void glGetProgramInfoLog(GLuint program, GLsizei maxLength, GLsizei *length, char *infoLog);
+
 void glDeleteShader(GLuint shader);
+
 void glDeleteProgram(GLuint program);
+
 GLint glGetUniformLocation(GLuint program, const char *name);
+
 GLint glGetAttribLocation(GLuint program, const char *name);
+
 void glUseProgram(GLuint program);
+
 void glUniform1i(GLint location, GLint v0);
+
 void glUniform1f(GLint location, GLfloat v0);
+
 void glUniform2f(GLint location, GLfloat v0, GLfloat v1);
+
 void glUniform3f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2);
+
 void glUniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3);
+
 void glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 
 /* GL 3.0+ VAO (stubs for compat) */
 void glGenVertexArrays(GLsizei n, GLuint *arrays);
+
 void glBindVertexArray(GLuint array);
+
 void glDeleteVertexArrays(GLsizei n, const GLuint *arrays);
 
 /* GL 2.0+ Vertex attrib pointers (stubs for compat) */
-void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const GLvoid *pointer);
+void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride,
+                           const GLvoid *pointer);
+
 void glEnableVertexAttribArray(GLuint index);
+
 void glDisableVertexAttribArray(GLuint index);
 
 /* Framebuffer extensions */
 void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
+
 GLenum glCheckFramebufferStatus(GLenum target);
-void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter);
+
+void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1,
+                       GLint dstY1, GLbitfield mask, GLenum filter);
 
 /* Vertex functions */
 void glVertex2d(GLdouble x, GLdouble y);
+
 void glVertex2dv(const GLdouble *v);
+
 void glVertex2f(GLfloat x, GLfloat y);
+
 void glVertex2fv(const GLfloat *v);
+
 void glVertex2i(GLint x, GLint y);
+
 void glVertex2iv(const GLint *v);
+
 void glVertex2s(GLshort x, GLshort y);
+
 void glVertex2sv(const GLshort *v);
+
 void glVertex3d(GLdouble x, GLdouble y, GLdouble z);
+
 void glVertex3dv(const GLdouble *v);
+
 void glVertex3f(GLfloat x, GLfloat y, GLfloat z);
+
 void glVertex3fv(const GLfloat *v);
+
 void glVertex3i(GLint x, GLint y, GLint z);
+
 void glVertex3iv(const GLint *v);
+
 void glVertex3s(GLshort x, GLshort y, GLshort z);
+
 void glVertex3sv(const GLshort *v);
+
 void glVertex4d(GLdouble x, GLdouble y, GLdouble z, GLdouble w);
+
 void glVertex4dv(const GLdouble *v);
+
 void glVertex4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w);
+
 void glVertex4fv(const GLfloat *v);
+
 void glVertex4i(GLint x, GLint y, GLint z, GLint w);
+
 void glVertex4iv(const GLint *v);
+
 void glVertex4s(GLshort x, GLshort y, GLshort z, GLshort w);
+
 void glVertex4sv(const GLshort *v);
 
-void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height);
-void glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border);
+void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width,
+                         GLsizei height);
+
+void glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width,
+                      GLsizei height, GLint border);
+
 void glReadBuffer(int x);
+
 // egl*
 EGLBoolean eglBindAPI(EGLenum api);
+
 EGLDisplay eglGetDisplay(NativeDisplayType native_display);
+
 EGLint eglGetError(void);
+
 void (*eglGetProcAddress(char const *procname))(void);
+
 EGLuint64 eglGetSystemTimeFrequencyNV(void);
+
 EGLuint64 eglGetSystemTimeNV(void);
+
 EGLenum eglQueryAPI(void);
+
 EGLBoolean eglSwapInterval(EGLDisplay display, EGLint interval);
+
 EGLBoolean eglSwapBuffers(EGLDisplay display, EGLSurface surface);
 
 void *novaglGetProcAddress(const char *name);
+
 char *novaglGetFuncName(uint32_t func);
 #ifdef __cplusplus
 }

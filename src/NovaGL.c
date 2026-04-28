@@ -30,20 +30,20 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     gfxSet3D(true);
 
     g.render_target_top = C3D_RenderTargetCreate(NOVA_SCREEN_H, NOVA_SCREEN_W,
-                                                  GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+                                                 GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
     C3D_RenderTargetSetOutput(g.render_target_top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
 
     g.render_target_top_right = C3D_RenderTargetCreate(NOVA_SCREEN_H, NOVA_SCREEN_W,
-                                              GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+                                                       GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
     C3D_RenderTargetSetOutput(g.render_target_top_right, GFX_TOP, GFX_RIGHT, DISPLAY_TRANSFER_FLAGS);
 
     g.current_target = g.render_target_top;
 
     g.render_target_bot = C3D_RenderTargetCreate(NOVA_SCREEN_BOTTOM_W, NOVA_SCREEN_BOTTOM_H,
-                                                  GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+                                                 GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
     C3D_RenderTargetSetOutput(g.render_target_bot, GFX_BOTTOM, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
 
-    g.shader_dvlb = DVLB_ParseFile((u32*)NovaGL_shader_shbin, NovaGL_shader_shbin_size);
+    g.shader_dvlb = DVLB_ParseFile((u32 *) NovaGL_shader_shbin, NovaGL_shader_shbin_size);
 
     if (g.shader_dvlb) {
         shaderProgramInit(&g.shader_program);
@@ -51,8 +51,8 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
         C3D_BindProgram(&g.shader_program);
 
         g.uLoc_projection = shaderInstanceGetUniformLocation(g.shader_program.vertexShader, "projection");
-        g.uLoc_modelview  = shaderInstanceGetUniformLocation(g.shader_program.vertexShader, "modelview");
-        g.uLoc_fogparams  = shaderInstanceGetUniformLocation(g.shader_program.vertexShader, "fogparams");
+        g.uLoc_modelview = shaderInstanceGetUniformLocation(g.shader_program.vertexShader, "modelview");
+        g.uLoc_fogparams = shaderInstanceGetUniformLocation(g.shader_program.vertexShader, "fogparams");
     }
 
     AttrInfo_Init(&g.attr_info);
@@ -73,17 +73,21 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.index_buf = linearAlloc(g.index_buf_size);
 
     g.static_quad_count = 16384;
-    g.static_quad_indices = (uint16_t*)linearAlloc(g.static_quad_count * 6 * sizeof(uint16_t));
+    g.static_quad_indices = (uint16_t *) linearAlloc(g.static_quad_count * 6 * sizeof(uint16_t));
     if (g.static_quad_indices) {
         for (int q = 0; q < g.static_quad_count; q++) {
             uint16_t base = q * 4;
-            g.static_quad_indices[q*6+0] = base+0; g.static_quad_indices[q*6+1] = base+1; g.static_quad_indices[q*6+2] = base+2;
-            g.static_quad_indices[q*6+3] = base+0; g.static_quad_indices[q*6+4] = base+2; g.static_quad_indices[q*6+5] = base+3;
+            g.static_quad_indices[q * 6 + 0] = base + 0;
+            g.static_quad_indices[q * 6 + 1] = base + 1;
+            g.static_quad_indices[q * 6 + 2] = base + 2;
+            g.static_quad_indices[q * 6 + 3] = base + 0;
+            g.static_quad_indices[q * 6 + 4] = base + 2;
+            g.static_quad_indices[q * 6 + 5] = base + 3;
         }
         GSPGPU_FlushDataCache(g.static_quad_indices, g.static_quad_count * 6 * sizeof(uint16_t));
     }
 
-    for(int i=0; i<3; i++) {
+    for (int i = 0; i < 3; i++) {
         g.tex_env_combine_rgb[i] = GL_MODULATE;
         g.tex_env_src0_rgb[i] = GL_TEXTURE;
         g.tex_env_src1_rgb[i] = GL_PREVIOUS;
@@ -104,8 +108,10 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.tex_sp = 0;
     g.matrices_dirty = 1;
 
-    g.cur_color[0] = 1.0f; g.cur_color[1] = 1.0f;
-    g.cur_color[2] = 1.0f; g.cur_color[3] = 1.0f;
+    g.cur_color[0] = 1.0f;
+    g.cur_color[1] = 1.0f;
+    g.cur_color[2] = 1.0f;
+    g.cur_color[3] = 1.0f;
 
     g.depth_test_enabled = 1;
     g.depth_func = GL_LEQUAL;
@@ -120,12 +126,17 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
 
     g.shade_model = GL_SMOOTH;
     g.fog_mode = GL_LINEAR;
-    g.fog_start = 0.0f; g.fog_end = 1.0f; g.fog_density = 1.0f;
-    g.fog_color[0] = g.fog_color[1] = g.fog_color[2] = 0.0f; g.fog_color[3] = 1.0f;
+    g.fog_start = 0.0f;
+    g.fog_end = 1.0f;
+    g.fog_density = 1.0f;
+    g.fog_color[0] = g.fog_color[1] = g.fog_color[2] = 0.0f;
+    g.fog_color[3] = 1.0f;
     g.fog_dirty = 1;
 
-    g.vp_x = 0; g.vp_y = 0;
-    g.vp_w = NOVA_SCREEN_W; g.vp_h = NOVA_SCREEN_H;
+    g.vp_x = 0;
+    g.vp_y = 0;
+    g.vp_w = NOVA_SCREEN_W;
+    g.vp_h = NOVA_SCREEN_H;
 
     g.color_mask_r = g.color_mask_g = g.color_mask_b = g.color_mask_a = GL_TRUE;
 
@@ -145,7 +156,7 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.pack_alignment = 4;
     g.unpack_alignment = 4;
 
-    (void)tex_staging_size;
+    (void) tex_staging_size;
     g.tex_staging_size = 0;
     g.tex_staging = NULL;
 
@@ -158,6 +169,7 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     C3D_FrameDrawOn(g.render_target_top);
     g.current_target = g.render_target_top;
 }
+
 int novaGetEyeCount(void) {
     return (osGet3DSliderState() > 0.0f) ? 2 : 1;
 }
@@ -173,6 +185,7 @@ void novaBeginEye(int eye) {
 
     g.matrices_dirty = 1;
 }
+
 void novaSwapBuffers(void) {
     C3D_FrameEnd(0);
 
@@ -184,11 +197,12 @@ void novaSwapBuffers(void) {
     C3D_FrameDrawOn(g.render_target_top);
     g.current_target = g.render_target_top;
 }
+
 void nova_fini(void) {
     if (!g.initialized) return;
 
     if (g.client_array_buf) linearFree(g.client_array_buf);
-    if (g.index_buf)        linearFree(g.index_buf);
+    if (g.index_buf) linearFree(g.index_buf);
 
     if (g.tex_staging) {
         free(g.tex_staging);
@@ -205,7 +219,7 @@ void nova_fini(void) {
     if (g.static_quad_indices) {
         linearFree(g.static_quad_indices);
         g.static_quad_indices = NULL;
-        g.static_quad_count   = 0;
+        g.static_quad_count = 0;
     }
 
     if (g.shader_dvlb) {
@@ -243,7 +257,6 @@ static int primitive_vertex_count(GLenum mode) {
 }
 
 static void draw_packed_run(GLenum mode, GPU_Primitive_t prim, uint8_t *base, int count, int stride, int pos_elements) {
-
     //Trying to dynamic know: 24 or 28 bytes.
     AttrInfo_Init(&g.attr_info);
     AttrInfo_AddLoader(&g.attr_info, 0, GPU_FLOAT, pos_elements); // 3 or 4
@@ -259,11 +272,12 @@ static void draw_packed_run(GLenum mode, GPU_Primitive_t prim, uint8_t *base, in
     else C3D_DrawArrays(prim, 0, count);
 }
 
-static int packed_ptc_attr_compatible(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer, int expected_offset, int max_size) {
+static int packed_ptc_attr_compatible(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer,
+                                      int expected_offset, int max_size) {
     int effective_stride = stride ? stride : 24;
     return type == (expected_offset == 20 ? GL_UNSIGNED_BYTE : GL_FLOAT) &&
            effective_stride == 24 &&
-           (int)(uintptr_t)pointer == expected_offset &&
+           (int) (uintptr_t) pointer == expected_offset &&
            size > 0 &&
            size <= max_size;
 }
@@ -282,10 +296,11 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
     const uint8_t *idx_src = NULL;
     if (is_elements) {
         if (g.bound_element_array_buffer > 0 && g.bound_element_array_buffer < NOVA_MAX_VBOS) {
-            if (!g.vbos[g.bound_element_array_buffer].allocated || g.vbos[g.bound_element_array_buffer].data == NULL) return;
-            idx_src = (const uint8_t*)g.vbos[g.bound_element_array_buffer].data + (uintptr_t)indices;
+            if (!g.vbos[g.bound_element_array_buffer].allocated || g.vbos[g.bound_element_array_buffer].data == NULL)
+                return;
+            idx_src = (const uint8_t *) g.vbos[g.bound_element_array_buffer].data + (uintptr_t) indices;
         } else {
-            idx_src = (const uint8_t*)indices;
+            idx_src = (const uint8_t *) indices;
         }
         if (!idx_src) return;
     }
@@ -297,10 +312,12 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
     if (!is_elements &&
         g.va_vertex.enabled && g.va_vertex.vbo_id > 0 &&
         g.va_vertex.vbo_id < NOVA_MAX_VBOS && g.vbos[g.va_vertex.vbo_id].allocated &&
-        g.va_vertex.size == 3 && g.va_vertex.type == GL_FLOAT && g.va_vertex.stride == 24 && (uintptr_t)g.va_vertex.pointer == 0 &&
-        g.va_texcoord.enabled && g.va_texcoord.vbo_id == g.va_vertex.vbo_id && g.va_texcoord.size == 2 && g.va_texcoord.type == GL_FLOAT && g.va_texcoord.stride == 24 && (uintptr_t)g.va_texcoord.pointer == 12 &&
-        g.va_color.enabled && g.va_color.vbo_id == g.va_vertex.vbo_id && g.va_color.size == 4 && g.va_color.type == GL_UNSIGNED_BYTE && g.va_color.stride == 24 && (uintptr_t)g.va_color.pointer == 20)
-    {
+        g.va_vertex.size == 3 && g.va_vertex.type == GL_FLOAT && g.va_vertex.stride == 24 && (uintptr_t) g.va_vertex.
+        pointer == 0 &&
+        g.va_texcoord.enabled && g.va_texcoord.vbo_id == g.va_vertex.vbo_id && g.va_texcoord.size == 2 && g.va_texcoord.
+        type == GL_FLOAT && g.va_texcoord.stride == 24 && (uintptr_t) g.va_texcoord.pointer == 12 &&
+        g.va_color.enabled && g.va_color.vbo_id == g.va_vertex.vbo_id && g.va_color.size == 4 && g.va_color.type ==
+        GL_UNSIGNED_BYTE && g.va_color.stride == 24 && (uintptr_t) g.va_color.pointer == 20) {
         VBOSlot *vbo = &g.vbos[g.va_vertex.vbo_id];
         int available = vbo->size - first * 24;
         if (available < count * 24) {
@@ -313,11 +330,12 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
             return;
         }
 
-        uint8_t *dst_start = (uint8_t*)linear_alloc_ring(g.client_array_buf, &g.client_array_buf_offset, req_size, g.client_array_buf_size);
+        uint8_t *dst_start = (uint8_t *) linear_alloc_ring(g.client_array_buf, &g.client_array_buf_offset, req_size,
+                                                           g.client_array_buf_size);
         if (vbo_is_packed_ptc(vbo)) {
             vbo_decode_packed_ptc_span(vbo, first, count, dst_start);
         } else {
-            memcpy(dst_start, (const uint8_t*)vbo->data + first * 24, req_size);
+            memcpy(dst_start, (const uint8_t *) vbo->data + first * 24, req_size);
         }
 
         GSPGPU_FlushDataCache(dst_start, req_size);
@@ -337,35 +355,58 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
         return;
     }
 
-    uint8_t *dst = (uint8_t*)linear_alloc_ring(g.client_array_buf, &g.client_array_buf_offset, req_size, g.client_array_buf_size);
+    uint8_t *dst = (uint8_t *) linear_alloc_ring(g.client_array_buf, &g.client_array_buf_offset, req_size,
+                                                 g.client_array_buf_size);
     uint8_t *dst_start = dst;
 
-    VBOSlot *v_slot = (g.va_vertex.vbo_id > 0 && g.va_vertex.vbo_id < NOVA_MAX_VBOS) ? &g.vbos[g.va_vertex.vbo_id] : NULL;
-    VBOSlot *t_slot = (g.va_texcoord.vbo_id > 0 && g.va_texcoord.vbo_id < NOVA_MAX_VBOS) ? &g.vbos[g.va_texcoord.vbo_id] : NULL;
+    VBOSlot *v_slot = (g.va_vertex.vbo_id > 0 && g.va_vertex.vbo_id < NOVA_MAX_VBOS)
+                          ? &g.vbos[g.va_vertex.vbo_id]
+                          : NULL;
+    VBOSlot *t_slot = (g.va_texcoord.vbo_id > 0 && g.va_texcoord.vbo_id < NOVA_MAX_VBOS)
+                          ? &g.vbos[g.va_texcoord.vbo_id]
+                          : NULL;
     VBOSlot *c_slot = (g.va_color.vbo_id > 0 && g.va_color.vbo_id < NOVA_MAX_VBOS) ? &g.vbos[g.va_color.vbo_id] : NULL;
 
-    if (v_slot && vbo_is_packed_ptc(v_slot) && !packed_ptc_attr_compatible(g.va_vertex.size, g.va_vertex.type, g.va_vertex.stride, g.va_vertex.pointer, 0, 3)) vbo_convert_slot_to_raw(v_slot);
-    if (t_slot && t_slot != v_slot && vbo_is_packed_ptc(t_slot) && !packed_ptc_attr_compatible(g.va_texcoord.size, g.va_texcoord.type, g.va_texcoord.stride, g.va_texcoord.pointer, 12, 2)) vbo_convert_slot_to_raw(t_slot);
-    if (c_slot && c_slot != v_slot && c_slot != t_slot && vbo_is_packed_ptc(c_slot) && !packed_ptc_attr_compatible(g.va_color.size, g.va_color.type, g.va_color.stride, g.va_color.pointer, 20, 4)) vbo_convert_slot_to_raw(c_slot);
+    if (v_slot && vbo_is_packed_ptc(v_slot) && !packed_ptc_attr_compatible(
+            g.va_vertex.size, g.va_vertex.type, g.va_vertex.stride, g.va_vertex.pointer, 0,
+            3)) vbo_convert_slot_to_raw(v_slot);
+    if (t_slot && t_slot != v_slot && vbo_is_packed_ptc(t_slot) && !packed_ptc_attr_compatible(
+            g.va_texcoord.size, g.va_texcoord.type, g.va_texcoord.stride, g.va_texcoord.pointer, 12,
+            2)) vbo_convert_slot_to_raw(t_slot);
+    if (c_slot && c_slot != v_slot && c_slot != t_slot && vbo_is_packed_ptc(c_slot) && !packed_ptc_attr_compatible(
+            g.va_color.size, g.va_color.type, g.va_color.stride, g.va_color.pointer, 20,
+            4)) vbo_convert_slot_to_raw(c_slot);
 
     int p_str = calc_stride(g.va_vertex.stride, g.va_vertex.size, g.va_vertex.type);
     int t_str = calc_stride(g.va_texcoord.stride, g.va_texcoord.size, g.va_texcoord.type);
     int c_str = calc_stride(g.va_color.stride, g.va_color.size, g.va_color.type);
 
-    const uint8_t *src_v = (g.va_vertex.vbo_id > 0 && g.va_vertex.vbo_id < NOVA_MAX_VBOS && g.vbos[g.va_vertex.vbo_id].allocated) ? (const uint8_t*)g.vbos[g.va_vertex.vbo_id].data + (uintptr_t)g.va_vertex.pointer : (const uint8_t*)g.va_vertex.pointer;
-    const uint8_t *src_t = (g.va_texcoord.vbo_id > 0 && g.va_texcoord.vbo_id < NOVA_MAX_VBOS && g.vbos[g.va_texcoord.vbo_id].allocated) ? (const uint8_t*)g.vbos[g.va_texcoord.vbo_id].data + (uintptr_t)g.va_texcoord.pointer : (const uint8_t*)g.va_texcoord.pointer;
-    const uint8_t *src_c = (g.va_color.vbo_id > 0 && g.va_color.vbo_id < NOVA_MAX_VBOS && g.vbos[g.va_color.vbo_id].allocated) ? (const uint8_t*)g.vbos[g.va_color.vbo_id].data + (uintptr_t)g.va_color.pointer : (const uint8_t*)g.va_color.pointer;
+    const uint8_t *src_v = (g.va_vertex.vbo_id > 0 && g.va_vertex.vbo_id < NOVA_MAX_VBOS && g.vbos[g.va_vertex.vbo_id].
+                            allocated)
+                               ? (const uint8_t *) g.vbos[g.va_vertex.vbo_id].data + (uintptr_t) g.va_vertex.pointer
+                               : (const uint8_t *) g.va_vertex.pointer;
+    const uint8_t *src_t = (g.va_texcoord.vbo_id > 0 && g.va_texcoord.vbo_id < NOVA_MAX_VBOS && g.vbos[g.va_texcoord.
+                                vbo_id].allocated)
+                               ? (const uint8_t *) g.vbos[g.va_texcoord.vbo_id].data + (uintptr_t) g.va_texcoord.pointer
+                               : (const uint8_t *) g.va_texcoord.pointer;
+    const uint8_t *src_c = (g.va_color.vbo_id > 0 && g.va_color.vbo_id < NOVA_MAX_VBOS && g.vbos[g.va_color.vbo_id].
+                            allocated)
+                               ? (const uint8_t *) g.vbos[g.va_color.vbo_id].data + (uintptr_t) g.va_color.pointer
+                               : (const uint8_t *) g.va_color.pointer;
 
     uint8_t def_col[4] = {
-        (uint8_t)(g.cur_color[0] * 255.0f), (uint8_t)(g.cur_color[1] * 255.0f),
-        (uint8_t)(g.cur_color[2] * 255.0f), (uint8_t)(g.cur_color[3] * 255.0f)
+        (uint8_t) (g.cur_color[0] * 255.0f), (uint8_t) (g.cur_color[1] * 255.0f),
+        (uint8_t) (g.cur_color[2] * 255.0f), (uint8_t) (g.cur_color[3] * 255.0f)
     };
 
     for (int i = 0; i < count; i++) {
-        int src_index = is_elements ?
-            (type == GL_UNSIGNED_INT ? (int)((const uint32_t*)idx_src)[i] :
-             type == GL_UNSIGNED_SHORT ? ((const uint16_t*)idx_src)[i] : ((const uint8_t*)idx_src)[i]) :
-            (first + i);
+        int src_index = is_elements
+                            ? (type == GL_UNSIGNED_INT
+                                   ? (int) ((const uint32_t *) idx_src)[i]
+                                   : type == GL_UNSIGNED_SHORT
+                                         ? ((const uint16_t *) idx_src)[i]
+                                         : ((const uint8_t *) idx_src)[i])
+                            : (first + i);
         uint8_t packed_vertex[24];
         const VBOSlot *packed_vertex_slot = NULL;
 
@@ -374,7 +415,7 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
             vbo_decode_packed_ptc_vertex(v_slot, src_index, packed_vertex);
             packed_vertex_slot = v_slot;
             memcpy(dst, packed_vertex, pos_bytes);
-        } else if (g.va_vertex.enabled && src_v && (uintptr_t)src_v > 0x1000) {
+        } else if (g.va_vertex.enabled && src_v && (uintptr_t) src_v > 0x1000) {
             float pos[4] = {0.0f, 0.0f, 0.0f, 1.0f};
             read_vertex_attrib_float(pos, src_v + src_index * p_str, g.va_vertex.size, g.va_vertex.type);
             memcpy(dst, pos, pos_bytes);
@@ -387,9 +428,10 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
                 packed_vertex_slot = t_slot;
             }
             memcpy(dst + pos_bytes, packed_vertex + 12, 8);
-        } else if (g.va_texcoord.enabled && src_t && (uintptr_t)src_t > 0x1000) {
+        } else if (g.va_texcoord.enabled && src_t && (uintptr_t) src_t > 0x1000) {
             float tc[2] = {0.0f, 0.0f};
-            read_vertex_attrib_float(tc, src_t + src_index * t_str, g.va_texcoord.size > 2 ? 2 : g.va_texcoord.size, g.va_texcoord.type);
+            read_vertex_attrib_float(tc, src_t + src_index * t_str, g.va_texcoord.size > 2 ? 2 : g.va_texcoord.size,
+                                     g.va_texcoord.type);
             memcpy(dst + pos_bytes, tc, 8);
         } else memset(dst + pos_bytes, 0, 8);
 
@@ -401,17 +443,17 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
             }
             memcpy(dst + col_offset, packed_vertex + 20, 4);
             if (g.va_color.size == 3) dst[col_offset + 3] = 255;
-        } else if (g.va_color.enabled && src_c && (uintptr_t)src_c > 0x1000) {
-            const uint8_t* c_ptr = src_c + src_index * c_str;
+        } else if (g.va_color.enabled && src_c && (uintptr_t) src_c > 0x1000) {
+            const uint8_t *c_ptr = src_c + src_index * c_str;
             if (g.va_color.type == GL_UNSIGNED_BYTE || (g.va_color.type != GL_FLOAT)) {
                 memcpy(dst + col_offset, c_ptr, g.va_color.size == 3 ? 3 : 4);
                 if (g.va_color.size == 3) dst[col_offset + 3] = 255;
             } else {
-                const float *cf = (const float*)c_ptr;
-                dst[col_offset + 0] = (uint8_t)(clampf(cf[0], 0.0f, 1.0f) * 255.0f);
-                dst[col_offset + 1] = (uint8_t)(clampf(cf[1], 0.0f, 1.0f) * 255.0f);
-                dst[col_offset + 2] = (uint8_t)(clampf(cf[2], 0.0f, 1.0f) * 255.0f);
-                dst[col_offset + 3] = g.va_color.size >= 4 ? (uint8_t)(clampf(cf[3], 0.0f, 1.0f) * 255.0f) : 255;
+                const float *cf = (const float *) c_ptr;
+                dst[col_offset + 0] = (uint8_t) (clampf(cf[0], 0.0f, 1.0f) * 255.0f);
+                dst[col_offset + 1] = (uint8_t) (clampf(cf[1], 0.0f, 1.0f) * 255.0f);
+                dst[col_offset + 2] = (uint8_t) (clampf(cf[2], 0.0f, 1.0f) * 255.0f);
+                dst[col_offset + 3] = g.va_color.size >= 4 ? (uint8_t) (clampf(cf[3], 0.0f, 1.0f) * 255.0f) : 255;
             }
         } else {
             memcpy(dst + col_offset, def_col, 4);
@@ -421,8 +463,11 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
     }
 
     if (g.shade_model == GL_FLAT) {
-        int verts_per_prim = (mode == GL_TRIANGLES || mode == GL_TRIANGLE_FAN || mode == GL_TRIANGLE_STRIP) ? 3
-                           : (mode == GL_QUADS) ? 4 : 0;
+        int verts_per_prim = (mode == GL_TRIANGLES || mode == GL_TRIANGLE_FAN || mode == GL_TRIANGLE_STRIP)
+                                 ? 3
+                                 : (mode == GL_QUADS)
+                                       ? 4
+                                       : 0;
         if (verts_per_prim > 0) {
             if (mode == GL_TRIANGLES || mode == GL_QUADS) {
                 for (int i = 0; i + verts_per_prim <= count; i += verts_per_prim) {
@@ -451,7 +496,14 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
     cleanup_vbo_stream();
 }
 
-GLenum glGetError(void) { GLenum e = g.last_error; g.last_error = GL_NO_ERROR; return e; }
+GLenum glGetError(void) {
+    GLenum e = g.last_error;
+    g.last_error = GL_NO_ERROR;
+    return e;
+}
 
-void glFlush(void) { }
-void glFinish(void) { }
+void glFlush(void) {
+}
+
+void glFinish(void) {
+}

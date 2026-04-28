@@ -7,10 +7,13 @@
 
 void glGenFramebuffers(GLsizei n, GLuint *ids) { for (GLsizei i = 0; i < n; i++) ids[i] = i + 1; }
 
-void glDeleteFramebuffers(GLsizei n, const GLuint *ids) { (void)n; (void)ids; }
+void glDeleteFramebuffers(GLsizei n, const GLuint *ids) {
+    (void) n;
+    (void) ids;
+}
 
 void glBindFramebuffer(GLenum target, GLuint framebuffer) {
-    (void)target;
+    (void) target;
     if (framebuffer == 0 || framebuffer == 1) {
         C3D_FrameDrawOn(g.render_target_top);
         g.current_target = g.render_target_top;
@@ -19,16 +22,37 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
 
 void glGenRenderbuffers(GLsizei n, GLuint *ids) { for (GLsizei i = 0; i < n; i++) ids[i] = i + 1; }
 
-void glDeleteRenderbuffers(GLsizei n, const GLuint *ids) { (void)n; (void)ids; }
+void glDeleteRenderbuffers(GLsizei n, const GLuint *ids) {
+    (void) n;
+    (void) ids;
+}
 
-void glBindRenderbuffer(GLenum target, GLuint renderbuffer) { (void)target; (void)renderbuffer; }
+void glBindRenderbuffer(GLenum target, GLuint renderbuffer) {
+    (void) target;
+    (void) renderbuffer;
+}
 
-void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height) { (void)target; (void)internalformat; (void)width; (void)height; }
+void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height) {
+    (void) target;
+    (void) internalformat;
+    (void) width;
+    (void) height;
+}
 
-void glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) { (void)target; (void)attachment; (void)renderbuffertarget; (void)renderbuffer; }
+void glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) {
+    (void) target;
+    (void) attachment;
+    (void) renderbuffertarget;
+    (void) renderbuffer;
+}
 
 void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *pixels) {
-    (void)x; (void)y; (void)width; (void)height; (void)format; (void)type;
+    (void) x;
+    (void) y;
+    (void) width;
+    (void) height;
+    (void) format;
+    (void) type;
     if (pixels) memset(pixels, 0, width * height * 4);
 }
 
@@ -45,25 +69,37 @@ void glPixelStorei(GLenum pname, GLint param) {
 }
 
 void glPixelStoref(GLenum pname, GLfloat param) {
-    glPixelStorei(pname, (GLint)param);
+    glPixelStorei(pname, (GLint) param);
 }
 
 void glDrawBuffer(GLenum mode) {
-    (void)mode;
+    (void) mode;
     /* Only single buffer supported on 3DS */
 }
 
 void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
-    (void)target; (void)attachment; (void)textarget; (void)texture; (void)level;
+    (void) target;
+    (void) attachment;
+    (void) textarget;
+    (void) texture;
+    (void) level;
 }
 
 GLenum glCheckFramebufferStatus(GLenum target) {
-    (void)target;
+    (void) target;
     return GL_FRAMEBUFFER_COMPLETE;
 }
 
-void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter) {
-    (void)srcX0; (void)srcY0; (void)srcX1; (void)srcY1;
-    (void)dstX0; (void)dstY0; (void)dstX1; (void)dstY1;
-    (void)mask; (void)filter;
+void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1,
+                       GLint dstY1, GLbitfield mask, GLenum filter) {
+    (void) srcX0;
+    (void) srcY0;
+    (void) srcX1;
+    (void) srcY1;
+    (void) dstX0;
+    (void) dstY0;
+    (void) dstX1;
+    (void) dstY1;
+    (void) mask;
+    (void) filter;
 }

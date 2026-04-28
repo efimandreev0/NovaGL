@@ -24,29 +24,29 @@ static uint16_t float_to_half_bits(float value) {
 
     if (exponent == 0xFFu) {
         if (mantissa) {
-            return (uint16_t)(sign | 0x7E00u);
+            return (uint16_t) (sign | 0x7E00u);
         }
-        return (uint16_t)(sign | 0x7C00u);
+        return (uint16_t) (sign | 0x7C00u);
     }
 
-    int new_exp = (int)exponent - 127 + 15;
+    int new_exp = (int) exponent - 127 + 15;
     if (new_exp >= 0x1F) {
-        return (uint16_t)(sign | 0x7C00u);
+        return (uint16_t) (sign | 0x7C00u);
     }
 
     if (new_exp <= 0) {
         if (new_exp < -10) {
-            return (uint16_t)sign;
+            return (uint16_t) sign;
         }
         mantissa |= 0x800000u;
-        uint32_t shifted = mantissa >> (uint32_t)(14 - new_exp);
-        if ((mantissa >> (uint32_t)(13 - new_exp)) & 1u) {
+        uint32_t shifted = mantissa >> (uint32_t) (14 - new_exp);
+        if ((mantissa >> (uint32_t) (13 - new_exp)) & 1u) {
             shifted++;
         }
-        return (uint16_t)(sign | shifted);
+        return (uint16_t) (sign | shifted);
     }
 
-    uint16_t half = (uint16_t)(sign | ((uint32_t)new_exp << 10) | (mantissa >> 13));
+    uint16_t half = (uint16_t) (sign | ((uint32_t) new_exp << 10) | (mantissa >> 13));
     if (mantissa & 0x1000u) {
         half++;
     }
@@ -54,9 +54,9 @@ static uint16_t float_to_half_bits(float value) {
 }
 
 static float half_bits_to_float(uint16_t value) {
-    uint32_t sign = ((uint32_t)value & 0x8000u) << 16;
-    uint32_t exponent = ((uint32_t)value >> 10) & 0x1Fu;
-    uint32_t mantissa = (uint32_t)value & 0x03FFu;
+    uint32_t sign = ((uint32_t) value & 0x8000u) << 16;
+    uint32_t exponent = ((uint32_t) value >> 10) & 0x1Fu;
+    uint32_t mantissa = (uint32_t) value & 0x03FFu;
     uint32_t bits;
 
     if (exponent == 0) {
@@ -98,9 +98,9 @@ static void free_vbo_storage(VBOSlot *slot) {
 }
 
 static int can_pack_ptc_vbo(GLsizeiptr size, const GLvoid *data, GLenum usage) {
-    (void)size;
-    (void)data;
-    (void)usage;
+    (void) size;
+    (void) data;
+    (void) usage;
     return 0;
 }
 
@@ -136,7 +136,7 @@ int vbo_is_packed_ptc(const VBOSlot *slot) {
 }
 
 void vbo_decode_packed_ptc_vertex(const VBOSlot *slot, int vertex_index, uint8_t *out_vertex) {
-    const uint8_t *src = (const uint8_t*)slot->data + vertex_index * NOVA_VBO_PTC_PACKED_STRIDE;
+    const uint8_t *src = (const uint8_t *) slot->data + vertex_index * NOVA_VBO_PTC_PACKED_STRIDE;
     uint16_t hx, hy, hz, hu, hv;
     float x, y, z, u, v;
 
@@ -171,20 +171,20 @@ void vbo_convert_slot_to_raw(VBOSlot *slot) {
         return;
     }
 
-    void *decoded = linearAlloc((size_t)slot->size);
+    void *decoded = linearAlloc((size_t) slot->size);
     if (!decoded) {
         g.last_error = GL_OUT_OF_MEMORY;
         return;
     }
 
-    vbo_decode_packed_ptc_span(slot, 0, slot->size / NOVA_VBO_PTC_RAW_STRIDE, (uint8_t*)decoded);
+    vbo_decode_packed_ptc_span(slot, 0, slot->size / NOVA_VBO_PTC_RAW_STRIDE, (uint8_t *) decoded);
     linearFree(slot->data);
     slot->data = decoded;
     slot->capacity = slot->size;
     slot->storage_kind = NOVA_VBO_STORAGE_RAW;
     slot->storage_stride = 0;
     slot->allocated = 1;
-    GSPGPU_FlushDataCache(slot->data, (u32)slot->size);
+    GSPGPU_FlushDataCache(slot->data, (u32) slot->size);
 }
 
 void glGenBuffers(GLsizei n, GLuint *buffers) {
@@ -193,7 +193,11 @@ void glGenBuffers(GLsizei n, GLuint *buffers) {
         while (id < NOVA_MAX_VBOS && g.vbos[id].in_use) {
             id++;
         }
-        if (id == NOVA_MAX_VBOS) { g.last_error = GL_OUT_OF_MEMORY; buffers[i] = 0; break; }
+        if (id == NOVA_MAX_VBOS) {
+            g.last_error = GL_OUT_OF_MEMORY;
+            buffers[i] = 0;
+            break;
+        }
 
         memset(&g.vbos[id], 0, sizeof(g.vbos[id]));
         g.vbos[id].in_use = 1;
@@ -204,12 +208,12 @@ void glGenBuffers(GLsizei n, GLuint *buffers) {
 void glDeleteBuffers(GLsizei n, const GLuint *buffers) {
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = buffers[i];
-        if (id > 0 && (int)id < NOVA_MAX_VBOS && g.vbos[id].in_use) {
+        if (id > 0 && (int) id < NOVA_MAX_VBOS && g.vbos[id].in_use) {
             VBOSlot *slot = &g.vbos[id];
             free_vbo_storage(slot);
-            slot->in_use    = 0;
+            slot->in_use = 0;
 
-            if (g.bound_array_buffer == id)        g.bound_array_buffer = 0;
+            if (g.bound_array_buffer == id) g.bound_array_buffer = 0;
             if (g.bound_element_array_buffer == id) g.bound_element_array_buffer = 0;
         }
     }
@@ -221,8 +225,7 @@ void glBindBuffer(GLenum target, GLuint buffer) {
     else if (target == GL_ELEMENT_ARRAY_BUFFER) g.bound_element_array_buffer = buffer;
 }
 
-void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usage)
-{
+void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usage) {
     GLuint id = 0;
     if (target == GL_ARRAY_BUFFER) id = g.bound_array_buffer;
     else if (target == GL_ELEMENT_ARRAY_BUFFER) id = g.bound_element_array_buffer;
@@ -233,7 +236,7 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
     int pack_ptc = (target == GL_ARRAY_BUFFER) && can_pack_ptc_vbo(size, data, usage);
     int desired_kind = pack_ptc ? NOVA_VBO_STORAGE_PACKED_PTC : NOVA_VBO_STORAGE_RAW;
     int desired_stride = pack_ptc ? NOVA_VBO_PTC_PACKED_STRIDE : 0;
-    int desired_bytes = pack_ptc ? ((size / NOVA_VBO_PTC_RAW_STRIDE) * NOVA_VBO_PTC_PACKED_STRIDE) : (int)size;
+    int desired_bytes = pack_ptc ? ((size / NOVA_VBO_PTC_RAW_STRIDE) * NOVA_VBO_PTC_PACKED_STRIDE) : (int) size;
 
     if (slot->allocated &&
         (slot->storage_kind != desired_kind || slot->storage_stride != desired_stride)) {
@@ -242,11 +245,10 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
 
     if (!slot->allocated ||
         slot->capacity < desired_bytes ||
-        (desired_kind == NOVA_VBO_STORAGE_RAW && desired_bytes > 0 && slot->capacity > desired_bytes * 4))
-    {
+        (desired_kind == NOVA_VBO_STORAGE_RAW && desired_bytes > 0 && slot->capacity > desired_bytes * 4)) {
         int new_capacity = desired_bytes;
 
-        void *new_buf = linearAlloc((size_t)new_capacity);
+        void *new_buf = linearAlloc((size_t) new_capacity);
         if (!new_buf) {
             g.last_error = GL_OUT_OF_MEMORY;
             return;
@@ -261,13 +263,12 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
     slot->size = size;
     slot->is_stream = (usage == GL_STREAM_DRAW);
     slot->storage_kind = desired_kind;
-    slot->storage_stride = (uint8_t)desired_stride;
+    slot->storage_stride = (uint8_t) desired_stride;
 
-    if (data && slot->data)
-    {
+    if (data && slot->data) {
         if (pack_ptc) {
-            const uint8_t *src = (const uint8_t*)data;
-            uint8_t *dst = (uint8_t*)slot->data;
+            const uint8_t *src = (const uint8_t *) data;
+            uint8_t *dst = (uint8_t *) slot->data;
             int vertex_count = size / NOVA_VBO_PTC_RAW_STRIDE;
             for (int i = 0; i < vertex_count; i++) {
                 pack_ptc_vertex(dst + i * NOVA_VBO_PTC_PACKED_STRIDE, src + i * NOVA_VBO_PTC_RAW_STRIDE);
@@ -275,12 +276,11 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
         } else {
             memcpy(slot->data, data, size);
         }
-        GSPGPU_FlushDataCache(slot->data, (u32)desired_bytes);
+        GSPGPU_FlushDataCache(slot->data, (u32) desired_bytes);
     }
 }
 
-void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvoid *data)
-{
+void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvoid *data) {
     GLuint id = 0;
     if (target == GL_ARRAY_BUFFER) id = g.bound_array_buffer;
     else if (target == GL_ELEMENT_ARRAY_BUFFER) id = g.bound_element_array_buffer;
@@ -298,21 +298,20 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
 
     int required = offset + size;
 
-    if (!slot->allocated || slot->capacity < required)
-    {
+    if (!slot->allocated || slot->capacity < required) {
         int new_capacity = slot->capacity ? slot->capacity : 1;
 
         while (new_capacity < required)
             new_capacity = (new_capacity * 3) / 2;
 
-        void *new_buf = linearAlloc((size_t)new_capacity);
+        void *new_buf = linearAlloc((size_t) new_capacity);
         if (!new_buf) {
             g.last_error = GL_OUT_OF_MEMORY;
             return;
         }
 
         if (slot->data && slot->capacity > 0) {
-            memcpy(new_buf, slot->data, (size_t)slot->capacity);
+            memcpy(new_buf, slot->data, (size_t) slot->capacity);
             linearFree(slot->data);
         }
 
@@ -321,12 +320,12 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
         slot->allocated = 1;
     }
 
-    memcpy((uint8_t*)slot->data + offset, data, size);
+    memcpy((uint8_t *) slot->data + offset, data, size);
 
     if (required > slot->size)
         slot->size = required;
 
-    GSPGPU_FlushDataCache(slot->data, (u32)slot->size);
+    GSPGPU_FlushDataCache(slot->data, (u32) slot->size);
 }
 
 void glReadBuffer(int x) {

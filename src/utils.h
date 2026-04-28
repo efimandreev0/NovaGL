@@ -6,9 +6,10 @@
 #define NOVAGL_UTILS_H
 #include <stdint.h>
 #include "context.h"
+
 unsigned int nova_next_pow2(unsigned int v);
 
-void* linear_alloc_ring(void *base, int *offset, int size, int capacity);
+void *linear_alloc_ring(void *base, int *offset, int size, int capacity);
 
 float clampf(float x, float lo, float hi);
 
@@ -46,13 +47,13 @@ void vbo_decode_packed_ptc_span(const VBOSlot *slot, int first_vertex, int verte
 
 void vbo_convert_slot_to_raw(VBOSlot *slot);
 
-C3D_Mtx* cur_mtx(void);
+C3D_Mtx *cur_mtx(void);
 
-int* cur_sp(void);
+int *cur_sp(void);
 
-C3D_Mtx* cur_stack(void);
+C3D_Mtx *cur_stack(void);
 
-void* get_tex_staging(int size);
+void *get_tex_staging(int size);
 
 uint32_t morton_interleave(uint32_t x, uint32_t y);
 
@@ -62,7 +63,7 @@ void swizzle_16bit(uint16_t *dst, const uint16_t *src, int src_w, int src_h, int
 
 void swizzle_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src_h, int pot_w, int pot_h);
 
-uint32_t* rgb_to_rgba(const uint8_t *rgb, int w, int h);
+uint32_t *rgb_to_rgba(const uint8_t *rgb, int w, int h);
 
 void downscale_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src_h, int dst_w, int dst_h);
 
@@ -82,5 +83,5 @@ static GPU_TEVSRC get_tev_src(GLint gl_src, GPU_TEVSRC tex_src, GPU_TEVSRC prev_
 
 static int get_tev_op_rgb(GLint gl_op);
 
-void nova_hardware_swizzle(C3D_Tex* tex, const void* linear_pixels, int width, int height, GPU_TEXCOLOR format);
+void nova_hardware_swizzle(C3D_Tex *tex, const void *linear_pixels, int width, int height, GPU_TEXCOLOR format);
 #endif //NOVAGL_UTILS_H

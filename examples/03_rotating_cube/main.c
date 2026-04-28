@@ -29,8 +29,8 @@ static unsigned int make_color(unsigned char r, unsigned char g,
 }
 
 /* Generate a simple 32x32 checkerboard */
-static unsigned char* generate_texture(int size) {
-    unsigned char *pixels = (unsigned char*)malloc(size * size * 4);
+static unsigned char *generate_texture(int size) {
+    unsigned char *pixels = (unsigned char *) malloc(size * size * 4);
     for (int y = 0; y < size; y++) {
         for (int x = 0; x < size; x++) {
             int checker = ((x / 4) + (y / 4)) & 1;
@@ -47,29 +47,29 @@ static unsigned char* generate_texture(int size) {
 /* Build a cube: 6 faces * 2 triangles * 3 vertices = 36 vertices */
 static void build_cube(Vertex *out, float s) {
     unsigned int colors[6] = {
-        make_color(255, 100, 100, 255),  /* front  - red */
-        make_color(100, 255, 100, 255),  /* back   - green */
-        make_color(100, 100, 255, 255),  /* top    - blue */
-        make_color(255, 255, 100, 255),  /* bottom - yellow */
-        make_color(255, 100, 255, 255),  /* right  - magenta */
-        make_color(100, 255, 255, 255),  /* left   - cyan */
+        make_color(255, 100, 100, 255), /* front  - red */
+        make_color(100, 255, 100, 255), /* back   - green */
+        make_color(100, 100, 255, 255), /* top    - blue */
+        make_color(255, 255, 100, 255), /* bottom - yellow */
+        make_color(255, 100, 255, 255), /* right  - magenta */
+        make_color(100, 255, 255, 255), /* left   - cyan */
     };
 
     /* Face positions: each face = 4 corners, we expand to 2 triangles */
     float faces[6][4][3] = {
-        {{-s,-s, s},{ s,-s, s},{ s, s, s},{-s, s, s}}, /* Front (+Z) */
-        {{ s,-s,-s},{-s,-s,-s},{-s, s,-s},{ s, s,-s}}, /* Back (-Z) */
-        {{-s, s, s},{ s, s, s},{ s, s,-s},{-s, s,-s}}, /* Top (+Y) */
-        {{-s,-s,-s},{ s,-s,-s},{ s,-s, s},{-s,-s, s}}, /* Bottom (-Y) */
-        {{ s,-s, s},{ s,-s,-s},{ s, s,-s},{ s, s, s}}, /* Right (+X) */
-        {{-s,-s,-s},{-s,-s, s},{-s, s, s},{-s, s,-s}}, /* Left (-X) */
+        {{-s, -s, s}, {s, -s, s}, {s, s, s}, {-s, s, s}}, /* Front (+Z) */
+        {{s, -s, -s}, {-s, -s, -s}, {-s, s, -s}, {s, s, -s}}, /* Back (-Z) */
+        {{-s, s, s}, {s, s, s}, {s, s, -s}, {-s, s, -s}}, /* Top (+Y) */
+        {{-s, -s, -s}, {s, -s, -s}, {s, -s, s}, {-s, -s, s}}, /* Bottom (-Y) */
+        {{s, -s, s}, {s, -s, -s}, {s, s, -s}, {s, s, s}}, /* Right (+X) */
+        {{-s, -s, -s}, {-s, -s, s}, {-s, s, s}, {-s, s, -s}}, /* Left (-X) */
     };
 
-    float uvs[4][2] = {{0,1},{1,1},{1,0},{0,0}};
+    float uvs[4][2] = {{0, 1}, {1, 1}, {1, 0}, {0, 0}};
 
     int v = 0;
     for (int f = 0; f < 6; f++) {
-        int idx[6] = {0,1,2, 0,2,3};
+        int idx[6] = {0, 1, 2, 0, 2, 3};
         for (int i = 0; i < 6; i++) {
             int c = idx[i];
             out[v].x = faces[f][c][0];
@@ -110,7 +110,7 @@ int main(void) {
     Vertex cube[36];
     build_cube(cube, 0.5f);
 
-    Vertex *vbo_data = (Vertex*)linearAlloc(sizeof(cube));
+    Vertex *vbo_data = (Vertex *) linearAlloc(sizeof(cube));
     memcpy(vbo_data, cube, sizeof(cube));
 
     GLuint vbo;
@@ -168,9 +168,9 @@ int main(void) {
             glEnableClientState(GL_TEXTURE_COORD_ARRAY);
             glEnableClientState(GL_COLOR_ARRAY);
 
-            glVertexPointer(3, GL_FLOAT, sizeof(Vertex), (void*)0);
-            glTexCoordPointer(2, GL_FLOAT, sizeof(Vertex), (void*)(3 * 4));
-            glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), (void*)(5 * 4));
+            glVertexPointer(3, GL_FLOAT, sizeof(Vertex), (void *) 0);
+            glTexCoordPointer(2, GL_FLOAT, sizeof(Vertex), (void *) (3 * 4));
+            glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(Vertex), (void *) (5 * 4));
 
             glDrawArrays(GL_TRIANGLES, 0, 36);
 
