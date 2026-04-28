@@ -286,7 +286,7 @@ void swizzle_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src_h, int
 
 uint32_t* rgb_to_rgba(const uint8_t *rgb, int w, int h) {
     uint32_t *out = (uint32_t*)malloc(w * h * 4);
-    if (!out) return nullptr;
+    if (!out) return NULL;
     for (int i = 0; i < w * h; i++) {
         //this color channels in C3D is really fucking fuck. PICA200 is fucking puzzle.
         out[i] = (rgb[i*3+0] << 24) | (rgb[i*3+1] << 16) | (rgb[i*3+2] << 8) | 0xFF;
