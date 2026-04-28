@@ -183,6 +183,7 @@ GPU_TEXCOLOR gl_to_gpu_texfmt(GLenum format, GLenum type) {
     }
     if (format == GL_LUMINANCE)                 return GPU_L8;
     if (format == GL_LUMINANCE_ALPHA)           return GPU_LA8;
+    if (format == GL_LUMINANCE_ALPHA4_NOVA)     return GPU_LA4;
     if (format == GL_ALPHA)                     return GPU_A8;
     return GPU_RGBA8;
 }
@@ -433,7 +434,12 @@ void apply_gpu_state(void) {
             C3D_Mtx adj_proj = g.proj_stack[g.proj_sp];
 
             float slider = osGet3DSliderState();
-            if (slider > 0.0f && g.stereo_depth > 0.0f) {
+            if (slider > 0.0f && g.stereo_depth != 0.0f) {
+                // ВАЖНО: сдвиг применяется в CLIP-space (после проекции),
+                // т.е. offset измеряется в NDC, где [-1, 1] = весь экран.
+                // Раньше было adj_proj * trans, что давало сдвиг в pre-projection
+                // координатах (пикселях view-space) — там 0.05 = 0.05 пикселя,
+                // что глазом не видно. Теперь trans * adj_proj — сдвиг в NDC.
                 float shift = slider * g.stereo_depth;
                 float offset = (g.current_eye == 0) ? shift : -shift;
 
@@ -442,7 +448,7 @@ void apply_gpu_state(void) {
                 trans.r[0].w = offset;
 
                 C3D_Mtx temp_proj;
-                Mtx_Multiply(&temp_proj, &adj_proj, &trans);
+                Mtx_Multiply(&temp_proj, &trans, &adj_proj);
                 adj_proj = temp_proj;
             }
             // hack for PICA200 (3DS Z-range)

@@ -276,7 +276,8 @@ static int is_texture_solid(const void* pixels, int width, int height, GLenum fo
 
     int bpp = 4;
     if (type == GL_UNSIGNED_SHORT_4_4_4_4 || type == GL_UNSIGNED_SHORT_5_5_5_1 || type == GL_UNSIGNED_SHORT_5_6_5) bpp = 2;
-    else if (format == GL_LUMINANCE || format == GL_ALPHA) bpp = 1;
+    else if (format == GL_LUMINANCE_ALPHA && type == GL_UNSIGNED_BYTE) bpp = 2;
+    else if (format == GL_LUMINANCE || format == GL_ALPHA || format == GL_LUMINANCE_ALPHA4_NOVA) bpp = 1;
     else if (format == GL_RGB && type == GL_UNSIGNED_BYTE) bpp = 3;
 
     int stride = row_stride_bytes(width, bpp, alignment);

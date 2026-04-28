@@ -163,6 +163,9 @@ GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 #define GL_RGBA                     0x1908
 #define GL_LUMINANCE                0x1909
 #define GL_LUMINANCE_ALPHA          0x190A
+/* NovaGL extension: 4-bit luminance + 4-bit alpha packed in a single byte
+ * (high nibble = alpha, low nibble = luminance) — maps directly to GPU_LA4. */
+#define GL_LUMINANCE_ALPHA4_NOVA    0x6B34
 #define GL_RGBA8_OES                0x8058
 #define GL_COMPRESSED_RGBA_PVRTC_4BPPV1_IMG  0x8C02
 #define GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG   0x8C00

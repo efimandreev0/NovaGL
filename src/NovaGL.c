@@ -18,16 +18,17 @@ void nova_init() {
 void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_size, int tex_staging_size) {
     memset(&g, 0, sizeof(g));
 
-    if (client_array_buf_size < 8 * 1024 * 1024) {
-        client_array_buf_size = 8 * 1024 * 1024;
-    }
-    if (index_buf_size < 512 * 1024) {
-        index_buf_size = 512 * 1024;
-    }
+    //if (client_array_buf_size < 8 * 1024 * 1024) {
+    //    client_array_buf_size = 8 * 1024 * 1024;
+    //}
+    //if (index_buf_size < 512 * 1024) {
+    //    index_buf_size = 512 * 1024;
+    //}
 
     C3D_Init(cmd_buf_size);
 
     gfxSet3D(true);
+
     g.render_target_top = C3D_RenderTargetCreate(NOVA_SCREEN_H, NOVA_SCREEN_W,
                                                   GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
     C3D_RenderTargetSetOutput(g.render_target_top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
