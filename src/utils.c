@@ -449,11 +449,6 @@ void apply_gpu_state(void) {
 
             float slider = osGet3DSliderState();
             if (slider > 0.0f && g.stereo_depth != 0.0f) {
-                // ВАЖНО: сдвиг применяется в CLIP-space (после проекции),
-                // т.е. offset измеряется в NDC, где [-1, 1] = весь экран.
-                // Раньше было adj_proj * trans, что давало сдвиг в pre-projection
-                // координатах (пикселях view-space) — там 0.05 = 0.05 пикселя,
-                // что глазом не видно. Теперь trans * adj_proj — сдвиг в NDC.
                 float shift = slider * g.stereo_depth;
                 float offset = (g.current_eye == 0) ? shift : -shift;
 

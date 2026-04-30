@@ -39,6 +39,14 @@ typedef struct {
     uint8_t storage_stride;
 } VBOSlot;
 
+#define NOVA_MAX_FBOS 16
+
+typedef struct {
+    int in_use;
+    C3D_RenderTarget *target;
+    GLuint color_tex_id;
+} FBOSlot;
+
 typedef enum {
     DL_OP_TRANSLATE,
     DL_OP_COLOR3F,
@@ -190,6 +198,12 @@ extern struct NovaState {
 
     int current_eye; // 0 = left, 1 = right
     float stereo_depth;
+
+    /* Minimal FBO support: a pool of render targets that wrap a NovaGL texture.
+     * glGenFramebuffers hands out IDs into this pool; glBindFramebuffer swaps
+     * g.current_target between the screen targets and an FBO's C3D target. */
+    FBOSlot fbos[NOVA_MAX_FBOS];
+    GLuint bound_fbo; // 0 = screen
 } g;
 
 #endif //NOVAGL_CONTEXT_H
