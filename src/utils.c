@@ -440,6 +440,11 @@ static int get_tev_op_rgb(GLint gl_op) {
     return GPU_TEVOP_RGB_SRC_COLOR;
 }
 
+
+// ==== ИЗМЕНЕНИЯ APPLY GPU STATE ====
+// Вынесена логика переворота матрицы и Scissor Box'а
+// Теперь FBO (g.bound_fbo != 0) не крутит камеру!
+
 void apply_gpu_state(void) {
     if (g.matrices_dirty) {
         if (g.fog_enabled) g.fog_dirty = 1;
@@ -451,13 +456,8 @@ void apply_gpu_state(void) {
             if (slider > 0.0f && g.stereo_depth != 0.0f) {
                 float shift = slider * g.stereo_depth;
                 float offset = (g.current_eye == 0) ? shift : -shift;
-
-                C3D_Mtx trans;
-                Mtx_Identity(&trans);
-                trans.r[0].w = offset;
-
-                C3D_Mtx temp_proj;
-                Mtx_Multiply(&temp_proj, &trans, &adj_proj);
+                C3D_Mtx trans; Mtx_Identity(&trans); trans.r[0].w = offset;
+                C3D_Mtx temp_proj; Mtx_Multiply(&temp_proj, &trans, &adj_proj);
                 adj_proj = temp_proj;
             }
             // hack for PICA200 (3DS Z-range)
@@ -468,10 +468,12 @@ void apply_gpu_state(void) {
 
             C3D_Mtx tilt;
             Mtx_Identity(&tilt);
-            tilt.r[0].x = 0.0f;
-            tilt.r[0].y = 1.0f;
-            tilt.r[1].x = -1.0f;
-            tilt.r[1].y = 0.0f;
+
+            // ФИКС ФРЕЙМБУФЕРОВ ЗДЕСЬ: ЭКРАН КРУТИТСЯ, А FBO - НЕТ!
+            if (g.bound_fbo == 0) {
+                tilt.r[0].x = 0.0f; tilt.r[0].y = 1.0f;
+                tilt.r[1].x = -1.0f; tilt.r[1].y = 0.0f;
+            }
 
             C3D_Mtx final_proj;
             Mtx_Multiply(&final_proj, &tilt, &adj_proj);
@@ -485,20 +487,15 @@ void apply_gpu_state(void) {
     if (g.fog_dirty) {
         if (g.uLoc_fogparams >= 0) {
             if (g.fog_enabled) {
-                // protect from div by zero (if game send same start and end)
                 float safe_end = g.fog_end;
-                if (fabsf(safe_end - g.fog_start) < 0.001f) {
-                    safe_end = g.fog_start + 0.001f;
-                }
+                if (fabsf(safe_end - g.fog_start) < 0.001f) safe_end = g.fog_start + 0.001f;
                 C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams, g.fog_start, safe_end, g.fog_density, 1.0f);
-                C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams + 1, g.fog_color[0], g.fog_color[1], g.fog_color[2],
-                              g.fog_color[3]);
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams + 1, g.fog_color[0], g.fog_color[1], g.fog_color[2], g.fog_color[3]);
             } else {
                 C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams, 0.0f, 999999.0f, 0.0f, 0.0f);
                 C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams + 1, 1.0f, 1.0f, 1.0f, 1.0f);
             }
         }
-
         C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
         g.fog_dirty = 0;
     }
@@ -530,23 +527,24 @@ void apply_gpu_state(void) {
         C3D_CullFace(GPU_CULL_NONE);
     }
 
+    // ВТОРОЙ ФИКС: SCISSOR
     if (g.scissor_test_enabled) {
-        C3D_SetScissor(GPU_SCISSOR_NORMAL, g.scissor_y, g.scissor_x, g.scissor_y + g.scissor_h,
-                       g.scissor_x + g.scissor_w);
+        if (g.bound_fbo == 0) {
+            C3D_SetScissor(GPU_SCISSOR_NORMAL, g.scissor_y, g.scissor_x, g.scissor_y + g.scissor_h, g.scissor_x + g.scissor_w);
+        } else {
+            C3D_SetScissor(GPU_SCISSOR_NORMAL, g.scissor_x, g.scissor_y, g.scissor_x + g.scissor_w, g.scissor_y + g.scissor_h);
+        }
     } else {
         C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
     }
 
     int current_tex_state = 0;
     for (int i = 0; i < 3; i++) {
-        if (g.texture_2d_enabled_unit[i] && g.bound_texture[i] > 0) {
-            current_tex_state |= (1 << i);
-        }
+        if (g.texture_2d_enabled_unit[i] && g.bound_texture[i] > 0) current_tex_state |= (1 << i);
     }
 
     if (g.tev_dirty || g.last_tex_state != current_tex_state) {
         int tev_stage = 0;
-
         for (int unit = 0; unit < 3; unit++) {
             if (!(current_tex_state & (1 << unit))) continue;
 
@@ -557,11 +555,9 @@ void apply_gpu_state(void) {
             GPU_TEVSRC prev_src = (tev_stage == 0) ? GPU_PRIMARY_COLOR : GPU_PREVIOUS;
 
             if (g.tex_env_mode[unit] == GL_COMBINE) {
-                // use our C helpers for translation
                 GPU_TEVSRC s0 = get_tev_src(g.tex_env_src0_rgb[unit], tex_src, prev_src);
                 GPU_TEVSRC s1 = get_tev_src(g.tex_env_src1_rgb[unit], tex_src, prev_src);
                 GPU_TEVSRC s2 = get_tev_src(g.tex_env_src2_rgb[unit], tex_src, prev_src);
-
                 int op0 = get_tev_op_rgb(g.tex_env_operand0_rgb[unit]);
                 int op1 = get_tev_op_rgb(g.tex_env_operand1_rgb[unit]);
                 int op2 = get_tev_op_rgb(g.tex_env_operand2_rgb[unit]);
@@ -570,59 +566,48 @@ void apply_gpu_state(void) {
                     case GL_DOT3_RGBA_ARB:
                         C3D_TexEnvSrc(env, C3D_Both, s0, s1, (GPU_TEVSRC) 0);
                         C3D_TexEnvOpRgb(env, op0, op1, 0);
-                        C3D_TexEnvFunc(env, C3D_Both, GPU_DOT3_RGBA);
-                        break;
+                        C3D_TexEnvFunc(env, C3D_Both, GPU_DOT3_RGBA); break;
                     case GL_REPLACE:
                         C3D_TexEnvSrc(env, C3D_Both, s0, (GPU_TEVSRC) 0, (GPU_TEVSRC) 0);
                         C3D_TexEnvOpRgb(env, op0, 0, 0);
-                        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
-                        break;
+                        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE); break;
                     case GL_ADD:
                         C3D_TexEnvSrc(env, C3D_Both, s0, s1, (GPU_TEVSRC) 0);
                         C3D_TexEnvOpRgb(env, op0, op1, 0);
-                        C3D_TexEnvFunc(env, C3D_Both, GPU_ADD);
-                        break;
+                        C3D_TexEnvFunc(env, C3D_Both, GPU_ADD); break;
                     case GL_INTERPOLATE:
                         C3D_TexEnvSrc(env, C3D_Both, s0, s1, s2);
                         C3D_TexEnvOpRgb(env, op0, op1, op2);
-                        C3D_TexEnvFunc(env, C3D_Both, GPU_INTERPOLATE);
-                        break;
+                        C3D_TexEnvFunc(env, C3D_Both, GPU_INTERPOLATE); break;
                     case GL_MODULATE:
                     default:
                         C3D_TexEnvSrc(env, C3D_Both, s0, s1, (GPU_TEVSRC) 0);
                         C3D_TexEnvOpRgb(env, op0, op1, 0);
-                        C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
-                        break;
+                        C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE); break;
                 }
             } else {
-                // standard FFP (GL_MODULATE / GL_REPLACE)
                 switch (g.tex_env_mode[unit]) {
                     case GL_REPLACE:
                         C3D_TexEnvSrc(env, C3D_Both, tex_src, (GPU_TEVSRC) 0, (GPU_TEVSRC) 0);
-                        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
-                        break;
+                        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE); break;
                     case GL_ADD:
                         C3D_TexEnvSrc(env, C3D_Both, tex_src, prev_src, (GPU_TEVSRC) 0);
-                        C3D_TexEnvFunc(env, C3D_Both, GPU_ADD);
-                        break;
+                        C3D_TexEnvFunc(env, C3D_Both, GPU_ADD); break;
                     case GL_DECAL:
                         C3D_TexEnvSrc(env, C3D_RGB, prev_src, tex_src, tex_src);
                         C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA);
                         C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
                         C3D_TexEnvSrc(env, C3D_Alpha, prev_src, (GPU_TEVSRC) 0, (GPU_TEVSRC) 0);
-                        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
-                        break;
+                        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE); break;
                     case GL_MODULATE:
                     default:
                         C3D_TexEnvSrc(env, C3D_Both, tex_src, prev_src, (GPU_TEVSRC) 0);
-                        C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
-                        break;
+                        C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE); break;
                 }
             }
             tev_stage++;
         }
 
-        // stub if textures disabled
         if (tev_stage == 0) {
             C3D_TexEnv *env = C3D_GetTexEnv(0);
             C3D_TexEnvInit(env);
@@ -631,7 +616,6 @@ void apply_gpu_state(void) {
             tev_stage++;
         }
 
-        // disable garbage stages (2-5), pass color through
         for (int i = tev_stage; i < 6; i++) {
             C3D_TexEnv *env = C3D_GetTexEnv(i);
             C3D_TexEnvInit(env);
@@ -646,9 +630,7 @@ void apply_gpu_state(void) {
     for (int unit = 0; unit < 3; unit++) {
         if ((current_tex_state & (1 << unit)) && g.bound_texture[unit] < NOVA_MAX_TEXTURES) {
             TexSlot *slot = &g.textures[g.bound_texture[unit]];
-            if (slot->allocated) {
-                C3D_TexBind(unit, &slot->tex);
-            }
+            if (slot->allocated) C3D_TexBind(unit, &slot->tex);
         }
     }
 }

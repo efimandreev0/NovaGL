@@ -55,15 +55,25 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
         g.bound_fbo = 0;
         C3D_FrameDrawOn(g.render_target_top);
         g.current_target = g.render_target_top;
-        return;
+    } else {
+        if (framebuffer >= NOVA_MAX_FBOS || !g.fbos[framebuffer].in_use || !g.fbos[framebuffer].target) {
+            g.last_error = GL_INVALID_OPERATION;
+            return;
+        }
+        g.bound_fbo = framebuffer;
+        C3D_FrameDrawOn(g.fbos[framebuffer].target);
+        g.current_target = g.fbos[framebuffer].target;
     }
-    if (framebuffer >= NOVA_MAX_FBOS || !g.fbos[framebuffer].in_use || !g.fbos[framebuffer].target) {
-        g.last_error = GL_INVALID_OPERATION;
-        return;
+
+    // ФИКС: При смене цели - сбрасываем вьюпорт, так как правила вращения экрана меняются
+    if (g.bound_fbo == 0) {
+        C3D_SetViewport(g.vp_y, g.vp_x, g.vp_h, g.vp_w);
+    } else {
+        C3D_SetViewport(g.vp_x, g.vp_y, g.vp_w, g.vp_h);
     }
-    g.bound_fbo = framebuffer;
-    C3D_FrameDrawOn(g.fbos[framebuffer].target);
-    g.current_target = g.fbos[framebuffer].target;
+
+    // Форсируем обновление матриц, чтобы снялась/оделась матрица 'tilt'
+    g.matrices_dirty = 1;
 }
 
 void glGenRenderbuffers(GLsizei n, GLuint *ids) { for (GLsizei i = 0; i < n; i++) ids[i] = i + 1; }
@@ -113,28 +123,26 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
     int fb_w = fb->width;
     int fb_h = fb->height;
 
-    /* Submit anything currently queued in the C3D command buffer and wait for
-     * the GPU to drain. Without this we'd be reading the framebuffer before
-     * pending draw calls in the same frame have actually executed. */
     C3D_FrameSplit(0);
     gspWaitForP3D();
 
     uint8_t *dst = (uint8_t *) pixels;
 
-    /* GL convention: (x, y) is bottom-left of the source rect, Y goes up.
-     * 3DS render target: rotated 90deg vs the visible screen, morton-tiled.
-     * The same mapping that glCopyTexSubImage2D uses (phys_x = logical_y,
-     * phys_y = logical_x, with morton's internal Y-flip) is what we need. */
-
     for (int row = 0; row < height; row++) {
-        /* GL row 0 is the bottom of the requested rect; output bytes follow GL
-         * convention too (row 0 first), so don't flip on output. */
         int logical_y = y + row;
         for (int col = 0; col < width; col++) {
             int logical_x = x + col;
 
-            int phys_x = logical_y;
-            int phys_y = logical_x;
+            int phys_x, phys_y;
+
+            // ФИКС ЧТЕНИЯ: Пиксели FBO не перевернуты
+            if (g.bound_fbo == 0) {
+                phys_x = logical_y;
+                phys_y = logical_x;
+            } else {
+                phys_x = logical_x;
+                phys_y = logical_y;
+            }
 
             uint32_t pixel = 0;
             if (phys_x >= 0 && phys_x < fb_w && phys_y >= 0 && phys_y < fb_h) {
@@ -160,21 +168,12 @@ void glPixelStorei(GLenum pname, GLint param) {
         g.last_error = GL_INVALID_VALUE;
         return;
     }
-    if (pname == GL_UNPACK_ALIGNMENT) {
-        g.unpack_alignment = param;
-    } else if (pname == GL_PACK_ALIGNMENT) {
-        g.pack_alignment = param;
-    }
+    if (pname == GL_UNPACK_ALIGNMENT) g.unpack_alignment = param;
+    else if (pname == GL_PACK_ALIGNMENT) g.pack_alignment = param;
 }
 
-void glPixelStoref(GLenum pname, GLfloat param) {
-    glPixelStorei(pname, (GLint) param);
-}
-
-void glDrawBuffer(GLenum mode) {
-    (void) mode;
-    /* Only single buffer supported on 3DS */
-}
+void glPixelStoref(GLenum pname, GLfloat param) { glPixelStorei(pname, (GLint) param); }
+void glDrawBuffer(GLenum mode) { (void) mode; }
 
 void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
     (void) target;
@@ -188,7 +187,6 @@ void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, 
     }
     FBOSlot *fbo = &g.fbos[g.bound_fbo];
 
-    /* Detach: drop the current render target. */
     if (texture == 0) {
         if (fbo->target) {
             C3D_RenderTargetDelete(fbo->target);
@@ -204,7 +202,6 @@ void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, 
     }
     TexSlot *slot = &g.textures[texture];
 
-    /* (Re)create the C3D render target wrapping this texture's storage. */
     if (fbo->target) {
         C3D_RenderTargetDelete(fbo->target);
         fbo->target = NULL;
@@ -217,7 +214,6 @@ void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, 
         return;
     }
 
-    /* If this FBO is currently bound, switch the GPU draw target now. */
     if (g.bound_fbo != 0 && g.fbos[g.bound_fbo].target == fbo->target) {
         C3D_FrameDrawOn(fbo->target);
         g.current_target = fbo->target;
@@ -231,14 +227,4 @@ GLenum glCheckFramebufferStatus(GLenum target) {
 
 void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1,
                        GLint dstY1, GLbitfield mask, GLenum filter) {
-    (void) srcX0;
-    (void) srcY0;
-    (void) srcX1;
-    (void) srcY1;
-    (void) dstX0;
-    (void) dstY0;
-    (void) dstX1;
-    (void) dstY1;
-    (void) mask;
-    (void) filter;
 }

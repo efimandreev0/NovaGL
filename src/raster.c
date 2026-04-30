@@ -10,7 +10,12 @@ void glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
     g.vp_y = y;
     g.vp_w = width;
     g.vp_h = height;
-    C3D_SetViewport(y, x, height, width);
+
+    if (g.bound_fbo == 0) {
+        C3D_SetViewport(y, x, height, width);
+    } else {
+        C3D_SetViewport(x, y, width, height);
+    }
 }
 
 void glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
@@ -79,14 +84,12 @@ void glDepthRange(GLclampd near_val, GLclampd far_val) {
 void glClipPlane(GLenum plane, const GLdouble *equation) {
     (void) plane;
     (void) equation;
-    /* Clip planes not supported on PICA200 */
 }
 
 void glStencilFunc(GLenum func, GLint ref, GLuint mask) {
     (void) func;
     (void) ref;
     (void) mask;
-    /* Stencil testing not fully implemented */
 }
 
 void glStencilMask(GLuint mask) {
@@ -100,8 +103,6 @@ void glStencilOp(GLenum fail, GLenum zfail, GLenum zpass) {
 }
 
 /* ===[ GL 2.0+ Shader pipeline stubs ]=== */
-/* PICA200 uses fixed-function; these exist for source compatibility only */
-
 GLuint glCreateShader(GLenum type) {
     (void) type;
     return 1;
@@ -154,7 +155,6 @@ void glGetProgramInfoLog(GLuint program, GLsizei maxLength, GLsizei *length, cha
 }
 
 void glDeleteShader(GLuint shader) { (void) shader; }
-
 void glDeleteProgram(GLuint program) { (void) program; }
 
 GLint glGetUniformLocation(GLuint program, const char *name) {

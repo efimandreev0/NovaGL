@@ -6,82 +6,54 @@
 
 void glEnable(GLenum cap) {
     switch (cap) {
-        case GL_DEPTH_TEST: g.depth_test_enabled = 1;
-            break;
-        case GL_BLEND: g.blend_enabled = 1;
-            break;
-        case GL_ALPHA_TEST: g.alpha_test_enabled = 1;
-            break;
-        case GL_CULL_FACE: g.cull_face_enabled = 1;
-            break;
+        case GL_DEPTH_TEST: g.depth_test_enabled = 1; break;
+        case GL_BLEND: g.blend_enabled = 1; break;
+        case GL_ALPHA_TEST: g.alpha_test_enabled = 1; break;
+        case GL_CULL_FACE: g.cull_face_enabled = 1; break;
         case GL_TEXTURE_2D:
             g.texture_2d_enabled_unit[g.active_texture_unit] = 1;
             g.tev_dirty = 1;
             break;
-        case GL_SCISSOR_TEST: g.scissor_test_enabled = 1;
-            break;
+        case GL_SCISSOR_TEST: g.scissor_test_enabled = 1; break;
         case GL_FOG:
-            if (!g.fog_enabled) {
-                g.fog_enabled = 1;
-                g.fog_dirty = 1;
-            }
+            if (!g.fog_enabled) { g.fog_enabled = 1; g.fog_dirty = 1; }
             break;
         case GL_POLYGON_OFFSET_FILL:
             g.polygon_offset_fill_enabled = 1;
             apply_depth_map();
             break;
-        case GL_LINE_SMOOTH:
-            g.line_smooth_enabled = 1;
-            break;
-        case GL_VERTEX_ARRAY: g.va_vertex.enabled = 1;
-            break;
-        case GL_COLOR_ARRAY: g.va_color.enabled = 1;
-            break;
-        case GL_TEXTURE_COORD_ARRAY: g.va_texcoord.enabled = 1;
-            break;
-        case GL_NORMAL_ARRAY: g.va_normal.enabled = 1;
-            break;
+        case GL_LINE_SMOOTH: g.line_smooth_enabled = 1; break;
+        case GL_VERTEX_ARRAY: g.va_vertex.enabled = 1; break;
+        case GL_COLOR_ARRAY: g.va_color.enabled = 1; break;
+        case GL_TEXTURE_COORD_ARRAY: g.va_texcoord.enabled = 1; break;
+        case GL_NORMAL_ARRAY: g.va_normal.enabled = 1; break;
         default: break;
     }
 }
 
 void glDisable(GLenum cap) {
     switch (cap) {
-        case GL_DEPTH_TEST: g.depth_test_enabled = 0;
-            break;
-        case GL_BLEND: g.blend_enabled = 0;
-            break;
-        case GL_ALPHA_TEST: g.alpha_test_enabled = 0;
-            break;
-        case GL_CULL_FACE: g.cull_face_enabled = 0;
-            break;
+        case GL_DEPTH_TEST: g.depth_test_enabled = 0; break;
+        case GL_BLEND: g.blend_enabled = 0; break;
+        case GL_ALPHA_TEST: g.alpha_test_enabled = 0; break;
+        case GL_CULL_FACE: g.cull_face_enabled = 0; break;
         case GL_TEXTURE_2D:
             g.texture_2d_enabled_unit[g.active_texture_unit] = 0;
             g.tev_dirty = 1;
             break;
-        case GL_SCISSOR_TEST: g.scissor_test_enabled = 0;
-            break;
+        case GL_SCISSOR_TEST: g.scissor_test_enabled = 0; break;
         case GL_FOG:
-            if (g.fog_enabled) {
-                g.fog_enabled = 0;
-                g.fog_dirty = 1;
-            }
+            if (g.fog_enabled) { g.fog_enabled = 0; g.fog_dirty = 1; }
             break;
         case GL_POLYGON_OFFSET_FILL:
             g.polygon_offset_fill_enabled = 0;
             apply_depth_map();
             break;
-        case GL_LINE_SMOOTH:
-            g.line_smooth_enabled = 0;
-            break;
-        case GL_VERTEX_ARRAY: g.va_vertex.enabled = 0;
-            break;
-        case GL_COLOR_ARRAY: g.va_color.enabled = 0;
-            break;
-        case GL_TEXTURE_COORD_ARRAY: g.va_texcoord.enabled = 0;
-            break;
-        case GL_NORMAL_ARRAY: g.va_normal.enabled = 0;
-            break;
+        case GL_LINE_SMOOTH: g.line_smooth_enabled = 0; break;
+        case GL_VERTEX_ARRAY: g.va_vertex.enabled = 0; break;
+        case GL_COLOR_ARRAY: g.va_color.enabled = 0; break;
+        case GL_TEXTURE_COORD_ARRAY: g.va_texcoord.enabled = 0; break;
+        case GL_NORMAL_ARRAY: g.va_normal.enabled = 0; break;
         default: break;
     }
 }
@@ -137,10 +109,8 @@ void glGetIntegerv(GLenum pname, GLint *params) {
     if (!params) return;
 
     if (pname == GL_VIEWPORT) {
-        params[0] = g.vp_x;
-        params[1] = g.vp_y;
-        params[2] = g.vp_w;
-        params[3] = g.vp_h;
+        params[0] = g.vp_x; params[1] = g.vp_y;
+        params[2] = g.vp_w; params[3] = g.vp_h;
     } else if (pname == GL_MAX_TEXTURE_SIZE) {
         params[0] = 4096;
     } else if (pname == GL_UNPACK_ALIGNMENT) {
@@ -148,8 +118,7 @@ void glGetIntegerv(GLenum pname, GLint *params) {
     } else if (pname == GL_PACK_ALIGNMENT) {
         params[0] = g.pack_alignment;
     } else if (pname == GL_SMOOTH_LINE_WIDTH_RANGE || pname == GL_ALIASED_LINE_WIDTH_RANGE) {
-        params[0] = 1;
-        params[1] = 1;
+        params[0] = 1; params[1] = 1;
     } else if (pname == GL_LINE_WIDTH) {
         params[0] = 1;
     } else {
@@ -165,28 +134,15 @@ const GLubyte *glGetString(GLenum name) {
     return (const GLubyte *) "";
 }
 
-void glHint(GLenum target, GLenum mode) {
-    (void) target;
-    (void) mode;
-}
+void glHint(GLenum target, GLenum mode) { (void) target; (void) mode; }
 
-
-/* Attribute stack (simplified implementation) */
 typedef struct {
-    GLboolean depth_test;
-    GLboolean blend;
-    GLboolean alpha_test;
-    GLboolean cull_face;
-    int texture_2d_units[3]; /* one flag per unit */
-    GLboolean scissor_test;
-    GLboolean fog;
-    GLenum depth_func;
-    GLenum blend_src;
-    GLenum blend_dst;
-    GLenum alpha_func;
+    GLboolean depth_test, blend, alpha_test, cull_face;
+    int texture_2d_units[3];
+    GLboolean scissor_test, fog;
+    GLenum depth_func, blend_src, blend_dst, alpha_func;
     GLfloat alpha_ref;
-    GLenum cull_face_mode;
-    GLenum front_face;
+    GLenum cull_face_mode, front_face;
 } AttribState;
 
 static AttribState attrib_stack[16];
@@ -236,10 +192,7 @@ void glPopAttrib(void) {
 }
 
 typedef struct {
-    int va_vertex_enabled;
-    int va_color_enabled;
-    int va_texcoord_enabled;
-    int va_normal_enabled;
+    int va_vertex_enabled, va_color_enabled, va_texcoord_enabled, va_normal_enabled;
 } ClientAttribState;
 
 static ClientAttribState client_attrib_stack[16];
