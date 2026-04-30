@@ -51,19 +51,29 @@ void glDeleteFramebuffers(GLsizei n, const GLuint *ids) {
 
 void glBindFramebuffer(GLenum target, GLuint framebuffer) {
     (void) target;
+    C3D_RenderTarget *new_target;
+    GLuint new_bound;
     if (framebuffer == 0) {
-        g.bound_fbo = 0;
-        C3D_FrameDrawOn(g.render_target_top);
-        g.current_target = g.render_target_top;
+        new_target = g.render_target_top;
+        new_bound = 0;
     } else {
         if (framebuffer >= NOVA_MAX_FBOS || !g.fbos[framebuffer].in_use || !g.fbos[framebuffer].target) {
             g.last_error = GL_INVALID_OPERATION;
             return;
         }
-        g.bound_fbo = framebuffer;
-        C3D_FrameDrawOn(g.fbos[framebuffer].target);
-        g.current_target = g.fbos[framebuffer].target;
+        new_target = g.fbos[framebuffer].target;
+        new_bound = framebuffer;
     }
+
+    // Splitting the GPU command buffer when switching render targets so the
+    // previous target's writes commit to memory before any later sampling.
+    if (g.current_target != new_target) {
+        C3D_FrameSplit(0);
+    }
+
+    g.bound_fbo = new_bound;
+    C3D_FrameDrawOn(new_target);
+    g.current_target = new_target;
 
     // ФИКС: При смене цели - сбрасываем вьюпорт, так как правила вращения экрана меняются
     if (g.bound_fbo == 0) {

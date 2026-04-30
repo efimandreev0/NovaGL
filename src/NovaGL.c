@@ -503,7 +503,10 @@ GLenum glGetError(void) {
 }
 
 void glFlush(void) {
+    C3D_FrameSplit(0);
 }
 
 void glFinish(void) {
+    C3D_FrameSplit(0);
+    gspWaitForP3D();
 }
