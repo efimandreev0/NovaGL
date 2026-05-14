@@ -188,6 +188,7 @@ void novaBeginEye(int eye) {
 
 void novaSwapBuffers(void) {
     C3D_FrameEnd(0);
+    nova_fbo_gc_collect();
 
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 
@@ -226,6 +227,8 @@ void nova_fini(void) {
         shaderProgramFree(&g.shader_program);
         DVLB_Free(g.shader_dvlb);
     }
+
+    nova_fbo_gc_collect();
 
     C3D_RenderTargetDelete(g.render_target_top);
     C3D_RenderTargetDelete(g.render_target_top_right);

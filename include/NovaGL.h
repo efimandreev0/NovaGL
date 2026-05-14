@@ -59,10 +59,13 @@ GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 //GL_constants
 #define GL_FALSE                    0
 #define GL_TRUE                     1
+#define GL_NONE                     0
 #define GL_NO_ERROR                 0
 #define GL_INVALID_ENUM             0x0500
 #define GL_INVALID_VALUE            0x0501
 #define GL_INVALID_OPERATION        0x0502
+#define GL_STACK_OVERFLOW           0x0503
+#define GL_STACK_UNDERFLOW          0x0504
 #define GL_OUT_OF_MEMORY            0x0505
 
 #define GL_BYTE                     0x1400
@@ -159,11 +162,52 @@ GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 #define GL_CLAMP_TO_EDGE            0x812F
 #define GL_MIRRORED_REPEAT          0x8370
 
+#define GL_RED                      0x1903
+#define GL_GREEN                    0x1904
+#define GL_BLUE                     0x1905
 #define GL_ALPHA                    0x1906
 #define GL_RGB                      0x1907
 #define GL_RGBA                     0x1908
 #define GL_LUMINANCE                0x1909
 #define GL_LUMINANCE_ALPHA          0x190A
+#define GL_BGR                      0x80E0
+#define GL_BGRA                     0x80E1
+
+/* Sized internal formats — NovaGL stores everything as 8 bits/channel internally,
+ * so these are accepted by glTexImage2D but mapped onto the equivalent unsized form. */
+#define GL_ALPHA8                   0x803C
+#define GL_LUMINANCE8               0x8040
+#define GL_LUMINANCE8_ALPHA8        0x8045
+#define GL_INTENSITY                0x8049
+#define GL_INTENSITY8               0x804B
+#define GL_RGB8                     0x8051
+#define GL_RGBA8                    0x8058
+
+/* Texture parameters / state queries not in OpenGL ES 1.1 */
+#define GL_GENERATE_MIPMAP                 0x8191
+#define GL_TEXTURE_MAX_LEVEL               0x813D
+#define GL_TEXTURE_MAX_ANISOTROPY_EXT      0x84FE
+#define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT  0x84FF
+
+/* Multisample query tokens — NovaGL has no MSAA, so glGetIntegerv reports 0 for both. */
+#define GL_SAMPLE_BUFFERS                  0x80A8
+#define GL_SAMPLES                         0x80A9
+#define GL_SAMPLE_SHADING_ARB              0x8C36
+
+/* NV_fog_distance — desktop GL extension; treated as a no-op hint by NovaGL. */
+#define GL_FOG_DISTANCE_MODE_NV            0x855A
+
+/* GL_EXT_fog_coord / fixed-function fog coordinate source — also a no-op. */
+#define GL_FOG_COORDINATE_SOURCE           0x8450
+#define GL_FOG_COORDINATE                  0x8451
+#define GL_FRAGMENT_DEPTH                  0x8452
+#define GL_FOG_COORD_SRC                   GL_FOG_COORDINATE_SOURCE
+#define GL_FOG_COORD                       GL_FOG_COORDINATE
+
+/* TexGen plane enums used by callers that compile against desktop GL but never get
+ * called at runtime on NovaGL — provide the constant so the call site compiles. */
+#define GL_OBJECT_PLANE                    0x2501
+#define GL_EYE_PLANE                       0x2502
 /* NovaGL extension: 4-bit luminance + 4-bit alpha packed in a single byte
  * (high nibble = alpha, low nibble = luminance) — maps directly to GPU_LA4. */
 #define GL_LUMINANCE_ALPHA4_NOVA    0x6B34
@@ -622,6 +666,13 @@ void glDisableClientState(GLenum cap);
 void glDrawArrays(GLenum mode, GLint first, GLsizei count);
 
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices);
+
+/* glDrawRangeElements: same as glDrawElements but with an additional hint about the
+ * range of indices the call will reference. NovaGL ignores the range — the underlying
+ * draw path already walks the entire index buffer — so this just forwards to
+ * glDrawElements. The signature matches GL_EXT_draw_range_elements / GL 1.2. */
+void glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type,
+                         const GLvoid *indices);
 
 void glFogf(GLenum pname, GLfloat param);
 

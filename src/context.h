@@ -39,7 +39,7 @@ typedef struct {
     uint8_t storage_stride;
 } VBOSlot;
 
-#define NOVA_MAX_FBOS 16
+#define NOVA_MAX_FBOS 64
 
 typedef struct {
     int in_use;
@@ -205,5 +205,7 @@ extern struct NovaState {
     FBOSlot fbos[NOVA_MAX_FBOS];
     GLuint bound_fbo; // 0 = screen
 } g;
+
+void nova_fbo_gc_collect(void);
 
 #endif //NOVAGL_CONTEXT_H

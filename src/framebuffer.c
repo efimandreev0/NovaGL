@@ -5,6 +5,29 @@
 #include "NovaGL.h"
 #include "utils.h"
 
+#define NOVA_FBO_GC_TARGETS 128
+static C3D_RenderTarget *s_fbo_gc_targets[NOVA_FBO_GC_TARGETS];
+static int s_fbo_gc_count = 0;
+
+static void nova_queue_render_target_delete(C3D_RenderTarget *target) {
+    if (!target) return;
+    if (s_fbo_gc_count < NOVA_FBO_GC_TARGETS) {
+        s_fbo_gc_targets[s_fbo_gc_count++] = target;
+    } else {
+        C3D_RenderTargetDelete(target);
+    }
+}
+
+void nova_fbo_gc_collect(void) {
+    for (int i = 0; i < s_fbo_gc_count; i++) {
+        if (s_fbo_gc_targets[i]) {
+            C3D_RenderTargetDelete(s_fbo_gc_targets[i]);
+            s_fbo_gc_targets[i] = NULL;
+        }
+    }
+    s_fbo_gc_count = 0;
+}
+
 static inline int fb_morton_offset(int x, int y, int pot_w, int pot_h) {
     int fy = pot_h - 1 - y;
     int tile_offset = ((fy >> 3) * (pot_w >> 3) + (x >> 3)) * 64;
@@ -41,7 +64,7 @@ void glDeleteFramebuffers(GLsizei n, const GLuint *ids) {
             g.current_target = g.render_target_top;
         }
         if (g.fbos[id].target) {
-            C3D_RenderTargetDelete(g.fbos[id].target);
+            nova_queue_render_target_delete(g.fbos[id].target);
             g.fbos[id].target = NULL;
         }
         g.fbos[id].color_tex_id = 0;
@@ -57,12 +80,18 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
         new_target = g.render_target_top;
         new_bound = 0;
     } else {
-        if (framebuffer >= NOVA_MAX_FBOS || !g.fbos[framebuffer].in_use || !g.fbos[framebuffer].target) {
+        if (framebuffer >= NOVA_MAX_FBOS || !g.fbos[framebuffer].in_use) {
             g.last_error = GL_INVALID_OPERATION;
             return;
         }
         new_target = g.fbos[framebuffer].target;
         new_bound = framebuffer;
+    }
+
+    if (framebuffer != 0 && !new_target) {
+        g.bound_fbo = new_bound;
+        g.matrices_dirty = 1;
+        return;
     }
 
     // Splitting the GPU command buffer when switching render targets so the
@@ -199,7 +228,7 @@ void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, 
 
     if (texture == 0) {
         if (fbo->target) {
-            C3D_RenderTargetDelete(fbo->target);
+            nova_queue_render_target_delete(fbo->target);
             fbo->target = NULL;
         }
         fbo->color_tex_id = 0;
@@ -213,7 +242,7 @@ void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, 
     TexSlot *slot = &g.textures[texture];
 
     if (fbo->target) {
-        C3D_RenderTargetDelete(fbo->target);
+        nova_queue_render_target_delete(fbo->target);
         fbo->target = NULL;
     }
     fbo->target = C3D_RenderTargetCreateFromTex(&slot->tex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH16);
