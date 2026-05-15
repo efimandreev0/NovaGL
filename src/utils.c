@@ -473,9 +473,28 @@ void apply_gpu_state(void) {
             Mtx_Identity(&tilt);
 
             // ФИКС ФРЕЙМБУФЕРОВ ЗДЕСЬ: ЭКРАН КРУТИТСЯ, А FBO - НЕТ!
+            // === TILT direction test (Arx splash on top screen) ===
+            // Set NOVAGL_TILT_VARIANT to 0 / 1 / 2 / 3 to A/B-test the four
+            // possible 2D rotations of clip-space. Stock NovaGL used variant 1.
+            //   0 = identity (no rotation, expect portrait-side picture)
+            //   1 = original: (x,y) -> ( y, -x)  // 90° CCW
+            //   2 = CW:       (x,y) -> (-y,  x)
+            //   3 = 180°:     (x,y) -> (-x, -y)
+            #ifndef NOVAGL_TILT_VARIANT
+            #define NOVAGL_TILT_VARIANT 1
+            #endif
             if (g.bound_fbo == 0) {
-                tilt.r[0].x = 0.0f; tilt.r[0].y = 1.0f;
+                #if NOVAGL_TILT_VARIANT == 1
+                tilt.r[0].x = 0.0f; tilt.r[0].y =  1.0f;
                 tilt.r[1].x = -1.0f; tilt.r[1].y = 0.0f;
+                #elif NOVAGL_TILT_VARIANT == 2
+                tilt.r[0].x = 0.0f; tilt.r[0].y = -1.0f;
+                tilt.r[1].x = 1.0f;  tilt.r[1].y = 0.0f;
+                #elif NOVAGL_TILT_VARIANT == 3
+                tilt.r[0].x = -1.0f; tilt.r[0].y = 0.0f;
+                tilt.r[1].x = 0.0f;  tilt.r[1].y = -1.0f;
+                #endif
+                // VARIANT == 0 leaves identity (no rotation)
             }
 
             C3D_Mtx final_proj;

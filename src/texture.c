@@ -268,11 +268,46 @@ static inline int morton_offset_local(int x, int y, int pot_w, int pot_h) {
 
 static void apply_slot_params_to_tex(C3D_Tex *tex, const TexSlot *slot) {
     GPU_TEXTURE_FILTER_PARAM mag = (slot->mag_filter == GL_LINEAR) ? GPU_LINEAR : GPU_NEAREST;
-    GPU_TEXTURE_FILTER_PARAM min_f = (slot->min_filter == GL_LINEAR || slot->min_filter == GL_LINEAR_MIPMAP_LINEAR ||
-                                      slot->min_filter == GL_LINEAR_MIPMAP_NEAREST)
-                                         ? GPU_LINEAR
-                                         : GPU_NEAREST;
+
+    // Decode the GL minification filter into separate per-level and inter-level
+    // (mipmap) filters. If the texture doesn't actually have mip levels we MUST
+    // pin the inter-level filter to NEAREST and clamp LOD to 0, otherwise
+    // PICA200 happily samples beyond level 0 into uninitialised memory and
+    // renders garbage tiled patterns.
+    GPU_TEXTURE_FILTER_PARAM min_f;
+    GPU_TEXTURE_FILTER_PARAM mip_f;
+    int wants_mips = (slot->min_filter == GL_NEAREST_MIPMAP_NEAREST ||
+                      slot->min_filter == GL_NEAREST_MIPMAP_LINEAR ||
+                      slot->min_filter == GL_LINEAR_MIPMAP_NEAREST ||
+                      slot->min_filter == GL_LINEAR_MIPMAP_LINEAR);
+    int linear_within = (slot->min_filter == GL_LINEAR ||
+                         slot->min_filter == GL_LINEAR_MIPMAP_NEAREST ||
+                         slot->min_filter == GL_LINEAR_MIPMAP_LINEAR);
+    int linear_between = (slot->min_filter == GL_NEAREST_MIPMAP_LINEAR ||
+                          slot->min_filter == GL_LINEAR_MIPMAP_LINEAR);
+
+    min_f = linear_within ? GPU_LINEAR : GPU_NEAREST;
+    if (wants_mips && slot->has_mipmap) {
+        mip_f = linear_between ? GPU_LINEAR : GPU_NEAREST;
+    } else {
+        // No mips available — force NEAREST mip filter and clamp LOD to 0
+        // below so PICA can't reach beyond level 0.
+        mip_f = GPU_NEAREST;
+    }
+
     C3D_TexSetFilter(tex, mag, min_f);
+    C3D_TexSetFilterMipmap(tex, mip_f);
+
+    // Cap LOD so PICA never samples a non-existent level. When mips are
+    // present we still respect a Arx-supplied GL_TEXTURE_MAX_LEVEL cap.
+    int max_lod = slot->has_mipmap ? (slot->max_level >= 0 ? slot->max_level : 7) : 0;
+    if (max_lod < 0) max_lod = 0;
+    if (max_lod > 7) max_lod = 7;
+    C3D_TexSetLodBias(tex, 0.0f);
+    // tex->lodParam: bits  0..7 = bias, 16..19 = maxLevel, 24..27 = minLevel.
+    // citro3d has no public setter for max/min level on a non-mipmap-init'd
+    // texture, so patch the field directly.
+    tex->lodParam = (tex->lodParam & ~(0xFu << 16)) | ((u32)(max_lod & 0xF) << 16);
 
     GPU_TEXTURE_WRAP_PARAM ws = (slot->wrap_s == GL_CLAMP_TO_EDGE || slot->wrap_s == GL_CLAMP)
                                     ? GPU_CLAMP_TO_EDGE
@@ -295,6 +330,9 @@ static void init_texture_defaults(TexSlot *slot) {
     slot->mag_filter = GL_LINEAR;
     slot->wrap_s = GL_REPEAT;
     slot->wrap_t = GL_REPEAT;
+    slot->generate_mipmap = 0;
+    slot->max_level = -1; // -1 = unset (no cap)
+    slot->has_mipmap = 0;
 }
 
 static int is_texture_solid(const void *pixels, int width, int height, GLenum format, GLenum type, int alignment) {
@@ -497,7 +535,10 @@ void glBindTexture(GLenum target, GLuint texture) {
 }
 
 // === [DIAG] dump first N glTexImage2D inputs to SD for offline inspection ===
-#define NOVA_DIAG_TEX_LIMIT 12
+// Set NOVA_DIAG_TEX_LIMIT=N at compile time to re-enable; default off.
+#ifndef NOVA_DIAG_TEX_LIMIT
+#define NOVA_DIAG_TEX_LIMIT 0
+#endif
 static int s_diag_tex_count = 0;
 
 static int diag_input_bpp(GLenum format, GLenum type) {
@@ -602,12 +643,28 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     slot->width = is_solid ? width : target_w;
     slot->height = is_solid ? height : target_h;
 
+    // Decide up-front whether this texture needs a mip pyramid. Arx sets
+    // GL_GENERATE_MIPMAP before glTexImage2D (OpenGL 1.4 semantics) when it
+    // wants auto-generated mips, otherwise it pins GL_TEXTURE_MAX_LEVEL=0.
+    // is_solid textures stay 8x8 — never worth mipping.
+    int want_mips = slot->generate_mipmap && !is_solid && pot_w >= 2 && pot_h >= 2;
+
+    if (slot->allocated && slot->has_mipmap != want_mips) {
+        // Mip-state change requires a re-init: C3D_TexInit and C3D_TexInitMipMap
+        // allocate different amounts of memory.
+        free_texture_storage(slot);
+    }
+
     if (!slot->allocated) {
-        if (!C3D_TexInit(&slot->tex, pot_w, pot_h, gpu_fmt)) {
+        bool ok = want_mips
+            ? C3D_TexInitMipmap(&slot->tex, pot_w, pot_h, gpu_fmt)
+            : C3D_TexInit(&slot->tex, pot_w, pot_h, gpu_fmt);
+        if (!ok) {
             g.last_error = GL_OUT_OF_MEMORY;
             return;
         }
         slot->allocated = 1;
+        slot->has_mipmap = want_mips;
     }
 
     slot->pot_w = pot_w;
@@ -638,6 +695,13 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
         upload_texture_pixels(&slot->tex, gpu_fmt, pot_w, pot_h, upload_pixels, target_w, target_h, 0, 0, target_w,
                               target_h, format, type, g.unpack_alignment);
         if (temp_pixels) free(temp_pixels);
+    }
+
+    // Auto-generate mip levels 1..N for the freshly-uploaded level 0.
+    if (slot->has_mipmap && !is_solid) {
+        C3D_TexGenerateMipmap(&slot->tex, GPU_TEXFACE_2D);
+        // Re-apply filter/LOD: max_level may need to reflect the actual pyramid depth now.
+        apply_slot_params_to_tex(&slot->tex, slot);
     }
 
     if (diag_idx >= 0) {
@@ -818,6 +882,8 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) {
     else if (pname == GL_TEXTURE_MAG_FILTER) slot->mag_filter = param;
     else if (pname == GL_TEXTURE_WRAP_S) slot->wrap_s = param;
     else if (pname == GL_TEXTURE_WRAP_T) slot->wrap_t = param;
+    else if (pname == GL_GENERATE_MIPMAP) slot->generate_mipmap = (param != 0);
+    else if (pname == GL_TEXTURE_MAX_LEVEL) slot->max_level = param;
 
     if (!slot->allocated) return;
     apply_slot_params_to_tex(&slot->tex, slot);

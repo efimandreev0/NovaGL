@@ -10,7 +10,10 @@
 #include <string.h>
 
 // === [DIAG] dump first N draw calls to stdout to compare against expected geometry ===
-#define NOVA_DIAG_DRAW_LIMIT 10
+// Set NOVA_DIAG_DRAW_LIMIT=0 to disable; default off in release.
+#ifndef NOVA_DIAG_DRAW_LIMIT
+#define NOVA_DIAG_DRAW_LIMIT 0
+#endif
 static int s_diag_draw_count = 0;
 
 static const uint8_t *diag_resolve_attr_base(const void *raw_pointer, GLuint vbo_id) {
@@ -65,9 +68,46 @@ static void diag_log_matrix(const char *tag, const C3D_Mtx *m) {
 
 static void diag_log_draw(const char *tag, GLenum mode, GLint first, GLsizei count) {
     if (s_diag_draw_count >= NOVA_DIAG_DRAW_LIMIT) return;
-    int idx = s_diag_draw_count++;
 
     GLuint bound = g.bound_texture[g.active_texture_unit];
+
+    // Dedup: collapse runs of identical draws (same texture + first uv + first pos)
+    // into a single line so we don't flood the log when Arx draws many overlay layers.
+    static GLuint  prev_tex = (GLuint)-1;
+    static GLenum  prev_mode = 0;
+    static GLsizei prev_count = -1;
+    static float   prev_uv0[2] = {0, 0};
+    static float   prev_pos0[4] = {0, 0, 0, 0};
+    static int     dup_run = 0;
+
+    float uv0[4] = {0}, pos0[4] = {0};
+    if (g.va_texcoord.enabled) {
+        diag_read_attr_floats(g.va_texcoord.pointer, g.va_texcoord.vbo_id,
+                              g.va_texcoord.stride, g.va_texcoord.size,
+                              g.va_texcoord.type, first, uv0);
+    }
+    if (g.va_vertex.enabled) {
+        diag_read_attr_floats(g.va_vertex.pointer, g.va_vertex.vbo_id,
+                              g.va_vertex.stride, g.va_vertex.size,
+                              g.va_vertex.type, first, pos0);
+    }
+    int is_dup = (bound == prev_tex && mode == prev_mode && count == prev_count
+                  && uv0[0] == prev_uv0[0] && uv0[1] == prev_uv0[1]
+                  && pos0[0] == prev_pos0[0] && pos0[1] == prev_pos0[1]);
+    if (is_dup) {
+        dup_run++;
+        return; // skip flooding; we'll print a "xN" line when the run ends
+    }
+    if (dup_run > 0) {
+        printf("[NovaDiag] (above draw repeated %d more time(s))\n", dup_run);
+        dup_run = 0;
+    }
+    prev_tex = bound; prev_mode = mode; prev_count = count;
+    prev_uv0[0] = uv0[0]; prev_uv0[1] = uv0[1];
+    prev_pos0[0] = pos0[0]; prev_pos0[1] = pos0[1];
+
+    int idx = s_diag_draw_count++;
+
     TexSlot *slot = (bound > 0 && bound < NOVA_MAX_TEXTURES) ? &g.textures[bound] : NULL;
 
     printf("[NovaDiag] draw#%d %s mode=0x%X first=%d count=%d tex_id=%u",

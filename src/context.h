@@ -31,6 +31,15 @@ typedef struct {
     int in_use;
 
     int is_solid_optimized; //if texture have only 1 color -> creating 1x1 stub.
+
+    // Mipmap state. Arx sets GL_GENERATE_MIPMAP before glTexImage2D when it
+    // wants automatic mip generation, and GL_TEXTURE_MAX_LEVEL=0 for textures
+    // that must never sample beyond level 0. We honour both — PICA200 with
+    // unset MAX_LEVEL on a single-level C3D_Tex reads garbage memory for the
+    // missing mips, which manifests as tiled-repeat corruption on screen.
+    int generate_mipmap;   //!< glTexParameteri(GL_GENERATE_MIPMAP, GL_TRUE) was set
+    int max_level;         //!< glTexParameteri(GL_TEXTURE_MAX_LEVEL, N); -1 = unset
+    int has_mipmap;        //!< the underlying C3D_Tex actually has mip levels
 } TexSlot;
 
 typedef struct {

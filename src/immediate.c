@@ -55,8 +55,19 @@ static void imm_draw_packed_run(GLenum mode, GPU_Primitive_t prim, uint8_t *base
     BufInfo_Init(bufInfo);
     BufInfo_Add(bufInfo, base, 24, 3, 0x210); // stride = 24
 
-    if (mode == GL_QUADS) draw_emulated_quads(count);
-    else C3D_DrawArrays(prim, 0, count);
+    if (mode == GL_QUADS) {
+        #ifdef NOVAGL_QUAD_AS_FAN
+        if (count == 4) {
+            C3D_DrawArrays(GPU_TRIANGLE_FAN, 0, 4);
+        } else {
+            draw_emulated_quads(count);
+        }
+        #else
+        draw_emulated_quads(count);
+        #endif
+    } else {
+        C3D_DrawArrays(prim, 0, count);
+    }
 }
 
 void glEnd(void) {

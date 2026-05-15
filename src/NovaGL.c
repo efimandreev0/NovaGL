@@ -285,8 +285,24 @@ static void draw_packed_run(GLenum mode, GPU_Primitive_t prim, uint8_t *base, in
     BufInfo_Init(bufInfo);
     BufInfo_Add(bufInfo, base, stride, 3, 0x210); // stride = 24 or 28
 
-    if (mode == GL_QUADS) draw_emulated_quads(count);
-    else C3D_DrawArrays(prim, 0, count);
+    if (mode == GL_QUADS) {
+        // === [DIAG] alternate quad path: draw as TRIANGLE_FAN ===
+        // Original path uses C3D_DrawElements with persistent static_quad_indices.
+        // If that index buffer is being cached/aliased by PICA200 we'd see ghosting.
+        // For a single 4-vertex quad, TRIANGLE_FAN with the same vertex order
+        // produces the exact same two triangles (0-1-2, 0-2-3) without any indices.
+        #ifdef NOVAGL_QUAD_AS_FAN
+        if (count == 4) {
+            C3D_DrawArrays(GPU_TRIANGLE_FAN, 0, 4);
+        } else {
+            draw_emulated_quads(count);
+        }
+        #else
+        draw_emulated_quads(count);
+        #endif
+    } else {
+        C3D_DrawArrays(prim, 0, count);
+    }
 }
 
 static int packed_ptc_attr_compatible(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer,
@@ -361,7 +377,17 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
         return;
     }
 
-    int pos_elements = (g.va_vertex.size == 4) ? 4 : 3;
+    // Force vec3 position even when Arx supplies a 4-component TexturedVertex.
+    // The PICA200 shader (NovaGL_shader.pica) treats inPosition as a vec4 register
+    // (dp4 with modelview/projection rows). When loader 0 advertises 4 floats,
+    // the per-attribute offsets in BufInfo shift by 4 bytes vs. the layout the
+    // shader/AttrInfo init time was set up for (immediate.c and the init path
+    // both pin loader 0 to 3 floats). The mismatch reads UV/color from wrong
+    // offsets and produces the tiled-repeat / horizontal-shear corruption seen
+    // on splash and menu screens. Arx's TexturedVertex.w is RHW, which is 1.0
+    // for the 2D ortho path used by the menu/splash (verified via matrix dump),
+    // so dropping .w is safe here — pos.w gets implicit 1.0 in the vec4 register.
+    int pos_elements = 3;
     int pos_bytes = pos_elements * 4;
     int internal_stride = pos_bytes + 12;
     int col_offset = pos_bytes + 8;

@@ -21,7 +21,10 @@
 .constf EPSILON (0.0001, 0.0001, 0.0001, 0.0001)
 
 .proc main
-    mov r15, inPosition
+    ; Force w=1.0 (Arx supplies TexturedVertex with rhw, which we want to ignore
+    ; for the fixed-function path. PicaGL does the same trick.)
+    mov r15.xyz, inPosition
+    mov r15.w,   CONST1.x
 
     ; Transform to View Space
     dp4 r0.x, modelview[0], r15
