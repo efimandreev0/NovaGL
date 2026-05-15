@@ -1,6 +1,8 @@
 ﻿//
 // Created by Notebook on 15.04.2026.
 //
+#include <stdio.h>
+#include <3ds/os.h>
 
 #include "NovaGL.h"
 

@@ -1,4 +1,7 @@
-﻿#include "NovaGL.h"
+﻿#include <stdio.h>
+#include <string.h>
+
+#include "NovaGL.h"
 
 static const struct {
     const char *name;

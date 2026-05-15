@@ -113,6 +113,8 @@ void glGetIntegerv(GLenum pname, GLint *params) {
         params[2] = g.vp_w; params[3] = g.vp_h;
     } else if (pname == GL_MAX_TEXTURE_SIZE) {
         params[0] = 4096;
+    } else if (pname == GL_MAX_TEXTURE_UNITS) {
+        params[0] = 3;
     } else if (pname == GL_UNPACK_ALIGNMENT) {
         params[0] = g.unpack_alignment;
     } else if (pname == GL_PACK_ALIGNMENT) {

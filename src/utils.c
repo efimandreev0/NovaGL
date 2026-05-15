@@ -4,6 +4,9 @@
 #include "NovaGL.h"
 #include "utils.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+
 unsigned int nova_next_pow2(unsigned int v) {
     v--;
     v |= v >> 1;

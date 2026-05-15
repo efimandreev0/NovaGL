@@ -9,13 +9,25 @@
 extern "C" {
 
 #endif
-#include <3ds.h>
-#include <citro3d.h>
-#include <string.h>
-#include <stdlib.h>
-#include <stdio.h>
+
+// Intentionally NOT including <3ds.h> / <citro3d.h> from this public header:
+// libctru's <3ds.h> defines a global `Thread` typedef which would collide with
+// any C++ caller that has its own `class Thread` (e.g. the engine porting on top
+// of NovaGL). The 3DS-specific includes are confined to NovaGL's .c files.
 #include <stdint.h>
 #include <stddef.h>
+
+/* Calling convention macro from desktop GL headers. Real Windows GL needs
+ * __stdcall, but ARM EABI on 3DS has only one calling convention, so this is
+ * defined to nothing. Some engines (e.g. Arx Libertatis) declare GL function-
+ * pointer typedefs like `GLenum (GLAPIENTRY *fn)()` and expect this macro to
+ * exist regardless of platform. */
+#ifndef GLAPIENTRY
+#define GLAPIENTRY
+#endif
+#ifndef APIENTRY
+#define APIENTRY
+#endif
 
 /* GL Types */
 typedef unsigned int GLenum;
@@ -50,12 +62,8 @@ typedef float GLdouble;
 #define NOVA_SCREEN_BOTTOM_W  240
 #define NOVA_SCREEN_BOTTOM_H  320
 
-#define DISPLAY_TRANSFER_FLAGS \
-(GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | \
-GX_TRANSFER_RAW_COPY(0) | \
-GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | \
-GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
-GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
+/* DISPLAY_TRANSFER_FLAGS lives in src/NovaGL.c — it uses GX_TRANSFER_* macros
+ * from <3ds.h> which we no longer pull into the public header. */
 //GL_constants
 #define GL_FALSE                    0
 #define GL_TRUE                     1
@@ -94,6 +102,9 @@ GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 #define GL_NORMAL_ARRAY             0x8075
 #define GL_COLOR_ARRAY              0x8076
 #define GL_TEXTURE_COORD_ARRAY      0x8078
+/* GL_EXT_fog_coord: per-vertex fog coordinate array. PICA200 computes fog from
+ * depth in our shader, so the array client-state is accepted but ignored. */
+#define GL_FOG_COORDINATE_ARRAY     0x8457
 
 #define GL_FOG                      0x0B60
 #define GL_LIGHTING                 0x0B50
@@ -225,6 +236,19 @@ GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 #define GL_DYNAMIC_DRAW             0x88E8
 #define GL_STREAM_DRAW              0x88E0
 
+/* Buffer mapping access modes (glMapBuffer) */
+#define GL_READ_ONLY                0x88B8
+#define GL_WRITE_ONLY               0x88B9
+#define GL_READ_WRITE               0x88BA
+
+/* Buffer mapping access bits (glMapBufferRange, GL 3.0 / ARB_map_buffer_range) */
+#define GL_MAP_READ_BIT                0x0001
+#define GL_MAP_WRITE_BIT               0x0002
+#define GL_MAP_INVALIDATE_RANGE_BIT    0x0004
+#define GL_MAP_INVALIDATE_BUFFER_BIT   0x0008
+#define GL_MAP_FLUSH_EXPLICIT_BIT      0x0010
+#define GL_MAP_UNSYNCHRONIZED_BIT      0x0020
+
 #define GL_DEPTH_BUFFER_BIT         0x00000100
 #define GL_STENCIL_BUFFER_BIT       0x00000400
 #define GL_COLOR_BUFFER_BIT         0x00004000
@@ -317,6 +341,16 @@ GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 #define GL_COMBINE                        0x8570
 #define GL_COMBINE_RGB                    0x8571
 #define GL_COMBINE_ALPHA                  0x8572
+/* RGB / alpha post-combine scale factors — texture environment scale. NovaGL
+ * doesn't currently apply these (PICA200 TEV has its own scale field), but the
+ * tokens are needed so glTexEnv{i,f} calls compile. */
+#define GL_RGB_SCALE                      0x8573
+#define GL_ALPHA_SCALE                    0x0D1C
+/* Texture LOD bias — desktop GL 1.4 feature; PICA200 has per-texture LOD bias
+ * but the engine usually leaves this at 0, so these tokens are accepted as a
+ * no-op in glTexParameter / glTexEnv calls. */
+#define GL_TEXTURE_FILTER_CONTROL         0x8500
+#define GL_TEXTURE_LOD_BIAS               0x8501
 #define GL_SRC0_RGB                       0x8580
 #define GL_SRC1_RGB                       0x8581
 #define GL_SRC2_RGB                       0x8582
@@ -651,6 +685,25 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
 
 void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvoid *data);
 
+/* Buffer mapping: returns a CPU-side pointer to the bound VBO's storage.
+ * On 3DS the linear-heap allocation backing each VBO is directly addressable,
+ * so map/unmap are essentially "give me the pointer" / "flush the cache".
+ *
+ * - access is one of GL_READ_ONLY / GL_WRITE_ONLY / GL_READ_WRITE (ignored,
+ *   we hand out a writable pointer either way — the engine already respects
+ *   the bit it asked for).
+ * - Returns NULL on invalid binding / packed-storage VBOs that can't be
+ *   exposed without an internal conversion. */
+void *glMapBuffer(GLenum target, GLenum access);
+
+/* glMapBufferRange: GL 3.0 variant. `length` may extend past the current
+ * buffer size only if GL_MAP_INVALIDATE_BUFFER_BIT is set; the access bits
+ * other than INVALIDATE_* are accepted for compatibility but have no effect. */
+void *glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access);
+
+/* Flushes the data cache for the buffer and returns GL_TRUE on success. */
+GLboolean glUnmapBuffer(GLenum target);
+
 void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer);
 
 void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer);
@@ -658,6 +711,11 @@ void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *po
 void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer);
 
 void glNormalPointer(GLenum type, GLsizei stride, const GLvoid *pointer);
+
+/* glFogCoordPointer: per-vertex fog coordinate array. NovaGL's fog is computed
+ * in the vertex shader from depth, so this pointer is recorded but never read
+ * — calls compile and don't crash, but they don't influence rendering. */
+void glFogCoordPointer(GLenum type, GLsizei stride, const GLvoid *pointer);
 
 void glEnableClientState(GLenum cap);
 
@@ -673,6 +731,17 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
  * glDrawElements. The signature matches GL_EXT_draw_range_elements / GL 1.2. */
 void glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type,
                          const GLvoid *indices);
+
+/* glDrawElementsBaseVertex / glDrawRangeElementsBaseVertex: add `basevertex` to
+ * every fetched index. NovaGL has no GPU-side base-vertex offset, so we have
+ * to walk the index buffer and rebuild it with the offset applied. This
+ * allocates a small scratch buffer when basevertex != 0 — keep the index
+ * count modest to avoid stalls. With basevertex == 0 it forwards verbatim. */
+void glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type,
+                              const GLvoid *indices, GLint basevertex);
+
+void glDrawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint end, GLsizei count,
+                                   GLenum type, const GLvoid *indices, GLint basevertex);
 
 void glFogf(GLenum pname, GLfloat param);
 

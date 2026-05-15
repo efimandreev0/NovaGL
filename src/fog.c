@@ -80,3 +80,13 @@ void glFogiv(GLenum pname, const GLint *params) {
 }
 
 void glFogx(GLenum pname, GLfixed param) { glFogf(pname, (float) param / 65536.0f); }
+
+/* GL_EXT_fog_coord: lets the app supply a per-vertex fog coordinate. We compute
+ * fog from depth in the vertex shader, so the pointer is silently discarded.
+ * Kept as a real symbol so callers that only need the function to exist for
+ * conditional code paths can link. */
+void glFogCoordPointer(GLenum type, GLsizei stride, const GLvoid *pointer) {
+    (void) type;
+    (void) stride;
+    (void) pointer;
+}

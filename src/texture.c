@@ -496,6 +496,43 @@ void glBindTexture(GLenum target, GLuint texture) {
     g.bound_texture[g.active_texture_unit] = texture;
 }
 
+// === [DIAG] dump first N glTexImage2D inputs to SD for offline inspection ===
+#define NOVA_DIAG_TEX_LIMIT 12
+static int s_diag_tex_count = 0;
+
+static int diag_input_bpp(GLenum format, GLenum type) {
+    if (type == GL_UNSIGNED_SHORT_4_4_4_4 ||
+        type == GL_UNSIGNED_SHORT_5_5_5_1 ||
+        type == GL_UNSIGNED_SHORT_5_6_5) return 2;
+    if (format == GL_RGBA) return 4;
+    if (format == GL_RGB)  return 3;
+    if (format == GL_LUMINANCE_ALPHA) return 2;
+    if (format == GL_LUMINANCE || format == GL_ALPHA) return 1;
+    return 4;
+}
+
+static void diag_dump_teximage(int idx, GLsizei w, GLsizei h, GLenum format, GLenum type,
+                               const GLvoid *pixels, GLint align) {
+    if (!pixels || w <= 0 || h <= 0) return;
+    mkdir("sdmc:/3ds/arxlibertatis", 0777);
+    mkdir("sdmc:/3ds/arxlibertatis/nova_dump", 0777);
+    int bpp = diag_input_bpp(format, type);
+    int stride = row_stride_bytes(w, bpp, align);
+    char path[256];
+    snprintf(path, sizeof(path),
+             "sdmc:/3ds/arxlibertatis/nova_dump/tex%02d_%dx%d_f%04X_t%04X_bpp%d.raw",
+             idx, (int)w, (int)h, (unsigned)format, (unsigned)type, bpp);
+    FILE *fp = fopen(path, "wb");
+    if (!fp) {
+        printf("[NovaDiag] tex#%d: failed to open %s\n", idx, path);
+        return;
+    }
+    fwrite(pixels, (size_t)stride * (size_t)h, 1, fp);
+    fclose(fp);
+    printf("[NovaDiag] tex#%d: dumped %d bytes (stride=%d) -> %s\n",
+           idx, stride * (int)h, stride, path);
+}
+
 void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border,
                   GLenum format, GLenum type, const GLvoid *pixels) {
     (void) target;
@@ -510,6 +547,17 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     if (width <= 0 || height <= 0) {
         g.last_error = GL_INVALID_VALUE;
         return;
+    }
+
+    int diag_idx = -1;
+    if (s_diag_tex_count < NOVA_DIAG_TEX_LIMIT) {
+        diag_idx = s_diag_tex_count++;
+        printf("[NovaDiag] tex#%d glTexImage2D: tex_id=%u w=%d h=%d format=0x%04X type=0x%04X "
+               "internal=0x%04X align=%d pixels=%p gpu_fmt=%d\n",
+               diag_idx, (unsigned)bound, (int)width, (int)height,
+               (unsigned)format, (unsigned)type, (unsigned)internalformat,
+               (int)g.unpack_alignment, pixels, (int)gpu_fmt);
+        diag_dump_teximage(diag_idx, width, height, format, type, pixels, g.unpack_alignment);
     }
 
     slot->orig_width = width;
@@ -590,6 +638,34 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
         upload_texture_pixels(&slot->tex, gpu_fmt, pot_w, pot_h, upload_pixels, target_w, target_h, 0, 0, target_w,
                               target_h, format, type, g.unpack_alignment);
         if (temp_pixels) free(temp_pixels);
+    }
+
+    if (diag_idx >= 0) {
+        printf("[NovaDiag] tex#%d settled: slot->{width=%d height=%d orig=%dx%d pot=%dx%d fmt=%d "
+               "solid=%d} wrap=(s=0x%X t=0x%X) filter=(min=0x%X mag=0x%X)\n",
+               diag_idx, slot->width, slot->height, slot->orig_width, slot->orig_height,
+               slot->pot_w, slot->pot_h, (int)slot->fmt, slot->is_solid_optimized,
+               (unsigned)slot->wrap_s, (unsigned)slot->wrap_t,
+               (unsigned)slot->min_filter, (unsigned)slot->mag_filter);
+
+        // Dump SWIZZLED contents of the C3D_Tex so we can compare against the raw input.
+        // If raw is readable in GIMP but this swizzled dump (de-swizzled offline) is garbled,
+        // the bug is inside upload_page_*. If both look correct, the bug is at draw/UV time.
+        if (slot->allocated && slot->tex.data) {
+            int bpp = gpu_texfmt_bpp(slot->fmt);
+            size_t bytes = (size_t)slot->pot_w * (size_t)slot->pot_h * (size_t)bpp;
+            char spath[256];
+            snprintf(spath, sizeof(spath),
+                     "sdmc:/3ds/arxlibertatis/nova_dump/tex%02d_SWIZZLED_%dx%d_bpp%d.bin",
+                     diag_idx, slot->pot_w, slot->pot_h, bpp);
+            FILE *sf = fopen(spath, "wb");
+            if (sf) {
+                fwrite(slot->tex.data, bytes, 1, sf);
+                fclose(sf);
+                printf("[NovaDiag] tex#%d swizzled dump: %zu bytes -> %s\n",
+                       diag_idx, bytes, spath);
+            }
+        }
     }
 }
 

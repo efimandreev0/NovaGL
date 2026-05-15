@@ -2,6 +2,8 @@
 // created by efimandreev0 on 05.04.2026.
 //
 
+#include <stdio.h>
+
 #include "NovaGL.h"
 #include "utils.h"
 
@@ -330,4 +332,61 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
 
 void glReadBuffer(int x) {
     printf("[Nova]: Trying to read buffer");
+}
+
+/* ------------------------------------------------------------------------
+ * Buffer mapping
+ * ------------------------------------------------------------------------
+ * NovaGL stores every VBO in a linearAlloc'd block, so "mapping" is just
+ * handing out slot->data. The kicker is the cache: the GPU reads VBOs out of
+ * physical memory bypassing the CPU's data cache, so if the caller writes
+ * through the mapped pointer we have to flush the cache range on unmap.
+ *
+ * Packed-PTC VBOs can't be safely mapped (the bytes aren't in the layout the
+ * caller expects). We convert them back to raw before handing out the pointer,
+ * which costs a memcpy + decode but is a one-time hit per map. */
+
+static VBOSlot *map_resolve_slot(GLenum target) {
+    GLuint id = 0;
+    if (target == GL_ARRAY_BUFFER) id = g.bound_array_buffer;
+    else if (target == GL_ELEMENT_ARRAY_BUFFER) id = g.bound_element_array_buffer;
+    if (id == 0 || id >= NOVA_MAX_VBOS) return NULL;
+    VBOSlot *slot = &g.vbos[id];
+    if (!slot->in_use || !slot->allocated || !slot->data) return NULL;
+    return slot;
+}
+
+void *glMapBuffer(GLenum target, GLenum access) {
+    (void) access; // we always expose a writable pointer regardless of mode
+    VBOSlot *slot = map_resolve_slot(target);
+    if (!slot) return NULL;
+    if (slot->storage_kind != NOVA_VBO_STORAGE_RAW) {
+        vbo_convert_slot_to_raw(slot);
+    }
+    return slot->data;
+}
+
+void *glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access) {
+    (void) length;
+    (void) access; // INVALIDATE_* / UNSYNCHRONIZED_* are accepted but ignored —
+                   // we don't synthesize a discard buffer; callers that pass
+                   // GL_MAP_INVALIDATE_BUFFER_BIT get the same storage back
+                   // because Arx writes the whole buffer before drawing anyway.
+    VBOSlot *slot = map_resolve_slot(target);
+    if (!slot) return NULL;
+    if (offset < 0 || offset > slot->capacity) return NULL;
+    if (slot->storage_kind != NOVA_VBO_STORAGE_RAW) {
+        vbo_convert_slot_to_raw(slot);
+    }
+    return (uint8_t *) slot->data + offset;
+}
+
+GLboolean glUnmapBuffer(GLenum target) {
+    VBOSlot *slot = map_resolve_slot(target);
+    if (!slot) return GL_FALSE;
+    // Conservatively flush the full buffer rather than tracking the mapped
+    // range — Arx maps tiny chunks per frame, so flushing the whole VBO is
+    // still cheap on the cache controller.
+    GSPGPU_FlushDataCache(slot->data, (u32) slot->size);
+    return GL_TRUE;
 }

@@ -7,7 +7,21 @@
 #include "context.h"
 #include <math.h>
 
+#include <3ds.h>
+#include <citro3d.h>
+#include <stdlib.h>
+
 #include "NovaGL_shader_shbin.h"
+
+/* Moved out of NovaGL.h: depends on GX_TRANSFER_* from <3ds.h>, which we now keep
+ * confined to the .c side so the public header doesn't leak libctru's `Thread`
+ * typedef into C++ callers. */
+#define DISPLAY_TRANSFER_FLAGS \
+    (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | \
+     GX_TRANSFER_RAW_COPY(0) | \
+     GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | \
+     GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
+     GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
 struct NovaState g;
 

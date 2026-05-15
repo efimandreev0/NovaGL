@@ -4,6 +4,13 @@
 
 #ifndef NOVAGL_CONTEXT_H
 #define NOVAGL_CONTEXT_H
+
+// Internal NovaGL header: safe to drag in <3ds.h> here because no NovaGL caller
+// includes context.h (it lives under src/). All NovaGL .c files reach this via
+// utils.h or by including context.h directly, so this is where the libctru/citro3d
+// definitions get pulled in.
+#include <3ds.h>
+#include <citro3d.h>
 #include "NovaGL.h"
 
 
