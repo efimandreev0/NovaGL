@@ -441,6 +441,13 @@ void nova_fini(void);
 void nova_set_render_target(int target_mode); // 0 = Top Left, 1 = Top Right, 2 = Bottom
 void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements, GLenum type, const GLvoid *indices);
 
+// Сбрасывает кэш «последнего применённого» GPU-стейта внутри apply_gpu_state.
+// Вызывать когда контекст GL логически меняется (смена уровня, ресет графики)
+// — иначе кэш может считать «привязано» то, что уже не привязано (например,
+// текстуры старого мира удалены, ID переиспользован), и пропустить нужный
+// C3D_TexBind / C3D_DepthTest. Безопасно вызывать в любой момент.
+void nova_invalidate_state_cache(void);
+
 void novaSwapBuffers(void);
 
 int novaGetEyeCount(void);

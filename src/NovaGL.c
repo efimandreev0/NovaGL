@@ -216,6 +216,15 @@ void novaSwapBuffers(void) {
 void nova_fini(void) {
     if (!g.initialized) return;
 
+    // Когда nova_fini зовут из главного цикла после break, мы находимся
+    // МЕЖДУ FrameBegin (последний swap) и невыполненным FrameEnd — то есть у
+    // GPU ещё открыт кадр на наших render_target_top/_right/_bot. Если сразу
+    // зовём C3D_RenderTargetDelete, оно лезет в renderqueue.c:364, видит
+    // pending transfer на удаляемом таргете и валит процесс. Сначала закрываем
+    // кадр и ждём GPU.
+    C3D_FrameEnd(0);
+    gspWaitForP3D();
+
     if (g.client_array_buf) linearFree(g.client_array_buf);
     if (g.index_buf) linearFree(g.index_buf);
 

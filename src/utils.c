@@ -37,6 +37,49 @@ float clampf(float x, float lo, float hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
 
+static int clampi(int x, int lo, int hi) {
+    return x < lo ? lo : (x > hi ? hi : x);
+}
+
+static void apply_scissor_box(void) {
+    C3D_FrameBuf *fb = g.current_target ? &g.current_target->frameBuf : NULL;
+    const int native_w = fb ? (int)fb->width : NOVA_SCREEN_H;
+    const int native_h = fb ? (int)fb->height : NOVA_SCREEN_W;
+
+    int x0 = g.scissor_x;
+    int y0 = g.scissor_y;
+    int x1 = g.scissor_x + g.scissor_w;
+    int y1 = g.scissor_y + g.scissor_h;
+
+    if (g.bound_fbo == 0) {
+        const int logical_w = native_h;
+        const int logical_h = native_w;
+        x0 = clampi(x0, 0, logical_w);
+        x1 = clampi(x1, 0, logical_w);
+        y0 = clampi(y0, 0, logical_h);
+        y1 = clampi(y1, 0, logical_h);
+
+        C3D_SetScissor(GPU_SCISSOR_NORMAL,
+                       (u32)y0,
+                       (u32)(logical_w - x1),
+                       (u32)y1,
+                       (u32)(logical_w - x0));
+    } else {
+        const int logical_w = native_w;
+        const int logical_h = native_h;
+        x0 = clampi(x0, 0, logical_w);
+        x1 = clampi(x1, 0, logical_w);
+        y0 = clampi(y0, 0, logical_h);
+        y1 = clampi(y1, 0, logical_h);
+
+        C3D_SetScissor(GPU_SCISSOR_NORMAL,
+                       (u32)x0,
+                       (u32)(logical_h - y1),
+                       (u32)x1,
+                       (u32)(logical_h - y0));
+    }
+}
+
 void dl_record_translate(float x, float y, float z) {
     if (g.dl_recording >= 0 && g.dl_recording < NOVA_DISPLAY_LISTS) {
         DisplayList *dl = &g.dl_store[g.dl_recording];
@@ -522,42 +565,111 @@ void apply_gpu_state(void) {
         g.fog_dirty = 0;
     }
 
+    // ── Кеш «последних применённых» GPU-стейтов ──
+    // apply_gpu_state() зовётся перед каждым draw call. В сцене с сотней
+    // чанков+HUD это сотня вызовов в кадр, и каждый раньше делал безусловный
+    // C3D_DepthTest/AlphaTest/AlphaBlend/CullFace/SetScissor — десятки
+    // регистровых записей в GPU command buffer, даже если стейт не менялся.
+    // Кешируем последние параметры и пропускаем повтор.
+    //
+    // ВАЖНО: переменные на file scope (см. снизу файла), а не function-local —
+    // чтобы nova_invalidate_state_cache() мог их сбросить при смене уровня.
+    // Если ID текстур переиспользуются между мирами, кэш без сброса может
+    // решить "уже привязано" и пропустить нужный C3D_TexBind → стейл-привязка
+    // → crash на draw.
+    extern GPU_WRITEMASK s_last_writemask;
+    extern int           s_last_depth_test_enabled;
+    extern GLenum        s_last_depth_func;
+    extern int           s_last_alpha_test_enabled;
+    extern GLenum        s_last_alpha_func;
+    extern u8            s_last_alpha_ref8;
+    extern int           s_last_blend_enabled;
+    extern GLenum        s_last_blend_src, s_last_blend_dst;
+    extern int           s_last_cull_enabled;
+    extern GLenum        s_last_cull_mode, s_last_front_face;
+    extern int           s_last_scissor_enabled;
+    extern int           s_last_scissor_x, s_last_scissor_y,
+                         s_last_scissor_w, s_last_scissor_h;
+    extern int           s_last_scissor_fbo;
+    extern C3D_RenderTarget *s_last_scissor_target;
+
     GPU_WRITEMASK writemask = 0;
     if (g.color_mask_r) writemask |= GPU_WRITE_RED;
     if (g.color_mask_g) writemask |= GPU_WRITE_GREEN;
     if (g.color_mask_b) writemask |= GPU_WRITE_BLUE;
     if (g.color_mask_a) writemask |= GPU_WRITE_ALPHA;
     if (g.depth_mask && g.depth_test_enabled) writemask |= GPU_WRITE_DEPTH;
-    C3D_DepthTest(g.depth_test_enabled, gl_to_gpu_testfunc(g.depth_func), writemask);
-
-    C3D_AlphaTest(g.alpha_test_enabled, gl_to_gpu_testfunc(g.alpha_func), (u8) (g.alpha_ref * 255.0f));
-
-    if (g.blend_enabled) {
-        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, gl_to_gpu_blendfactor(g.blend_src),
-                       gl_to_gpu_blendfactor(g.blend_dst), gl_to_gpu_blendfactor(g.blend_src),
-                       gl_to_gpu_blendfactor(g.blend_dst));
-    } else {
-        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    if (writemask != s_last_writemask ||
+        s_last_depth_test_enabled != g.depth_test_enabled ||
+        s_last_depth_func != g.depth_func) {
+        C3D_DepthTest(g.depth_test_enabled, gl_to_gpu_testfunc(g.depth_func), writemask);
+        s_last_writemask = writemask;
+        s_last_depth_test_enabled = g.depth_test_enabled;
+        s_last_depth_func = g.depth_func;
     }
 
-    if (g.cull_face_enabled) {
-        GPU_CULLMODE cull;
-        if (g.cull_face_mode == GL_FRONT) cull = (g.front_face == GL_CCW) ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW;
-        else cull = (g.front_face == GL_CCW) ? GPU_CULL_BACK_CCW : GPU_CULL_FRONT_CCW;
-        C3D_CullFace(cull);
-    } else {
-        C3D_CullFace(GPU_CULL_NONE);
+    u8 alpha_ref8 = (u8)(g.alpha_ref * 255.0f);
+    if (s_last_alpha_test_enabled != g.alpha_test_enabled ||
+        s_last_alpha_func != g.alpha_func ||
+        s_last_alpha_ref8 != alpha_ref8) {
+        C3D_AlphaTest(g.alpha_test_enabled, gl_to_gpu_testfunc(g.alpha_func), alpha_ref8);
+        s_last_alpha_test_enabled = g.alpha_test_enabled;
+        s_last_alpha_func = g.alpha_func;
+        s_last_alpha_ref8 = alpha_ref8;
+    }
+
+    if (s_last_blend_enabled != g.blend_enabled ||
+        s_last_blend_src != g.blend_src ||
+        s_last_blend_dst != g.blend_dst) {
+        if (g.blend_enabled) {
+            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, gl_to_gpu_blendfactor(g.blend_src),
+                           gl_to_gpu_blendfactor(g.blend_dst), gl_to_gpu_blendfactor(g.blend_src),
+                           gl_to_gpu_blendfactor(g.blend_dst));
+        } else {
+            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+        }
+        s_last_blend_enabled = g.blend_enabled;
+        s_last_blend_src = g.blend_src;
+        s_last_blend_dst = g.blend_dst;
+    }
+
+    if (s_last_cull_enabled != g.cull_face_enabled ||
+        s_last_cull_mode != g.cull_face_mode ||
+        s_last_front_face != g.front_face) {
+        if (g.cull_face_enabled) {
+            GPU_CULLMODE cull;
+            if (g.cull_face_mode == GL_FRONT) cull = (g.front_face == GL_CCW) ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW;
+            else cull = (g.front_face == GL_CCW) ? GPU_CULL_BACK_CCW : GPU_CULL_FRONT_CCW;
+            C3D_CullFace(cull);
+        } else {
+            C3D_CullFace(GPU_CULL_NONE);
+        }
+        s_last_cull_enabled = g.cull_face_enabled;
+        s_last_cull_mode = g.cull_face_mode;
+        s_last_front_face = g.front_face;
     }
 
     // ВТОРОЙ ФИКС: SCISSOR
     if (g.scissor_test_enabled) {
-        if (g.bound_fbo == 0) {
-            C3D_SetScissor(GPU_SCISSOR_NORMAL, g.scissor_y, g.scissor_x, g.scissor_y + g.scissor_h, g.scissor_x + g.scissor_w);
-        } else {
-            C3D_SetScissor(GPU_SCISSOR_NORMAL, g.scissor_x, g.scissor_y, g.scissor_x + g.scissor_w, g.scissor_y + g.scissor_h);
+        // Меняем при смене параметров ИЛИ при смене целевого FBO (там ориентация другая).
+        if (s_last_scissor_enabled != 1 ||
+            s_last_scissor_x != g.scissor_x || s_last_scissor_y != g.scissor_y ||
+            s_last_scissor_w != g.scissor_w || s_last_scissor_h != g.scissor_h ||
+            s_last_scissor_fbo != (g.bound_fbo == 0) ||
+            s_last_scissor_target != g.current_target) {
+            apply_scissor_box();
+            s_last_scissor_enabled = 1;
+            s_last_scissor_x = g.scissor_x;
+            s_last_scissor_y = g.scissor_y;
+            s_last_scissor_w = g.scissor_w;
+            s_last_scissor_h = g.scissor_h;
+            s_last_scissor_fbo = (g.bound_fbo == 0);
+            s_last_scissor_target = g.current_target;
         }
-    } else {
+    } else if (s_last_scissor_enabled != 0) {
         C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+        s_last_scissor_enabled = 0;
+        s_last_scissor_target = NULL;
     }
 
     int current_tex_state = 0;
@@ -649,12 +761,77 @@ void apply_gpu_state(void) {
         g.tev_dirty = 0;
     }
 
+    // Бинд текстуры — самая частая команда (терен, частицы, hud).
+    // Пропускаем повторный C3D_TexBind с тем же id. Сброс происходит когда
+    // юнит отключается, чтобы при повторном включении бинд гарантированно
+    // переустанавливался. Также сбрасывается из nova_invalidate_state_cache().
+    extern GLuint s_last_tex_bound[3];
     for (int unit = 0; unit < 3; unit++) {
         if ((current_tex_state & (1 << unit)) && g.bound_texture[unit] < NOVA_MAX_TEXTURES) {
-            TexSlot *slot = &g.textures[g.bound_texture[unit]];
-            if (slot->allocated) C3D_TexBind(unit, &slot->tex);
+            if (s_last_tex_bound[unit] != g.bound_texture[unit]) {
+                TexSlot *slot = &g.textures[g.bound_texture[unit]];
+                if (slot->allocated) {
+                    C3D_TexBind(unit, &slot->tex);
+                    s_last_tex_bound[unit] = g.bound_texture[unit];
+                }
+            }
+        } else {
+            s_last_tex_bound[unit] = 0xFFFFFFFFu;
         }
     }
+}
+
+// ── File-scope storage для state-cache (extern'ятся из apply_gpu_state) ──
+// Сброс через nova_invalidate_state_cache() ниже.
+GPU_WRITEMASK s_last_writemask          = (GPU_WRITEMASK)-1;
+int           s_last_depth_test_enabled = -1;
+GLenum        s_last_depth_func         = 0;
+int           s_last_alpha_test_enabled = -1;
+GLenum        s_last_alpha_func         = 0;
+u8            s_last_alpha_ref8         = 0xFF;
+int           s_last_blend_enabled      = -1;
+GLenum        s_last_blend_src          = 0;
+GLenum        s_last_blend_dst          = 0;
+int           s_last_cull_enabled       = -1;
+GLenum        s_last_cull_mode          = 0;
+GLenum        s_last_front_face         = 0;
+int           s_last_scissor_enabled    = -1;
+int           s_last_scissor_x          = -1;
+int           s_last_scissor_y          = -1;
+int           s_last_scissor_w          = -1;
+int           s_last_scissor_h          = -1;
+int           s_last_scissor_fbo        = -1;
+C3D_RenderTarget *s_last_scissor_target = NULL;
+GLuint        s_last_tex_bound[3]       = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+
+void nova_invalidate_state_cache(void) {
+    s_last_writemask          = (GPU_WRITEMASK)-1;
+    s_last_depth_test_enabled = -1;
+    s_last_depth_func         = 0;
+    s_last_alpha_test_enabled = -1;
+    s_last_alpha_func         = 0;
+    s_last_alpha_ref8         = 0xFF;
+    s_last_blend_enabled      = -1;
+    s_last_blend_src          = 0;
+    s_last_blend_dst          = 0;
+    s_last_cull_enabled       = -1;
+    s_last_cull_mode          = 0;
+    s_last_front_face         = 0;
+    s_last_scissor_enabled    = -1;
+    s_last_scissor_x          = -1;
+    s_last_scissor_y          = -1;
+    s_last_scissor_w          = -1;
+    s_last_scissor_h          = -1;
+    s_last_scissor_fbo        = -1;
+    s_last_scissor_target     = NULL;
+    s_last_tex_bound[0]       = 0xFFFFFFFFu;
+    s_last_tex_bound[1]       = 0xFFFFFFFFu;
+    s_last_tex_bound[2]       = 0xFFFFFFFFu;
+    // Также метим грязным основной кэш матриц/фога/TEV — на всякий случай.
+    g.matrices_dirty = 1;
+    g.fog_dirty = 1;
+    g.tev_dirty = 1;
+    g.last_tex_state = -1;
 }
 
 void cleanup_vbo_stream(void) {
