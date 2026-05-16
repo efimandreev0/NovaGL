@@ -358,21 +358,22 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
             if (count <= 0) return;
         }
         int req_size = count * 24;
-        if (req_size > g.client_array_buf_size) {
-            g.last_error = GL_OUT_OF_MEMORY;
-            return;
-        }
 
-        uint8_t *dst_start = (uint8_t *) linear_alloc_ring(g.client_array_buf, &g.client_array_buf_offset, req_size,
-                                                           g.client_array_buf_size);
         if (vbo_is_packed_ptc(vbo)) {
+            if (req_size > g.client_array_buf_size) {
+                g.last_error = GL_OUT_OF_MEMORY;
+                return;
+            }
+            uint8_t *dst_start = (uint8_t *) linear_alloc_ring(g.client_array_buf, &g.client_array_buf_offset, req_size,
+                                                               g.client_array_buf_size);
             vbo_decode_packed_ptc_span(vbo, first, count, dst_start);
+            GSPGPU_FlushDataCache(dst_start, req_size);
+            draw_packed_run(mode, prim, dst_start, count, 24, 3);
         } else {
-            memcpy(dst_start, (const uint8_t *) vbo->data + first * 24, req_size);
-        }
 
-        GSPGPU_FlushDataCache(dst_start, req_size);
-        draw_packed_run(mode, prim, dst_start, count, 24, 3);
+            uint8_t *base = (uint8_t *) vbo->data + first * 24;
+            draw_packed_run(mode, prim, base, count, 24, 3);
+        }
         cleanup_vbo_stream();
         return;
     }
