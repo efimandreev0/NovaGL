@@ -781,6 +781,29 @@ void apply_gpu_state(void) {
     }
 }
 
+static int   s_attr_pos_elements = -1;
+static void *s_buf_base          = (void *) -1;
+static int   s_buf_stride        = -1;
+
+void nova_setup_attr_info(int pos_elements) {
+    if (s_attr_pos_elements == pos_elements) return;
+    AttrInfo_Init(&g.attr_info);
+    AttrInfo_AddLoader(&g.attr_info, 0, GPU_FLOAT, pos_elements);
+    AttrInfo_AddLoader(&g.attr_info, 1, GPU_FLOAT, 2);
+    AttrInfo_AddLoader(&g.attr_info, 2, GPU_UNSIGNED_BYTE, 4);
+    C3D_SetAttrInfo(&g.attr_info);
+    s_attr_pos_elements = pos_elements;
+}
+
+void nova_setup_buf_info(void *base, int stride) {
+    if (s_buf_base == base && s_buf_stride == stride) return;
+    C3D_BufInfo *bufInfo = C3D_GetBufInfo();
+    BufInfo_Init(bufInfo);
+    BufInfo_Add(bufInfo, base, stride, 3, 0x210);
+    s_buf_base = base;
+    s_buf_stride = stride;
+}
+
 // ── File-scope storage для state-cache (extern'ятся из apply_gpu_state) ──
 // Сброс через nova_invalidate_state_cache() ниже.
 GPU_WRITEMASK s_last_writemask          = (GPU_WRITEMASK)-1;
@@ -827,6 +850,9 @@ void nova_invalidate_state_cache(void) {
     s_last_tex_bound[0]       = 0xFFFFFFFFu;
     s_last_tex_bound[1]       = 0xFFFFFFFFu;
     s_last_tex_bound[2]       = 0xFFFFFFFFu;
+    s_attr_pos_elements       = -1;
+    s_buf_base                = (void *) -1;
+    s_buf_stride              = -1;
     // Также метим грязным основной кэш матриц/фога/TEV — на всякий случай.
     g.matrices_dirty = 1;
     g.fog_dirty = 1;

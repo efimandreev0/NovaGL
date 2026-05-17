@@ -45,15 +45,8 @@ void glBegin(GLenum mode) {
 }
 
 static void imm_draw_packed_run(GLenum mode, GPU_Primitive_t prim, uint8_t *base, int count) {
-    AttrInfo_Init(&g.attr_info);
-    AttrInfo_AddLoader(&g.attr_info, 0, GPU_FLOAT, 3);
-    AttrInfo_AddLoader(&g.attr_info, 1, GPU_FLOAT, 2);
-    AttrInfo_AddLoader(&g.attr_info, 2, GPU_UNSIGNED_BYTE, 4);
-    C3D_SetAttrInfo(&g.attr_info);
-
-    C3D_BufInfo *bufInfo = C3D_GetBufInfo();
-    BufInfo_Init(bufInfo);
-    BufInfo_Add(bufInfo, base, 24, 3, 0x210); // stride = 24
+    nova_setup_attr_info(3);
+    nova_setup_buf_info(base, 24);
 
     if (mode == GL_QUADS) {
         #ifdef NOVAGL_QUAD_AS_FAN

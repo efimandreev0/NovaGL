@@ -79,6 +79,10 @@ void cleanup_vbo_stream(void);
 
 void draw_emulated_quads(int count);
 
+void nova_setup_attr_info(int pos_elements);
+
+void nova_setup_buf_info(void *base, int stride);
+
 static GPU_TEVSRC get_tev_src(GLint gl_src, GPU_TEVSRC tex_src, GPU_TEVSRC prev_src);
 
 static int get_tev_op_rgb(GLint gl_op);

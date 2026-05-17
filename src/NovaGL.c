@@ -283,16 +283,8 @@ static int primitive_vertex_count(GLenum mode) {
 }
 
 static void draw_packed_run(GLenum mode, GPU_Primitive_t prim, uint8_t *base, int count, int stride, int pos_elements) {
-    //Trying to dynamic know: 24 or 28 bytes.
-    AttrInfo_Init(&g.attr_info);
-    AttrInfo_AddLoader(&g.attr_info, 0, GPU_FLOAT, pos_elements); // 3 or 4
-    AttrInfo_AddLoader(&g.attr_info, 1, GPU_FLOAT, 2);
-    AttrInfo_AddLoader(&g.attr_info, 2, GPU_UNSIGNED_BYTE, 4);
-    C3D_SetAttrInfo(&g.attr_info);
-
-    C3D_BufInfo *bufInfo = C3D_GetBufInfo();
-    BufInfo_Init(bufInfo);
-    BufInfo_Add(bufInfo, base, stride, 3, 0x210); // stride = 24 or 28
+    nova_setup_attr_info(pos_elements);
+    nova_setup_buf_info(base, stride);
 
     if (mode == GL_QUADS) {
         // === [DIAG] alternate quad path: draw as TRIANGLE_FAN ===
@@ -385,6 +377,49 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
         }
         cleanup_vbo_stream();
         return;
+    }
+
+    if (is_elements &&
+        (type == GL_UNSIGNED_SHORT || type == GL_UNSIGNED_BYTE) &&
+        (mode == GL_TRIANGLES || mode == GL_TRIANGLE_STRIP || mode == GL_TRIANGLE_FAN) &&
+        g.shade_model != GL_FLAT &&
+        g.va_vertex.enabled && g.va_vertex.vbo_id > 0 && g.va_vertex.vbo_id < NOVA_MAX_VBOS &&
+        g.vbos[g.va_vertex.vbo_id].allocated && !vbo_is_packed_ptc(&g.vbos[g.va_vertex.vbo_id]) &&
+        g.va_vertex.size == 3 && g.va_vertex.type == GL_FLOAT && g.va_vertex.stride == 24 &&
+        g.va_texcoord.enabled && g.va_texcoord.vbo_id == g.va_vertex.vbo_id &&
+        g.va_texcoord.size == 2 && g.va_texcoord.type == GL_FLOAT && g.va_texcoord.stride == 24 &&
+        g.va_color.enabled && g.va_color.vbo_id == g.va_vertex.vbo_id &&
+        g.va_color.size == 4 && g.va_color.type == GL_UNSIGNED_BYTE && g.va_color.stride == 24 &&
+        (uintptr_t) g.va_texcoord.pointer == (uintptr_t) g.va_vertex.pointer + 12 &&
+        (uintptr_t) g.va_color.pointer    == (uintptr_t) g.va_vertex.pointer + 20) {
+
+        VBOSlot *vbo = &g.vbos[g.va_vertex.vbo_id];
+        int elem_size = (type == GL_UNSIGNED_SHORT) ? 2 : 1;
+        const void *gpu_indices = NULL;
+
+        if (g.bound_element_array_buffer > 0 && g.bound_element_array_buffer < NOVA_MAX_VBOS) {
+            gpu_indices = idx_src;
+        } else {
+            int ibytes = count * elem_size;
+            if (ibytes <= g.index_buf_size) {
+                void *staged = linear_alloc_ring(g.index_buf, &g.index_buf_offset,
+                                                 ibytes, g.index_buf_size);
+                memcpy(staged, idx_src, ibytes);
+                GSPGPU_FlushDataCache(staged, ibytes);
+                gpu_indices = staged;
+            }
+        }
+
+        if (gpu_indices) {
+            uint8_t *base = (uint8_t *) vbo->data + (uintptr_t) g.va_vertex.pointer;
+            nova_setup_attr_info(3);
+            nova_setup_buf_info(base, 24);
+            C3D_DrawElements(prim, count,
+                             (type == GL_UNSIGNED_SHORT) ? C3D_UNSIGNED_SHORT : C3D_UNSIGNED_BYTE,
+                             gpu_indices);
+            cleanup_vbo_stream();
+            return;
+        }
     }
 
     // Force vec3 position even when Arx supplies a 4-component TexturedVertex.
