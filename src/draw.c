@@ -12,7 +12,7 @@
 // === [DIAG] dump first N draw calls to stdout to compare against expected geometry ===
 // Set NOVA_DIAG_DRAW_LIMIT=0 to disable; default off in release.
 #ifndef NOVA_DIAG_DRAW_LIMIT
-#define NOVA_DIAG_DRAW_LIMIT 0
+#define NOVA_DIAG_DRAW_LIMIT 32
 #endif
 static int s_diag_draw_count = 0;
 
