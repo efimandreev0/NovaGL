@@ -546,6 +546,8 @@ void apply_gpu_state(void) {
         }
         if (g.uLoc_modelview >= 0)
             C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_modelview, &g.mv_stack[g.mv_sp]);
+        if (g.uLoc_texmtx >= 0)
+            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_texmtx, &g.tex_stack[g.tex_sp]);
         g.matrices_dirty = 0;
     }
 

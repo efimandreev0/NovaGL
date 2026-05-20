@@ -92,6 +92,7 @@ extern struct NovaState {
     shaderProgram_s shader_program;
     int uLoc_projection;
     int uLoc_modelview;
+    int uLoc_texmtx;       /* GL_TEXTURE matrix stack -> vertex shader */
     int uLoc_fogparams;
     C3D_AttrInfo attr_info;
     //Matrix stuff

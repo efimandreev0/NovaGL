@@ -66,6 +66,7 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
 
         g.uLoc_projection = shaderInstanceGetUniformLocation(g.shader_program.vertexShader, "projection");
         g.uLoc_modelview = shaderInstanceGetUniformLocation(g.shader_program.vertexShader, "modelview");
+        g.uLoc_texmtx    = shaderInstanceGetUniformLocation(g.shader_program.vertexShader, "texmtx");
         g.uLoc_fogparams = shaderInstanceGetUniformLocation(g.shader_program.vertexShader, "fogparams");
     }
 

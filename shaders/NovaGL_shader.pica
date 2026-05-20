@@ -4,6 +4,11 @@
 
 .fvec projection[4]
 .fvec modelview[4]
+.fvec texmtx[4]     ; GL_TEXTURE matrix stack (identity by default).
+                    ; Lets us scale/translate UV on the GPU instead of via a
+                    ; CPU loop in the GX-emu layer — GameCube ports etc. ship
+                    ; texel-space UVs and rely on a GX texture matrix to bring
+                    ; them into [0,1]. Applied to (s, t, 0, 1).
 .fvec fogparams[2]  ; [0]: start(x), end(y)  [1]: color
 
 .alias inPosition  v0
@@ -68,7 +73,17 @@
     add outColor.xyz, r5.xyz, r6.xyz
     mov outColor.w, r1.w
 
-    mov outTexcoord0.xy, inTexcoord.xy
+    ; Apply GL_TEXTURE matrix to UV. Build (s, t, 0, 1) in r10, compute the two
+    ; output components into a scratch register r11, then copy out — writing
+    ; to outTexcoord0.x / .y directly from a dp4 destination wasn't producing
+    ; the expected result on picasso, going via r11 is the safe canonical form
+    ; used by other PICA shaders for the same pattern.
+    mov r10.xy, inTexcoord.xy
+    mov r10.z,  CONST1.y         ; 0
+    mov r10.w,  CONST1.x         ; 1
+    dp4 r11.x, texmtx[0], r10
+    dp4 r11.y, texmtx[1], r10
+    mov outTexcoord0.xy, r11.xy
     mov outTexcoord0.zw, CONST2.zw
 
     mov outView, r0

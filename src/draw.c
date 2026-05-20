@@ -139,6 +139,11 @@ static void diag_log_draw(const char *tag, GLenum mode, GLint first, GLsizei cou
     if (g.mv_sp >= 0 && g.mv_sp < NOVA_MATRIX_STACK) {
         diag_log_matrix("mv  ", &g.mv_stack[g.mv_sp]);
     }
+    if (g.tex_sp >= 0 && g.tex_sp < NOVA_MATRIX_STACK) {
+        diag_log_matrix("texm", &g.tex_stack[g.tex_sp]);
+    }
+    printf("[NovaDiag]   uLoc texmtx=%d (>=0 means uniform actually bound)\n",
+           g.uLoc_texmtx);
 
     int verts_to_print = count < 4 ? count : 4;
     if (g.va_texcoord.enabled) {
