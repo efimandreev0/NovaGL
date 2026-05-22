@@ -5,11 +5,19 @@
 #include "utils.h"
 
 /* Mark only the stack of the currently active matrix mode as dirty, plus the
- * union flag for code paths that just check `matrices_dirty`. */
+ * union flag for code paths that just check `matrices_dirty`.
+ *
+ * If we're mutating the GL_TEXTURE stack with anything other than identity,
+ * clear g.tex_mtx_is_identity so the shader selector falls back to the full
+ * shader (which actually applies the texmtx). glLoadIdentity sets it back. */
 static inline void mark_cur_dirty(void) {
     switch (g.matrix_mode) {
         case GL_PROJECTION: g.proj_dirty = 1;    break;
-        case GL_TEXTURE:    g.tex_mtx_dirty = 1; break;
+        case GL_TEXTURE:
+            g.tex_mtx_dirty = 1;
+            g.tex_mtx_is_identity = 0;
+            g.tex_mtx_identity_stack[g.tex_sp] = 0;
+            break;
         default:            g.mv_dirty = 1;      break;
     }
     g.matrices_dirty = 1;
@@ -20,6 +28,12 @@ void glMatrixMode(GLenum mode) { g.matrix_mode = mode; }
 void glLoadIdentity(void) {
     Mtx_Identity(cur_mtx());
     mark_cur_dirty();
+    /* The mark_cur_dirty above clears tex_mtx_is_identity for GL_TEXTURE
+     * mutations, but glLoadIdentity is the one mutation that restores it. */
+    if (g.matrix_mode == GL_TEXTURE) {
+        g.tex_mtx_is_identity = 1;
+        g.tex_mtx_identity_stack[g.tex_sp] = 1;
+    }
 }
 
 void glPushMatrix(void) {
@@ -27,6 +41,9 @@ void glPushMatrix(void) {
     C3D_Mtx *stack = cur_stack();
     if (*sp < NOVA_MATRIX_STACK - 1) {
         Mtx_Copy(&stack[*sp + 1], &stack[*sp]);
+        if (g.matrix_mode == GL_TEXTURE) {
+            g.tex_mtx_identity_stack[*sp + 1] = g.tex_mtx_identity_stack[*sp];
+        }
         (*sp)++;
     }
 }
@@ -35,6 +52,12 @@ void glPopMatrix(void) {
     int *sp = cur_sp();
     if (*sp > 0) (*sp)--;
     mark_cur_dirty();
+    /* mark_cur_dirty force-clears tex_mtx_is_identity on GL_TEXTURE mode;
+     * restore from the per-slot stack after, so popping back to identity
+     * keeps the basic shader path available. */
+    if (g.matrix_mode == GL_TEXTURE) {
+        g.tex_mtx_is_identity = g.tex_mtx_identity_stack[*sp];
+    }
 }
 
 void glTranslatef(GLfloat x, GLfloat y, GLfloat z) {

@@ -88,12 +88,41 @@ extern struct NovaState {
     C3D_RenderTarget *current_target;
 
     //Shader stuff
+    /* Full FFP shader: separate proj+modelview dp4 chains, fog, texmtx. */
     DVLB_s *shader_dvlb;
     shaderProgram_s shader_program;
     int uLoc_projection;
     int uLoc_modelview;
     int uLoc_texmtx;       /* GL_TEXTURE matrix stack -> vertex shader */
     int uLoc_fogparams;
+
+    /* Basic fast-path shader: single combined MVP dp4 chain, no fog math,
+     * identity tex matrix. Selected when g.fog_enabled == 0 AND
+     * g.tex_mtx_is_identity. Saves 4 dp4 + 2 dp4 + ~8 ALU ops per vertex. */
+    DVLB_s *shader_basic_dvlb;
+    shaderProgram_s shader_basic_program;
+    int uLoc_mvp_basic;
+
+    /* Currently bound program: 0 = full, 1 = basic. -1 forces re-bind on
+     * the next apply_gpu_state (used on init / cache invalidate). */
+    int active_shader;
+
+    /* Combined MVP for the basic shader. Rebuilt on CPU when proj_dirty
+     * or mv_dirty fires, so the shader only does one dp4 chain. */
+    C3D_Mtx mvp_combined;
+    /* Cached final projection (= tilt * adjusted_projection). Only rebuilt
+     * when proj_dirty or stereo slider toggles. Avoids ~16 muls per draw
+     * when only modelview changed under the basic shader. */
+    C3D_Mtx final_proj_cached;
+    int final_proj_cached_valid;
+
+    /* tex matrix identity tracking: 1 means the current GL_TEXTURE stack
+     * top is identity, so the basic shader (which skips texmtx) is safe.
+     * The per-slot array tracks identity status across push/pop so popping
+     * back to an identity slot restores the fast path. */
+    int tex_mtx_is_identity;
+    int tex_mtx_identity_stack[NOVA_MATRIX_STACK];
+
     C3D_AttrInfo attr_info;
     //Matrix stuff
     int matrix_mode;

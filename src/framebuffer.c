@@ -92,6 +92,7 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
         g.bound_fbo = new_bound;
         g.matrices_dirty = 1;
         g.proj_dirty = g.mv_dirty = g.tex_mtx_dirty = 1;
+        g.final_proj_cached_valid = 0;
         return;
     }
 

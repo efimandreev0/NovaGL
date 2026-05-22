@@ -492,6 +492,23 @@ static int get_tev_op_rgb(GLint gl_op) {
 // Теперь FBO (g.bound_fbo != 0) не крутит камеру!
 
 void apply_gpu_state(void) {
+    /* --- Shader selector --------------------------------------------------
+     * Pick the cheapest shader that satisfies the current state:
+     *   basic: fog off + identity tex matrix      (single dp4 chain, no fog)
+     *   full : everything else                    (two dp4 chains, fog, texmtx)
+     * Switching shaders invalidates the GPU's uniform state, so we force all
+     * matrix stacks + fog dirty when the active program changes. */
+    int want_basic = (!g.fog_enabled && g.tex_mtx_is_identity && g.shader_basic_dvlb != NULL);
+    int desired = want_basic ? 1 : 0;
+    if (desired != g.active_shader) {
+        if (desired == 1) C3D_BindProgram(&g.shader_basic_program);
+        else              C3D_BindProgram(&g.shader_program);
+        g.active_shader = desired;
+        g.matrices_dirty = 1;
+        g.proj_dirty = g.mv_dirty = g.tex_mtx_dirty = 1;
+        g.fog_dirty = 1;
+    }
+
     if (g.matrices_dirty) {
         if (g.fog_enabled) g.fog_dirty = 1;
 
@@ -499,8 +516,16 @@ void apply_gpu_state(void) {
          * projection rebuild even when only modelview changed (offset depends
          * on eye). Otherwise honour the per-stack flag. */
         int force_proj_upload = (osGet3DSliderState() > 0.0f && g.stereo_depth != 0.0f);
+        int need_proj_rebuild = (g.proj_dirty || force_proj_upload || !g.final_proj_cached_valid);
+        /* On the full shader the projection uniform is only re-uploaded when
+         * rebuilt; on the basic shader we always need final_proj available to
+         * combine with modelview, so we use the cached one when not rebuilt. */
+        int uploaded_proj_this_call = 0;
 
-        if (g.uLoc_projection >= 0 && (g.proj_dirty || force_proj_upload)) {
+        C3D_Mtx final_proj;
+        int final_proj_built = 0;
+
+        if (need_proj_rebuild) {
             C3D_Mtx adj_proj = g.proj_stack[g.proj_sp];
 
             float slider = osGet3DSliderState();
@@ -521,13 +546,6 @@ void apply_gpu_state(void) {
             Mtx_Identity(&tilt);
 
             // ФИКС ФРЕЙМБУФЕРОВ ЗДЕСЬ: ЭКРАН КРУТИТСЯ, А FBO - НЕТ!
-            // === TILT direction test (Arx splash on top screen) ===
-            // Set NOVAGL_TILT_VARIANT to 0 / 1 / 2 / 3 to A/B-test the four
-            // possible 2D rotations of clip-space. Stock NovaGL used variant 1.
-            //   0 = identity (no rotation, expect portrait-side picture)
-            //   1 = original: (x,y) -> ( y, -x)  // 90° CCW
-            //   2 = CW:       (x,y) -> (-y,  x)
-            //   3 = 180°:     (x,y) -> (-x, -y)
             #ifndef NOVAGL_TILT_VARIANT
             #define NOVAGL_TILT_VARIANT 1
             #endif
@@ -542,21 +560,46 @@ void apply_gpu_state(void) {
                 tilt.r[0].x = -1.0f; tilt.r[0].y = 0.0f;
                 tilt.r[1].x = 0.0f;  tilt.r[1].y = -1.0f;
                 #endif
-                // VARIANT == 0 leaves identity (no rotation)
             }
 
-            C3D_Mtx final_proj;
             Mtx_Multiply(&final_proj, &tilt, &adj_proj);
-            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection, &final_proj);
+            final_proj_built = 1;
+            g.final_proj_cached = final_proj;
+            g.final_proj_cached_valid = 1;
+        } else {
+            final_proj = g.final_proj_cached;
+            final_proj_built = 1;
         }
-        if (g.uLoc_modelview >= 0 && g.mv_dirty)
-            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_modelview, &g.mv_stack[g.mv_sp]);
-        if (g.uLoc_texmtx >= 0 && g.tex_mtx_dirty)
-            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_texmtx, &g.tex_stack[g.tex_sp]);
+
+        if (g.active_shader == 1) {
+            /* Basic shader: upload combined MVP = final_proj * modelview. */
+            if (need_proj_rebuild || g.mv_dirty) {
+                Mtx_Multiply(&g.mvp_combined, &final_proj, &g.mv_stack[g.mv_sp]);
+                if (g.uLoc_mvp_basic >= 0)
+                    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_mvp_basic, &g.mvp_combined);
+            }
+        } else {
+            /* Full shader: separate proj + modelview + texmtx uniforms. */
+            if (need_proj_rebuild && g.uLoc_projection >= 0) {
+                C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection, &final_proj);
+                uploaded_proj_this_call = 1;
+            }
+            if (g.uLoc_modelview >= 0 && g.mv_dirty)
+                C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_modelview, &g.mv_stack[g.mv_sp]);
+            if (g.uLoc_texmtx >= 0 && g.tex_mtx_dirty)
+                C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_texmtx, &g.tex_stack[g.tex_sp]);
+        }
+        (void)uploaded_proj_this_call;
         g.matrices_dirty = 0;
         g.proj_dirty = g.mv_dirty = g.tex_mtx_dirty = 0;
     }
 
+    /* Basic shader has no fog uniforms. When it's active we skip the upload
+     * but still clear fog_dirty — if the caller later enables fog we'll
+     * switch back to the full shader and that path force-sets fog_dirty=1. */
+    if (g.fog_dirty && g.active_shader != 0) {
+        g.fog_dirty = 0;
+    }
     if (g.fog_dirty) {
         if (g.uLoc_fogparams >= 0) {
             if (g.fog_enabled) {
@@ -867,6 +910,10 @@ void nova_invalidate_state_cache(void) {
     g.fog_dirty = 1;
     g.tev_dirty = 1;
     g.last_tex_state = -1;
+    /* Force shader selector to re-evaluate next apply_gpu_state. -1 mismatches
+     * both 0 (full) and 1 (basic), so the next call will C3D_BindProgram. */
+    g.active_shader = -1;
+    g.final_proj_cached_valid = 0;
 }
 
 void cleanup_vbo_stream(void) {

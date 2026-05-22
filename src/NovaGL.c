@@ -12,6 +12,7 @@
 #include <stdlib.h>
 
 #include "NovaGL_shader_shbin.h"
+#include "NovaGL_shader_basic_shbin.h"
 
 /* Moved out of NovaGL.h: depends on GX_TRANSFER_* from <3ds.h>, which we now keep
  * confined to the .c side so the public header doesn't leak libctru's `Thread`
@@ -62,13 +63,26 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     if (g.shader_dvlb) {
         shaderProgramInit(&g.shader_program);
         shaderProgramSetVsh(&g.shader_program, &g.shader_dvlb->DVLE[0]);
-        C3D_BindProgram(&g.shader_program);
 
         g.uLoc_projection = shaderInstanceGetUniformLocation(g.shader_program.vertexShader, "projection");
         g.uLoc_modelview = shaderInstanceGetUniformLocation(g.shader_program.vertexShader, "modelview");
         g.uLoc_texmtx    = shaderInstanceGetUniformLocation(g.shader_program.vertexShader, "texmtx");
         g.uLoc_fogparams = shaderInstanceGetUniformLocation(g.shader_program.vertexShader, "fogparams");
     }
+
+    g.shader_basic_dvlb = DVLB_ParseFile((u32 *) NovaGL_shader_basic_shbin, NovaGL_shader_basic_shbin_size);
+    if (g.shader_basic_dvlb) {
+        shaderProgramInit(&g.shader_basic_program);
+        shaderProgramSetVsh(&g.shader_basic_program, &g.shader_basic_dvlb->DVLE[0]);
+        g.uLoc_mvp_basic = shaderInstanceGetUniformLocation(g.shader_basic_program.vertexShader, "mvp");
+    }
+
+    /* Start on the full shader; apply_gpu_state's selector will switch to
+     * basic on the first draw if the state qualifies. */
+    C3D_BindProgram(&g.shader_program);
+    g.active_shader = 0;
+    g.tex_mtx_is_identity = 1; /* tex stack starts identity */
+    for (int i = 0; i < NOVA_MATRIX_STACK; i++) g.tex_mtx_identity_stack[i] = 1;
 
     AttrInfo_Init(&g.attr_info);
     AttrInfo_AddLoader(&g.attr_info, 0, GPU_FLOAT, 3);
@@ -201,6 +215,9 @@ void novaBeginEye(int eye) {
 
     g.matrices_dirty = 1;
     g.proj_dirty = g.mv_dirty = g.tex_mtx_dirty = 1;
+    /* Stereo eye shift goes into final_proj — invalidate the cached value
+     * so the next apply_gpu_state rebuilds with the new per-eye offset. */
+    g.final_proj_cached_valid = 0;
 }
 
 void novaSwapBuffers(void) {
@@ -252,6 +269,10 @@ void nova_fini(void) {
     if (g.shader_dvlb) {
         shaderProgramFree(&g.shader_program);
         DVLB_Free(g.shader_dvlb);
+    }
+    if (g.shader_basic_dvlb) {
+        shaderProgramFree(&g.shader_basic_program);
+        DVLB_Free(g.shader_basic_dvlb);
     }
 
     nova_fbo_gc_collect();

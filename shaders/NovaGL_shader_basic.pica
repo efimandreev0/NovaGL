@@ -1,0 +1,47 @@
+; =============================================================================
+; NovaGL "basic" vertex shader — fast path for fog-off + identity tex matrix.
+;
+; Wins vs NovaGL_shader.pica:
+;   - Single dp4 chain (MVP precomputed on CPU) instead of two (mv then proj):
+;       saves 4 dp4 / vertex.
+;   - No fog distance / blend math: saves ~8 ALU ops / vertex.
+;   - No tex-matrix transform: saves 2 dp4 / vertex.
+;
+; CPU contract: g.mvp_combined is built from tilt * projection_adjusted *
+; modelview when either projection or modelview is dirty (utils.c).
+; =============================================================================
+
+.fvec mvp[4]
+
+.alias inPosition  v0
+.alias inTexcoord  v1
+.alias inColor     v2
+
+.out outPosition   position
+.out outColor      color
+.out outTexcoord0  texcoord0
+
+.constf CONST1 (1.0, 0.0, 0.0, 0.0)
+.constf my_normalize (0.00392156, 0.00392156, 0.00392156, 0.00392156)
+
+.proc main
+    ; Build (x, y, z, 1)
+    mov r15.xyz, inPosition
+    mov r15.w,   CONST1.x
+
+    ; Single combined MVP transform
+    dp4 outPosition.x, mvp[0], r15
+    dp4 outPosition.y, mvp[1], r15
+    dp4 outPosition.z, mvp[2], r15
+    dp4 outPosition.w, mvp[3], r15
+
+    ; Color: byte -> float
+    mul outColor, my_normalize, inColor
+
+    ; UV passthrough (tex matrix assumed identity)
+    mov outTexcoord0.xy, inTexcoord.xy
+    mov outTexcoord0.z,  CONST1.y
+    mov outTexcoord0.w,  CONST1.x
+
+    end
+.end

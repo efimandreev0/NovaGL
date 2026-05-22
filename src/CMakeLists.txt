@@ -3,12 +3,16 @@
 cmake_minimum_required(VERSION 3.9)
 
 set(SHADER_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/NovaGL_shader.pica")
+set(SHADER_BASIC_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/NovaGL_shader_basic.pica")
 set(GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${GENERATED_DIR}")
 
-# Compile .pica -> .shbin -> embedded .s + .h
+# Compile .pica -> .shbin -> embedded .s + .h. Two shader variants:
+#   NovaGL_shader        — full FFP (fog + texmtx + separate proj/mv)
+#   NovaGL_shader_basic  — fast path: no fog, MVP precomputed, identity texmtx
 ctr_add_shader_library(NovaGL_shader "${SHADER_SRC}")
-dkp_add_embedded_binary_library(shaders NovaGL_shader)
+ctr_add_shader_library(NovaGL_shader_basic "${SHADER_BASIC_SRC}")
+dkp_add_embedded_binary_library(shaders NovaGL_shader NovaGL_shader_basic)
 
 # Library sources
 add_library(NovaGL STATIC
