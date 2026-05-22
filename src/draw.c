@@ -338,3 +338,14 @@ void novaDrawObjectsIndexed(GLenum mode, GLsizei count, const GLvoid *indices) {
 void novaInvalidateStateCache(void) {
     nova_invalidate_state_cache();
 }
+
+void novaBeginClipSpace2D(void) {
+    g.clipspace_mode_enabled = 1;
+    /* The selector compares active_shader to the desired value; bumping by
+     * -1 here would also work, but the selector itself fires on the next
+     * apply_gpu_state, so no immediate bind is needed. */
+}
+
+void novaEndClipSpace2D(void) {
+    g.clipspace_mode_enabled = 0;
+}

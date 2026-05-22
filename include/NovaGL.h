@@ -1123,6 +1123,26 @@ void novaDrawObjectsIndexed(GLenum mode, GLsizei count, const GLvoid *indices);
  * or after foreign code touched the C3D state directly). Same as the
  * internal nova_invalidate_state_cache; exposed for engine integration. */
 void novaInvalidateStateCache(void);
+
+/* ------------------------------------------------------------------------
+ * Raw clip-space passthrough (UI/HUD fast lane)
+ * ------------------------------------------------------------------------
+ * Between novaBeginClipSpace2D() and novaEndClipSpace2D() NovaGL switches
+ * to a stripped vertex shader that just emits the position attribute as
+ * clip-space output. No MVP transform, no fog, no texmtx — ≈10 dp4 saved
+ * per vertex. Suitable for batched UI / sprite / font rendering when the
+ * client has already done the projection on the CPU side.
+ *
+ * Caller contract:
+ *   - Position attribute is (x, y, z, w) in clip space ([-1, 1] for x/y).
+ *   - The screen-rotation tilt is NOT applied — your UI vertex producer
+ *     must already account for the 3DS portrait-on-top orientation (swap
+ *     x and y, or whatever your target screen requires).
+ *   - Fog / tex matrix state is ignored while the mode is active.
+ *
+ * Calls nest as a flat begin/end — only one level deep. */
+void novaBeginClipSpace2D(void);
+void novaEndClipSpace2D(void);
 #ifdef __cplusplus
 }
 #endif

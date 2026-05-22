@@ -5,6 +5,12 @@
 #ifndef NOVAGL_CONTEXT_H
 #define NOVAGL_CONTEXT_H
 
+/* Shader IDs for g.active_shader. Order doesn't matter, just kept stable. */
+#define NOVA_SHADER_FULL       0
+#define NOVA_SHADER_BASIC      1
+#define NOVA_SHADER_TEXMTX     2
+#define NOVA_SHADER_CLIPSPACE  3
+
 // Internal NovaGL header: safe to drag in <3ds.h> here because no NovaGL caller
 // includes context.h (it lives under src/). All NovaGL .c files reach this via
 // utils.h or by including context.h directly, so this is where the libctru/citro3d
@@ -103,9 +109,22 @@ extern struct NovaState {
     shaderProgram_s shader_basic_program;
     int uLoc_mvp_basic;
 
-    /* Currently bound program: 0 = full, 1 = basic. -1 forces re-bind on
-     * the next apply_gpu_state (used on init / cache invalidate). */
-    int active_shader;
+    /* texmtx variant: MVP combined + tex matrix applied (no fog).
+     * Selected when fog OFF and tex_mtx_is_identity == 0. */
+    DVLB_s *shader_texmtx_dvlb;
+    shaderProgram_s shader_texmtx_program;
+    int uLoc_mvp_texmtx;
+    int uLoc_texmtx_texmtx;
+
+    /* clipspace variant: raw passthrough — position is already in clip
+     * space. Activated by novaBeginClipSpace2D() / Begin/End API. */
+    DVLB_s *shader_clipspace_dvlb;
+    shaderProgram_s shader_clipspace_program;
+    int clipspace_mode_enabled;
+
+    /* Currently bound program selector. -1 forces re-bind on the next
+     * apply_gpu_state (used on init / cache invalidate / clipspace toggle). */
+    int active_shader; /* NOVA_SHADER_* constant */
 
     /* Combined MVP for the basic shader. Rebuilt on CPU when proj_dirty
      * or mv_dirty fires, so the shader only does one dp4 chain. */

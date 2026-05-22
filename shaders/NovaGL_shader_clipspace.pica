@@ -1,0 +1,44 @@
+; =============================================================================
+; NovaGL "clipspace" vertex shader — raw clip-space passthrough.
+;
+; The caller has already produced clip-space (x, y, z, w) and provides them
+; directly through the position attribute. The shader emits them verbatim;
+; no MVP, no texmtx, no fog. Triggered via novaBeginClipSpace2D() — typically
+; used for UI/HUD batches that operate in pixel coordinates already mapped
+; into [-1, 1] clip-space.
+;
+; IMPORTANT: the screen-rotation tilt that NovaGL normally folds into the
+; projection matrix is NOT applied here. The caller is responsible for
+; producing already-rotated clip-space coords (or accept landscape-up output
+; on the bottom screen, portrait sideways on the top screen). For NovaGL's
+; usual portrait-on-top layout, swap x and y in your UI vertex producer.
+;
+; Wins vs full: ~10 dp4 + 8 ALU ops per vertex.
+; =============================================================================
+
+.alias inPosition  v0
+.alias inTexcoord  v1
+.alias inColor     v2
+
+.out outPosition   position
+.out outColor      color
+.out outTexcoord0  texcoord0
+
+.constf CONST1 (1.0, 0.0, 0.0, 0.0)
+.constf my_normalize (0.00392156, 0.00392156, 0.00392156, 0.00392156)
+
+.proc main
+    ; Position passthrough. If the caller only supplied (x, y, z) the w
+    ; component is implicitly 1.0 by the PICA attribute loader.
+    mov outPosition, inPosition
+
+    ; Color byte -> float
+    mul outColor, my_normalize, inColor
+
+    ; UV passthrough
+    mov outTexcoord0.xy, inTexcoord.xy
+    mov outTexcoord0.z,  CONST1.y
+    mov outTexcoord0.w,  CONST1.x
+
+    end
+.end

@@ -1,0 +1,49 @@
+; =============================================================================
+; NovaGL "texmtx" vertex shader — fog OFF, tex matrix ON.
+;
+; Same MVP-combined trick as basic (single dp4 chain), but applies the
+; GL_TEXTURE matrix to UV. Useful for GameCube/Wii ports that ship texel-
+; space UVs and rely on a tex matrix to bring them into [0,1].
+;
+; Wins vs full: -4 dp4 (single MVP chain), no fog math.
+; =============================================================================
+
+.fvec mvp[4]
+.fvec texmtx[4]
+
+.alias inPosition  v0
+.alias inTexcoord  v1
+.alias inColor     v2
+
+.out outPosition   position
+.out outColor      color
+.out outTexcoord0  texcoord0
+
+.constf CONST1 (1.0, 0.0, 0.0, 0.0)
+.constf my_normalize (0.00392156, 0.00392156, 0.00392156, 0.00392156)
+
+.proc main
+    mov r15.xyz, inPosition
+    mov r15.w,   CONST1.x
+
+    ; Single combined MVP transform
+    dp4 outPosition.x, mvp[0], r15
+    dp4 outPosition.y, mvp[1], r15
+    dp4 outPosition.z, mvp[2], r15
+    dp4 outPosition.w, mvp[3], r15
+
+    ; Color byte -> float
+    mul outColor, my_normalize, inColor
+
+    ; Apply GL_TEXTURE matrix to (s, t, 0, 1)
+    mov r10.xy, inTexcoord.xy
+    mov r10.z,  CONST1.y
+    mov r10.w,  CONST1.x
+    dp4 r11.x, texmtx[0], r10
+    dp4 r11.y, texmtx[1], r10
+    mov outTexcoord0.xy, r11.xy
+    mov outTexcoord0.z,  CONST1.y
+    mov outTexcoord0.w,  CONST1.x
+
+    end
+.end

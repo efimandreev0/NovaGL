@@ -13,6 +13,8 @@
 
 #include "NovaGL_shader_shbin.h"
 #include "NovaGL_shader_basic_shbin.h"
+#include "NovaGL_shader_texmtx_shbin.h"
+#include "NovaGL_shader_clipspace_shbin.h"
 
 /* Moved out of NovaGL.h: depends on GX_TRANSFER_* from <3ds.h>, which we now keep
  * confined to the .c side so the public header doesn't leak libctru's `Thread`
@@ -77,10 +79,25 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
         g.uLoc_mvp_basic = shaderInstanceGetUniformLocation(g.shader_basic_program.vertexShader, "mvp");
     }
 
+    g.shader_texmtx_dvlb = DVLB_ParseFile((u32 *) NovaGL_shader_texmtx_shbin, NovaGL_shader_texmtx_shbin_size);
+    if (g.shader_texmtx_dvlb) {
+        shaderProgramInit(&g.shader_texmtx_program);
+        shaderProgramSetVsh(&g.shader_texmtx_program, &g.shader_texmtx_dvlb->DVLE[0]);
+        g.uLoc_mvp_texmtx    = shaderInstanceGetUniformLocation(g.shader_texmtx_program.vertexShader, "mvp");
+        g.uLoc_texmtx_texmtx = shaderInstanceGetUniformLocation(g.shader_texmtx_program.vertexShader, "texmtx");
+    }
+
+    g.shader_clipspace_dvlb = DVLB_ParseFile((u32 *) NovaGL_shader_clipspace_shbin, NovaGL_shader_clipspace_shbin_size);
+    if (g.shader_clipspace_dvlb) {
+        shaderProgramInit(&g.shader_clipspace_program);
+        shaderProgramSetVsh(&g.shader_clipspace_program, &g.shader_clipspace_dvlb->DVLE[0]);
+    }
+
     /* Start on the full shader; apply_gpu_state's selector will switch to
-     * basic on the first draw if the state qualifies. */
+     * a faster variant on the first draw if the state qualifies. */
     C3D_BindProgram(&g.shader_program);
-    g.active_shader = 0;
+    g.active_shader = NOVA_SHADER_FULL;
+    g.clipspace_mode_enabled = 0;
     g.tex_mtx_is_identity = 1; /* tex stack starts identity */
     for (int i = 0; i < NOVA_MATRIX_STACK; i++) g.tex_mtx_identity_stack[i] = 1;
 
@@ -273,6 +290,14 @@ void nova_fini(void) {
     if (g.shader_basic_dvlb) {
         shaderProgramFree(&g.shader_basic_program);
         DVLB_Free(g.shader_basic_dvlb);
+    }
+    if (g.shader_texmtx_dvlb) {
+        shaderProgramFree(&g.shader_texmtx_program);
+        DVLB_Free(g.shader_texmtx_dvlb);
+    }
+    if (g.shader_clipspace_dvlb) {
+        shaderProgramFree(&g.shader_clipspace_program);
+        DVLB_Free(g.shader_clipspace_dvlb);
     }
 
     nova_fbo_gc_collect();
