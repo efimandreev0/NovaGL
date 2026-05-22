@@ -1094,6 +1094,35 @@ EGLBoolean eglSwapBuffers(EGLDisplay display, EGLSurface surface);
 void *novaglGetProcAddress(const char *name);
 
 char *novaglGetFuncName(uint32_t func);
+
+/* ------------------------------------------------------------------------
+ * NovaGL fast-path extensions (vitaGL-inspired)
+ * ------------------------------------------------------------------------
+ * The standard glDrawArrays / glDrawElements paths walk a long chain of
+ * conditional checks per call to detect whether the bound state matches
+ * one of the optimized layouts (packed PTC, raw 24-byte interleaved, etc).
+ * For engines that already know they conform to the layout, that overhead
+ * is wasted. novaXxxPointer + novaDrawObjects let an application commit
+ * its vertex layout once and then issue draws that skip the dispatch.
+ *
+ * Layout contract for novaDrawObjects:
+ *   position : 3 floats at offset 0
+ *   texcoord : 2 floats at offset 12
+ *   color    : 4 unsigned bytes at offset 20 (ABGR / GL convention)
+ *   stride   : 24 bytes (fixed PTC layout)
+ *
+ * Pointers passed to novaVertexPointerFast/etc must be linearAlloc'd memory
+ * (use a VBO via glBufferData) — the GPU reads them directly bypassing CPU
+ * cache, so the buffer is flushed on bind. */
+void novaVertexPointerFast(GLuint vbo, GLuint offset);
+void novaIndexPointerFast(GLuint vbo, GLenum type);
+void novaDrawObjects(GLenum mode, GLsizei count);
+void novaDrawObjectsIndexed(GLenum mode, GLsizei count, const GLvoid *indices);
+
+/* Force-invalidate the NovaGL state cache (call after frame boundaries
+ * or after foreign code touched the C3D state directly). Same as the
+ * internal nova_invalidate_state_cache; exposed for engine integration. */
+void novaInvalidateStateCache(void);
 #ifdef __cplusplus
 }
 #endif

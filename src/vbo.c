@@ -327,7 +327,14 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
     if (required > slot->size)
         slot->size = required;
 
-    GSPGPU_FlushDataCache(slot->data, (u32) slot->size);
+    /* Range flush: streaming apps call glBufferSubData many times per frame
+     * with small chunks. Flushing the whole buffer dominates CPU for big VBOs.
+     * Cache lines on ARM11 are 32 bytes, so widen to that boundary. */
+    uintptr_t start = (uintptr_t) slot->data + (uintptr_t) offset;
+    uintptr_t end = start + (uintptr_t) size;
+    start &= ~(uintptr_t) 31;
+    end = (end + 31) & ~(uintptr_t) 31;
+    GSPGPU_FlushDataCache((const void *) start, (u32) (end - start));
 }
 
 void glReadBuffer(int x) {

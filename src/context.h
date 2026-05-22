@@ -104,6 +104,14 @@ extern struct NovaState {
     C3D_Mtx tex_stack[NOVA_MATRIX_STACK];
     int tex_sp;
     int matrices_dirty;
+    /* Per-stack dirty bits. matrices_dirty stays as the OR for callers that
+     * need a single dirty signal (e.g. fog distance recompute), but the
+     * individual flags let apply_gpu_state skip the projection-mangle (tilt
+     * multiply + Z-range fixup + uniform upload) when only modelview or
+     * texture matrix changed. vitaGL has the same split via mvp_modified. */
+    int proj_dirty;
+    int mv_dirty;
+    int tex_mtx_dirty;
 
     float cur_color[4];
 
@@ -221,6 +229,21 @@ extern struct NovaState {
      * g.current_target between the screen targets and an FBO's C3D target. */
     FBOSlot fbos[NOVA_MAX_FBOS];
     GLuint bound_fbo; // 0 = screen
+
+    /* State revision: bumped on any state mutation that affects what
+     * apply_gpu_state would push to the GPU. apply_gpu_state stores the
+     * last-applied revision and early-outs when nothing's changed since.
+     * vitaGL uses a similar dirty-tracking pattern. */
+    uint32_t state_rev;
+    uint32_t state_rev_applied;
+
+    /* novaDrawObjects fast-path: pre-validated pointers for a PTC layout
+     * (position 3f@0, texcoord 2f@12, color 4ub@20, stride 24).
+     * Skips the ~12 conditionals in nova_draw_internal's fast-path detector. */
+    GLuint fast_vbo_id;
+    GLuint fast_vbo_offset;
+    GLuint fast_idx_vbo_id;
+    GLenum fast_idx_type;
 } g;
 
 void nova_fbo_gc_collect(void);

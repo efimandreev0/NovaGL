@@ -122,6 +122,7 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.mv_sp = 0;
     g.tex_sp = 0;
     g.matrices_dirty = 1;
+    g.proj_dirty = g.mv_dirty = g.tex_mtx_dirty = 1;
 
     g.cur_color[0] = 1.0f;
     g.cur_color[1] = 1.0f;
@@ -199,6 +200,7 @@ void novaBeginEye(int eye) {
     nova_set_render_target(eye);
 
     g.matrices_dirty = 1;
+    g.proj_dirty = g.mv_dirty = g.tex_mtx_dirty = 1;
 }
 
 void novaSwapBuffers(void) {

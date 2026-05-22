@@ -4,11 +4,22 @@
 #include "NovaGL.h"
 #include "utils.h"
 
+/* Mark only the stack of the currently active matrix mode as dirty, plus the
+ * union flag for code paths that just check `matrices_dirty`. */
+static inline void mark_cur_dirty(void) {
+    switch (g.matrix_mode) {
+        case GL_PROJECTION: g.proj_dirty = 1;    break;
+        case GL_TEXTURE:    g.tex_mtx_dirty = 1; break;
+        default:            g.mv_dirty = 1;      break;
+    }
+    g.matrices_dirty = 1;
+}
+
 void glMatrixMode(GLenum mode) { g.matrix_mode = mode; }
 
 void glLoadIdentity(void) {
     Mtx_Identity(cur_mtx());
-    g.matrices_dirty = 1;
+    mark_cur_dirty();
 }
 
 void glPushMatrix(void) {
@@ -23,7 +34,7 @@ void glPushMatrix(void) {
 void glPopMatrix(void) {
     int *sp = cur_sp();
     if (*sp > 0) (*sp)--;
-    g.matrices_dirty = 1;
+    mark_cur_dirty();
 }
 
 void glTranslatef(GLfloat x, GLfloat y, GLfloat z) {
@@ -31,15 +42,14 @@ void glTranslatef(GLfloat x, GLfloat y, GLfloat z) {
         dl_record_translate(x, y, z);
         return;
     }
-    C3D_Mtx tmp;
-    Mtx_Identity(&tmp);
-    tmp.r[0].w = x;
-    tmp.r[1].w = y;
-    tmp.r[2].w = z;
-    C3D_Mtx result;
-    Mtx_Multiply(&result, cur_mtx(), &tmp);
-    Mtx_Copy(cur_mtx(), &result);
-    g.matrices_dirty = 1;
+    /* vitaGL trick: a full M*T multiply is wasteful — T touches only the
+     * translation column. M*T leaves rows 0..2 columns 0..2 unchanged and
+     * shifts the translation column by M.xyz . (x,y,z). Skips 64 muls. */
+    C3D_Mtx *m = cur_mtx();
+    for (int i = 0; i < 4; i++) {
+        m->r[i].w = m->r[i].x * x + m->r[i].y * y + m->r[i].z * z + m->r[i].w;
+    }
+    mark_cur_dirty();
 }
 
 void glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z) {
@@ -87,19 +97,19 @@ void glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z) {
     C3D_Mtx result;
     Mtx_Multiply(&result, cur_mtx(), &rot);
     Mtx_Copy(cur_mtx(), &result);
-    g.matrices_dirty = 1;
+    mark_cur_dirty();
 }
 
 void glScalef(GLfloat x, GLfloat y, GLfloat z) {
-    C3D_Mtx tmp;
-    Mtx_Identity(&tmp);
-    tmp.r[0].x = x;
-    tmp.r[1].y = y;
-    tmp.r[2].z = z;
-    C3D_Mtx result;
-    Mtx_Multiply(&result, cur_mtx(), &tmp);
-    Mtx_Copy(cur_mtx(), &result);
-    g.matrices_dirty = 1;
+    /* M*S where S is diag(x,y,z,1) just multiplies columns 0..2 by sx/sy/sz.
+     * Cheaper than running Mtx_Multiply (which is 64 muls + 48 adds). */
+    C3D_Mtx *m = cur_mtx();
+    for (int i = 0; i < 4; i++) {
+        m->r[i].x *= x;
+        m->r[i].y *= y;
+        m->r[i].z *= z;
+    }
+    mark_cur_dirty();
 }
 
 void glMultMatrixf(const GLfloat *m) {
@@ -113,7 +123,7 @@ void glMultMatrixf(const GLfloat *m) {
     C3D_Mtx result;
     Mtx_Multiply(&result, cur_mtx(), &tmp);
     Mtx_Copy(cur_mtx(), &result);
-    g.matrices_dirty = 1;
+    mark_cur_dirty();
 }
 
 void glLoadMatrixf(const GLfloat *m) {
@@ -124,7 +134,7 @@ void glLoadMatrixf(const GLfloat *m) {
         dst->r[r].z = m[2 * 4 + r];
         dst->r[r].w = m[3 * 4 + r];
     }
-    g.matrices_dirty = 1;
+    mark_cur_dirty();
 }
 
 void glOrthof(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloat near_val, GLfloat far_val) {
@@ -141,7 +151,7 @@ void glOrthof(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloat 
     C3D_Mtx result;
     Mtx_Multiply(&result, cur_mtx(), &ortho);
     Mtx_Copy(cur_mtx(), &result);
-    g.matrices_dirty = 1;
+    mark_cur_dirty();
 }
 
 void glFrustumf(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloat near_val, GLfloat far_val) {
@@ -162,7 +172,7 @@ void glFrustumf(GLfloat left, GLfloat right, GLfloat bottom, GLfloat top, GLfloa
     C3D_Mtx result;
     Mtx_Multiply(&result, cur_mtx(), &frustum);
     Mtx_Copy(cur_mtx(), &result);
-    g.matrices_dirty = 1;
+    mark_cur_dirty();
 }
 
 void glFrustum(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble near_val, GLdouble far_val) {
@@ -185,7 +195,7 @@ void glLoadMatrixd(const GLdouble *m) {
         dst->r[r].z = (GLfloat) m[2 * 4 + r];
         dst->r[r].w = (GLfloat) m[3 * 4 + r];
     }
-    g.matrices_dirty = 1;
+    mark_cur_dirty();
 }
 
 void glMultMatrixd(const GLdouble *m) {
@@ -200,7 +210,7 @@ void glMultMatrixd(const GLdouble *m) {
     C3D_Mtx result;
     Mtx_Multiply(&result, cur_mtx(), &tmp);
     Mtx_Copy(cur_mtx(), &result);
-    g.matrices_dirty = 1;
+    mark_cur_dirty();
 }
 
 void glRotated(GLdouble angle, GLdouble x, GLdouble y, GLdouble z) {
@@ -227,5 +237,5 @@ void glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdou
     C3D_Mtx result;
     Mtx_Multiply(&result, cur_mtx(), &ortho);
     Mtx_Copy(cur_mtx(), &result);
-    g.matrices_dirty = 1;
+    mark_cur_dirty();
 }

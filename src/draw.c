@@ -10,9 +10,11 @@
 #include <string.h>
 
 // === [DIAG] dump first N draw calls to stdout to compare against expected geometry ===
-// Set NOVA_DIAG_DRAW_LIMIT=0 to disable; default off in release.
+// Set NOVA_DIAG_DRAW_LIMIT=N (compile-time) to re-enable; off by default because
+// even the dedup compare on every glDraw* call is measurable on 268 MHz ARM11,
+// and the printf path through Citra's stdout is brutal.
 #ifndef NOVA_DIAG_DRAW_LIMIT
-#define NOVA_DIAG_DRAW_LIMIT 32
+#define NOVA_DIAG_DRAW_LIMIT 0
 #endif
 static int s_diag_draw_count = 0;
 
@@ -263,4 +265,76 @@ void glDrawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint end, GLsize
     (void) start;
     (void) end;
     draw_elements_basevertex_impl(mode, count, type, indices, basevertex);
+}
+
+/* ------------------------------------------------------------------------
+ * NovaGL fast-path extensions (vitaGL-inspired)
+ * ------------------------------------------------------------------------
+ * vitaGL exposes vglDrawObjects + vglXxxPointer to short-circuit the GL
+ * compatibility layer when the caller knows it's already in the optimized
+ * layout. We do the same: bind a VBO + offset once via novaVertexPointerFast,
+ * optionally bind indices via novaIndexPointerFast, then call novaDrawObjects.
+ * No per-vertex interleaving, no per-attribute slot lookups, no slot-allocated
+ * check (verified once at bind time).
+ *
+ * Contract reminder — the VBO must be a 24-byte PTC interleave:
+ *   pos[3f] @0, uv[2f] @12, color[4ub] @20. */
+void novaVertexPointerFast(GLuint vbo, GLuint offset) {
+    g.fast_vbo_id = vbo;
+    g.fast_vbo_offset = offset;
+}
+
+void novaIndexPointerFast(GLuint vbo, GLenum type) {
+    g.fast_idx_vbo_id = vbo;
+    g.fast_idx_type = type;
+}
+
+void novaDrawObjects(GLenum mode, GLsizei count) {
+    if (count <= 0) return;
+    if (g.fast_vbo_id == 0 || g.fast_vbo_id >= NOVA_MAX_VBOS) return;
+
+    VBOSlot *vbo = &g.vbos[g.fast_vbo_id];
+    if (!vbo->allocated || !vbo->data) return;
+    if (vbo_is_packed_ptc(vbo)) return; /* fast path assumes raw 24-byte layout */
+
+    apply_gpu_state();
+    nova_setup_attr_info(3);
+    nova_setup_buf_info((uint8_t *)vbo->data + g.fast_vbo_offset, 24);
+
+    if (mode == GL_QUADS) {
+        draw_emulated_quads(count);
+    } else {
+        C3D_DrawArrays(gl_to_gpu_primitive(mode), 0, count);
+    }
+}
+
+void novaDrawObjectsIndexed(GLenum mode, GLsizei count, const GLvoid *indices) {
+    if (count <= 0) return;
+    if (g.fast_vbo_id == 0 || g.fast_vbo_id >= NOVA_MAX_VBOS) return;
+
+    VBOSlot *vbo = &g.vbos[g.fast_vbo_id];
+    if (!vbo->allocated || !vbo->data) return;
+    if (vbo_is_packed_ptc(vbo)) return;
+
+    const void *gpu_indices = NULL;
+    if (g.fast_idx_vbo_id > 0 && g.fast_idx_vbo_id < NOVA_MAX_VBOS) {
+        VBOSlot *ivbo = &g.vbos[g.fast_idx_vbo_id];
+        if (!ivbo->allocated || !ivbo->data) return;
+        gpu_indices = (const uint8_t *)ivbo->data + (uintptr_t)indices;
+    } else {
+        gpu_indices = indices;
+    }
+    if (!gpu_indices) return;
+
+    GLenum t = g.fast_idx_type ? g.fast_idx_type : GL_UNSIGNED_SHORT;
+    int c3d_type = (t == GL_UNSIGNED_BYTE) ? C3D_UNSIGNED_BYTE : C3D_UNSIGNED_SHORT;
+
+    apply_gpu_state();
+    nova_setup_attr_info(3);
+    nova_setup_buf_info((uint8_t *)vbo->data + g.fast_vbo_offset, 24);
+    C3D_DrawElements(gl_to_gpu_primitive(mode), count, c3d_type, gpu_indices);
+}
+
+void novaInvalidateStateCache(void) {
+    nova_invalidate_state_cache();
 }

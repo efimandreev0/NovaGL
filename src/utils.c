@@ -495,7 +495,12 @@ void apply_gpu_state(void) {
     if (g.matrices_dirty) {
         if (g.fog_enabled) g.fog_dirty = 1;
 
-        if (g.uLoc_projection >= 0) {
+        /* Stereo slider changes per frame; if 3D is active we must re-run the
+         * projection rebuild even when only modelview changed (offset depends
+         * on eye). Otherwise honour the per-stack flag. */
+        int force_proj_upload = (osGet3DSliderState() > 0.0f && g.stereo_depth != 0.0f);
+
+        if (g.uLoc_projection >= 0 && (g.proj_dirty || force_proj_upload)) {
             C3D_Mtx adj_proj = g.proj_stack[g.proj_sp];
 
             float slider = osGet3DSliderState();
@@ -544,11 +549,12 @@ void apply_gpu_state(void) {
             Mtx_Multiply(&final_proj, &tilt, &adj_proj);
             C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection, &final_proj);
         }
-        if (g.uLoc_modelview >= 0)
+        if (g.uLoc_modelview >= 0 && g.mv_dirty)
             C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_modelview, &g.mv_stack[g.mv_sp]);
-        if (g.uLoc_texmtx >= 0)
+        if (g.uLoc_texmtx >= 0 && g.tex_mtx_dirty)
             C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_texmtx, &g.tex_stack[g.tex_sp]);
         g.matrices_dirty = 0;
+        g.proj_dirty = g.mv_dirty = g.tex_mtx_dirty = 0;
     }
 
     if (g.fog_dirty) {
@@ -857,6 +863,7 @@ void nova_invalidate_state_cache(void) {
     s_buf_stride              = -1;
     // Также метим грязным основной кэш матриц/фога/TEV — на всякий случай.
     g.matrices_dirty = 1;
+    g.proj_dirty = g.mv_dirty = g.tex_mtx_dirty = 1;
     g.fog_dirty = 1;
     g.tev_dirty = 1;
     g.last_tex_state = -1;
