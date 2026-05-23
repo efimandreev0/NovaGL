@@ -298,6 +298,7 @@ void novaDrawObjects(GLenum mode, GLsizei count) {
     if (vbo_is_packed_ptc(vbo)) return; /* fast path assumes raw 24-byte layout */
 
     apply_gpu_state();
+    /* novaDrawObjects PTC contract = 3-float position */
     nova_setup_attr_info(3);
     nova_setup_buf_info((uint8_t *)vbo->data + g.fast_vbo_offset, 24);
 
@@ -330,6 +331,7 @@ void novaDrawObjectsIndexed(GLenum mode, GLsizei count, const GLvoid *indices) {
     int c3d_type = (t == GL_UNSIGNED_BYTE) ? C3D_UNSIGNED_BYTE : C3D_UNSIGNED_SHORT;
 
     apply_gpu_state();
+    /* novaDrawObjectsIndexed PTC contract = 3-float position */
     nova_setup_attr_info(3);
     nova_setup_buf_info((uint8_t *)vbo->data + g.fast_vbo_offset, 24);
     C3D_DrawElements(gl_to_gpu_primitive(mode), count, c3d_type, gpu_indices);

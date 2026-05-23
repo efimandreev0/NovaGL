@@ -116,10 +116,14 @@ extern struct NovaState {
     int uLoc_mvp_texmtx;
     int uLoc_texmtx_texmtx;
 
-    /* clipspace variant: raw passthrough — position is already in clip
-     * space. Activated by novaBeginClipSpace2D() / Begin/End API. */
+    /* clipspace variant: takes already-clip-space input and multiplies it
+     * by `projection` (= tilt * Zfix * caller_proj). Position is forwarded
+     * with full 4-component w intact (unlike the other shaders, which force
+     * w=1) so PICA's perspective divide produces correct 3D output.
+     * Activated by novaBeginClipSpace2D() / Begin/End API. */
     DVLB_s *shader_clipspace_dvlb;
     shaderProgram_s shader_clipspace_program;
+    int uLoc_projection_clipspace;
     int clipspace_mode_enabled;
 
     /* Currently bound program selector. -1 forces re-bind on the next

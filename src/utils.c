@@ -587,7 +587,19 @@ void apply_gpu_state(void) {
 
         switch (g.active_shader) {
             case NOVA_SHADER_CLIPSPACE:
-                /* No uniforms — caller produces clip-space directly. */
+                /* The clipspace shader does NOT force w=1 (unlike full/basic/
+                 * texmtx). Upload final_proj — same matrix the full shader
+                 * uses — so post-clip rotation + Z-range fixup get applied
+                 * while the perspective divide keeps a real w. This is what
+                 * makes 3D geometry survive on top of fast3d, which already
+                 * does the MVP transform on the CPU and hands us clip-space.
+                 *
+                 * The shader-switch path forces proj_dirty=1, so on the
+                 * first call after novaBeginClipSpace2D the uniform gets
+                 * (re-)bound at its new location. */
+                if (g.uLoc_projection_clipspace >= 0 && need_proj_rebuild) {
+                    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection_clipspace, &final_proj);
+                }
                 break;
             case NOVA_SHADER_BASIC:
                 if (need_proj_rebuild || g.mv_dirty) {

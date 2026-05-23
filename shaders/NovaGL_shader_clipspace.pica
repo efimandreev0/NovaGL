@@ -1,20 +1,25 @@
 ; =============================================================================
-; NovaGL "clipspace" vertex shader — raw clip-space passthrough.
+; NovaGL "clipspace" vertex shader — apply caller-supplied post-clip transform.
 ;
 ; The caller has already produced clip-space (x, y, z, w) and provides them
-; directly through the position attribute. The shader emits them verbatim;
-; no MVP, no texmtx, no fog. Triggered via novaBeginClipSpace2D() — typically
-; used for UI/HUD batches that operate in pixel coordinates already mapped
-; into [-1, 1] clip-space.
+; through the position attribute as a full 4-component vector. The shader
+; multiplies it by `projection` (uploaded by apply_gpu_state, computed as
+; tilt * Z-range-fixup * caller_projection_stack_top) and emits the result.
 ;
-; IMPORTANT: the screen-rotation tilt that NovaGL normally folds into the
-; projection matrix is NOT applied here. The caller is responsible for
-; producing already-rotated clip-space coords (or accept landscape-up output
-; on the bottom screen, portrait sideways on the top screen). For NovaGL's
-; usual portrait-on-top layout, swap x and y in your UI vertex producer.
+; For our gfx_novagl.cpp use case the caller_projection is identity, so
+; `projection` reduces to (tilt * Zfix-identity), giving us:
+;   - portrait→landscape screen rotation
+;   - OpenGL Z-range [-w, w] → PICA200 Z-range [-w, 0] remap
+; both applied to ALREADY-projected vertices without disturbing the perspective
+; divide (w is preserved through dp4, then PICA divides x/y/z by w).
 ;
-; Wins vs full: ~10 dp4 + 8 ALU ops per vertex.
+; This is what makes 3D rendering work on top of fast3d: fast3d emits true
+; clip-space (post MVP, pre-divide) including a meaningful w; NovaGL must
+; not force w=1 (as the full / basic / texmtx shaders all do) or the
+; perspective divide collapses to a no-op and 3D geometry degenerates.
 ; =============================================================================
+
+.fvec projection[4]
 
 .alias inPosition  v0
 .alias inTexcoord  v1
@@ -28,9 +33,14 @@
 .constf my_normalize (0.00392156, 0.00392156, 0.00392156, 0.00392156)
 
 .proc main
-    ; Position passthrough. If the caller only supplied (x, y, z) the w
-    ; component is implicitly 1.0 by the PICA attribute loader.
-    mov outPosition, inPosition
+    ; Position: dp4 against the post-clip transform. inPosition is fed as
+    ; 4 floats by the attribute loader (configured to match va_vertex.size
+    ; in nova_draw_internal). If the caller bound only 3 floats the PICA
+    ; loader fills w with 1.0, so 2D-only callers still work.
+    dp4 outPosition.x, projection[0], inPosition
+    dp4 outPosition.y, projection[1], inPosition
+    dp4 outPosition.z, projection[2], inPosition
+    dp4 outPosition.w, projection[3], inPosition
 
     ; Color byte -> float
     mul outColor, my_normalize, inColor

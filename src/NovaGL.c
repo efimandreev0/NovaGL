@@ -91,6 +91,8 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     if (g.shader_clipspace_dvlb) {
         shaderProgramInit(&g.shader_clipspace_program);
         shaderProgramSetVsh(&g.shader_clipspace_program, &g.shader_clipspace_dvlb->DVLE[0]);
+        g.uLoc_projection_clipspace = shaderInstanceGetUniformLocation(
+            g.shader_clipspace_program.vertexShader, "projection");
     }
 
     /* Start on the full shader; apply_gpu_state's selector will switch to
@@ -471,17 +473,24 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
         }
     }
 
-    // Force vec3 position even when Arx supplies a 4-component TexturedVertex.
-    // The PICA200 shader (NovaGL_shader.pica) treats inPosition as a vec4 register
-    // (dp4 with modelview/projection rows). When loader 0 advertises 4 floats,
-    // the per-attribute offsets in BufInfo shift by 4 bytes vs. the layout the
-    // shader/AttrInfo init time was set up for (immediate.c and the init path
-    // both pin loader 0 to 3 floats). The mismatch reads UV/color from wrong
-    // offsets and produces the tiled-repeat / horizontal-shear corruption seen
-    // on splash and menu screens. Arx's TexturedVertex.w is RHW, which is 1.0
-    // for the 2D ortho path used by the menu/splash (verified via matrix dump),
-    // so dropping .w is safe here — pos.w gets implicit 1.0 in the vec4 register.
-    int pos_elements = 3;
+    // Position-element selection.
+    //
+    // Default: 3. For the full/basic/texmtx shaders we MUST stay on 3 even
+    // if the caller bound vec4 — those .pica programs force w=1 explicitly,
+    // and a 4-float loader would shift the BufInfo attribute offsets so
+    // UV/color get read from the wrong bytes (this is the original
+    // tiled-repeat / shear corruption that pinned this to 3 in the first
+    // place; Arx's TexturedVertex.w is RHW which is always 1 for the 2D
+    // ortho path it used, so dropping w was safe there).
+    //
+    // Clipspace shader path: when novaBeginClipSpace2D is active and the
+    // caller bound vec4 position, take all 4 components. fast3d already
+    // did MVP on the CPU and hands us real clip-space xyzw — dropping w
+    // would force PICA's perspective divide to a no-op and collapse all
+    // 3D geometry. nova_setup_attr_info(4) below configures the loader
+    // to match, and the packing loop walks pos_bytes so UV/color land in
+    // the right place.
+    int pos_elements = (g.active_shader == NOVA_SHADER_CLIPSPACE && g.va_vertex.size == 4) ? 4 : 3;
     int pos_bytes = pos_elements * 4;
     int internal_stride = pos_bytes + 12;
     int col_offset = pos_bytes + 8;
