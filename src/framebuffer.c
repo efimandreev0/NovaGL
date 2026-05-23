@@ -269,3 +269,132 @@ GLenum glCheckFramebufferStatus(GLenum target) {
 void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1,
                        GLint dstY1, GLbitfield mask, GLenum filter) {
 }
+
+// ---------------------------------------------------------------------------
+// novaCreateRenderTextureFBO — see NovaGL.h for full rationale.
+//
+// Why this needs to live here and not be expressible via existing GL calls:
+// the stock glTexImage2D path goes through C3D_TexInit which allocates the
+// color buffer in linear-mapped RAM. That is fine for sampling but PICA's
+// render-target machinery wants VRAM-resident colorbufs (this is what every
+// citro3d sample does, and what Butterscotch's surface allocator does — see
+// src/3ds/render/surface.c::surface_alloc_storage). Attaching a linear-RAM
+// texture as a render target appears to succeed but the GPU ends up writing
+// to the wrong physical address window; sampling that texture later returns
+// pre-clear garbage or transparent black. That symptom — "FBO drew fine to
+// screen but reads back as transparent / random pixels" — is exactly what
+// fast3d-on-NovaGL was hitting (menu blur backdrops, prev-frame motion blur).
+//
+// Doing this here means we can use C3D_TexInitVRAM directly (private to the
+// citro3d allocator) without exposing VRAM-aware extensions on glTexImage2D.
+// ---------------------------------------------------------------------------
+int novaCreateRenderTextureFBO(int width, int height, int has_depth,
+                               GLuint *out_tex_id, GLuint *out_fbo_id) {
+    if (width <= 0 || height <= 0 || !out_tex_id || !out_fbo_id) {
+        if (out_tex_id) *out_tex_id = 0;
+        if (out_fbo_id) *out_fbo_id = 0;
+        return 0;
+    }
+
+    int pot_w = (int) nova_next_pow2((unsigned int) width);
+    int pot_h = (int) nova_next_pow2((unsigned int) height);
+    if (pot_w < 8) pot_w = 8;
+    if (pot_h < 8) pot_h = 8;
+
+    /* --- Allocate texture slot ----------------------------------------- */
+    GLuint tex_id = 1;
+    while (tex_id < NOVA_MAX_TEXTURES && g.textures[tex_id].in_use) tex_id++;
+    if (tex_id == NOVA_MAX_TEXTURES) {
+        g.last_error = GL_OUT_OF_MEMORY;
+        *out_tex_id = 0;
+        *out_fbo_id = 0;
+        return 0;
+    }
+    TexSlot *slot = &g.textures[tex_id];
+    memset(slot, 0, sizeof(*slot));
+    slot->in_use = 1;
+
+    if (!C3D_TexInitVRAM(&slot->tex, (u16) pot_w, (u16) pot_h, GPU_RGBA8)) {
+        slot->in_use = 0;
+        g.last_error = GL_OUT_OF_MEMORY;
+        *out_tex_id = 0;
+        *out_fbo_id = 0;
+        return 0;
+    }
+    slot->allocated = 1;
+    slot->width = width;
+    slot->height = height;
+    slot->orig_width = width;
+    slot->orig_height = height;
+    slot->pot_w = pot_w;
+    slot->pot_h = pot_h;
+    slot->fmt = GPU_RGBA8;
+    slot->wrap_s = GL_CLAMP_TO_EDGE;
+    slot->wrap_t = GL_CLAMP_TO_EDGE;
+    slot->min_filter = GL_LINEAR;
+    slot->mag_filter = GL_LINEAR;
+    slot->max_level = 0;
+    slot->generate_mipmap = 0;
+    slot->has_mipmap = 0;
+
+    C3D_TexSetFilter(&slot->tex, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexSetWrap(&slot->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+
+    /* --- Allocate FBO slot --------------------------------------------- */
+    GLuint fbo_id = 0;
+    for (int slot_idx = 1; slot_idx < NOVA_MAX_FBOS; slot_idx++) {
+        if (!g.fbos[slot_idx].in_use) {
+            fbo_id = (GLuint) slot_idx;
+            break;
+        }
+    }
+    if (!fbo_id) {
+        C3D_TexDelete(&slot->tex);
+        memset(&slot->tex, 0, sizeof(slot->tex));
+        slot->allocated = 0;
+        slot->in_use = 0;
+        g.last_error = GL_OUT_OF_MEMORY;
+        *out_tex_id = 0;
+        *out_fbo_id = 0;
+        return 0;
+    }
+
+    FBOSlot *fbo = &g.fbos[fbo_id];
+    memset(fbo, 0, sizeof(*fbo));
+    fbo->in_use = 1;
+
+    /* C3D_DEPTHTYPE is a transparent union — passing GPU_RB_DEPTH16 picks
+     * the enum branch, passing -1 (int) picks the "no depth" sentinel. */
+    if (has_depth) {
+        fbo->target = C3D_RenderTargetCreateFromTex(&slot->tex, GPU_TEXFACE_2D, 0,
+                                                    GPU_RB_DEPTH16);
+    } else {
+        fbo->target = C3D_RenderTargetCreateFromTex(&slot->tex, GPU_TEXFACE_2D, 0, -1);
+    }
+    if (!fbo->target) {
+        fbo->in_use = 0;
+        C3D_TexDelete(&slot->tex);
+        memset(&slot->tex, 0, sizeof(slot->tex));
+        slot->allocated = 0;
+        slot->in_use = 0;
+        g.last_error = GL_OUT_OF_MEMORY;
+        *out_tex_id = 0;
+        *out_fbo_id = 0;
+        return 0;
+    }
+    fbo->color_tex_id = tex_id;
+
+    /* Zero out the freshly-allocated VRAM texture so the first sample of the
+     * FBO (before anything's been rendered into it) returns transparent
+     * black instead of whatever random VRAM contents happened to be there —
+     * which would manifest as wrong textures showing through on geometry
+     * that incidentally samples this FBO before its first render pass. */
+    if (slot->tex.data && slot->tex.size > 0) {
+        memset(slot->tex.data, 0, slot->tex.size);
+        GSPGPU_FlushDataCache(slot->tex.data, slot->tex.size);
+    }
+
+    *out_tex_id = tex_id;
+    *out_fbo_id = fbo_id;
+    return 1;
+}

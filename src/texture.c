@@ -959,9 +959,22 @@ void glTexEnvi(GLenum target, GLenum pname, GLint param) {
 void glTexEnvf(GLenum target, GLenum pname, GLfloat param) { glTexEnvi(target, pname, (GLint) param); }
 
 void glTexEnvfv(GLenum target, GLenum pname, const GLfloat *params) {
-    if (pname == GL_TEXTURE_ENV_COLOR && params) { (void) target; } else if (params) {
-        glTexEnvi(target, pname, (GLint) params[0]);
+    if (!params) return;
+    if (target != GL_TEXTURE_ENV) return;
+    if (pname == GL_TEXTURE_ENV_COLOR) {
+        /* TEV CONSTANT for the active unit. Stored verbatim — apply_gpu_state
+         * packs to 0xAABBGGRR for C3D_TexEnvColor when a stage consumes it. */
+        int unit = g.active_texture_unit;
+        if (unit >= 0 && unit < 3) {
+            g.tex_env_color[unit][0] = params[0];
+            g.tex_env_color[unit][1] = params[1];
+            g.tex_env_color[unit][2] = params[2];
+            g.tex_env_color[unit][3] = params[3];
+            g.tev_dirty = 1;
+        }
+        return;
     }
+    glTexEnvi(target, pname, (GLint) params[0]);
 }
 
 GLboolean glIsTexture(GLuint texture) {

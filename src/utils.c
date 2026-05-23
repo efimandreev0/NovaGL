@@ -486,6 +486,25 @@ static int get_tev_op_rgb(GLint gl_op) {
     return GPU_TEVOP_RGB_SRC_COLOR;
 }
 
+/* Alpha-channel TEV operand. PICA's alpha unit is one-component only, so its
+ * operand enum is smaller than the RGB one (SRC_ALPHA / ONE_MINUS_SRC_ALPHA /
+ * SRC_R / SRC_G / SRC_B / their complements). For our use case we only need
+ * the (1-)alpha forms — the R/G/B-broadcast variants are unused. */
+static int get_tev_op_alpha(GLint gl_op) {
+    if (gl_op == 0x859A /* GL_ONE_MINUS_SRC_ALPHA */) return GPU_TEVOP_A_ONE_MINUS_SRC_ALPHA;
+    return GPU_TEVOP_A_SRC_ALPHA;
+}
+
+/* Pack a 0..1 RGBA into PICA's 0xAABBGGRR layout (high byte = alpha) consumed
+ * by C3D_TexEnvColor. */
+static u32 pack_tev_color(const float c[4]) {
+    u32 r = (u32) (clampf(c[0], 0.0f, 1.0f) * 255.0f + 0.5f);
+    u32 g_ = (u32) (clampf(c[1], 0.0f, 1.0f) * 255.0f + 0.5f);
+    u32 b = (u32) (clampf(c[2], 0.0f, 1.0f) * 255.0f + 0.5f);
+    u32 a = (u32) (clampf(c[3], 0.0f, 1.0f) * 255.0f + 0.5f);
+    return (a << 24) | (b << 16) | (g_ << 8) | r;
+}
+
 
 // ==== ИЗМЕНЕНИЯ APPLY GPU STATE ====
 // Вынесена логика переворота матрицы и Scissor Box'а
@@ -778,36 +797,97 @@ void apply_gpu_state(void) {
             GPU_TEVSRC tex_src = (unit == 0) ? GPU_TEXTURE0 : ((unit == 1) ? GPU_TEXTURE1 : GPU_TEXTURE2);
             GPU_TEVSRC prev_src = (tev_stage == 0) ? GPU_PRIMARY_COLOR : GPU_PREVIOUS;
 
+            /* Track whether the configured stage references GPU_CONSTANT on
+             * either the RGB or Alpha side — if it does, push the unit's
+             * tex_env_color into the C3D stage. We do this for the per-unit
+             * "const" colour, not the global TexEnvBufColor, which is a
+             * different thing (used as a CC scratch register for fast3d-style
+             * combiners not represented in legacy GL_COMBINE). */
+            int uses_const = 0;
+
             if (g.tex_env_mode[unit] == GL_COMBINE) {
-                GPU_TEVSRC s0 = get_tev_src(g.tex_env_src0_rgb[unit], tex_src, prev_src);
-                GPU_TEVSRC s1 = get_tev_src(g.tex_env_src1_rgb[unit], tex_src, prev_src);
-                GPU_TEVSRC s2 = get_tev_src(g.tex_env_src2_rgb[unit], tex_src, prev_src);
-                int op0 = get_tev_op_rgb(g.tex_env_operand0_rgb[unit]);
-                int op1 = get_tev_op_rgb(g.tex_env_operand1_rgb[unit]);
-                int op2 = get_tev_op_rgb(g.tex_env_operand2_rgb[unit]);
+                /* RGB combiner. */
+                GPU_TEVSRC s0_rgb = get_tev_src(g.tex_env_src0_rgb[unit], tex_src, prev_src);
+                GPU_TEVSRC s1_rgb = get_tev_src(g.tex_env_src1_rgb[unit], tex_src, prev_src);
+                GPU_TEVSRC s2_rgb = get_tev_src(g.tex_env_src2_rgb[unit], tex_src, prev_src);
+                int op0_rgb = get_tev_op_rgb(g.tex_env_operand0_rgb[unit]);
+                int op1_rgb = get_tev_op_rgb(g.tex_env_operand1_rgb[unit]);
+                int op2_rgb = get_tev_op_rgb(g.tex_env_operand2_rgb[unit]);
+
+                if (g.tex_env_src0_rgb[unit] == GL_CONSTANT ||
+                    g.tex_env_src1_rgb[unit] == GL_CONSTANT ||
+                    g.tex_env_src2_rgb[unit] == GL_CONSTANT) uses_const = 1;
 
                 switch (g.tex_env_combine_rgb[unit]) {
                     case GL_DOT3_RGBA_ARB:
-                        C3D_TexEnvSrc(env, C3D_Both, s0, s1, (GPU_TEVSRC) 0);
-                        C3D_TexEnvOpRgb(env, op0, op1, 0);
-                        C3D_TexEnvFunc(env, C3D_Both, GPU_DOT3_RGBA); break;
+                        C3D_TexEnvSrc(env, C3D_RGB, s0_rgb, s1_rgb, (GPU_TEVSRC) 0);
+                        C3D_TexEnvOpRgb(env, op0_rgb, op1_rgb, 0);
+                        C3D_TexEnvFunc(env, C3D_RGB, GPU_DOT3_RGBA); break;
                     case GL_REPLACE:
-                        C3D_TexEnvSrc(env, C3D_Both, s0, (GPU_TEVSRC) 0, (GPU_TEVSRC) 0);
-                        C3D_TexEnvOpRgb(env, op0, 0, 0);
-                        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE); break;
+                        C3D_TexEnvSrc(env, C3D_RGB, s0_rgb, (GPU_TEVSRC) 0, (GPU_TEVSRC) 0);
+                        C3D_TexEnvOpRgb(env, op0_rgb, 0, 0);
+                        C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE); break;
                     case GL_ADD:
-                        C3D_TexEnvSrc(env, C3D_Both, s0, s1, (GPU_TEVSRC) 0);
-                        C3D_TexEnvOpRgb(env, op0, op1, 0);
-                        C3D_TexEnvFunc(env, C3D_Both, GPU_ADD); break;
+                        C3D_TexEnvSrc(env, C3D_RGB, s0_rgb, s1_rgb, (GPU_TEVSRC) 0);
+                        C3D_TexEnvOpRgb(env, op0_rgb, op1_rgb, 0);
+                        C3D_TexEnvFunc(env, C3D_RGB, GPU_ADD); break;
                     case GL_INTERPOLATE:
-                        C3D_TexEnvSrc(env, C3D_Both, s0, s1, s2);
-                        C3D_TexEnvOpRgb(env, op0, op1, op2);
-                        C3D_TexEnvFunc(env, C3D_Both, GPU_INTERPOLATE); break;
+                        C3D_TexEnvSrc(env, C3D_RGB, s0_rgb, s1_rgb, s2_rgb);
+                        C3D_TexEnvOpRgb(env, op0_rgb, op1_rgb, op2_rgb);
+                        C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE); break;
                     case GL_MODULATE:
                     default:
-                        C3D_TexEnvSrc(env, C3D_Both, s0, s1, (GPU_TEVSRC) 0);
-                        C3D_TexEnvOpRgb(env, op0, op1, 0);
-                        C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE); break;
+                        C3D_TexEnvSrc(env, C3D_RGB, s0_rgb, s1_rgb, (GPU_TEVSRC) 0);
+                        C3D_TexEnvOpRgb(env, op0_rgb, op1_rgb, 0);
+                        C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE); break;
+                }
+
+                /* Alpha combiner. If combine_alpha is unset (0) we mirror the
+                 * RGB function with sources mapped to the alpha equivalents
+                 * (SRC_ALPHA op), which matches the OpenGL ES 1.1 default
+                 * before any explicit GL_COMBINE_ALPHA call. */
+                GLint alpha_func = g.tex_env_combine_alpha[unit];
+                if (alpha_func == 0) alpha_func = g.tex_env_combine_rgb[unit];
+
+                GPU_TEVSRC s0_a = get_tev_src(
+                    g.tex_env_src0_alpha[unit] ? g.tex_env_src0_alpha[unit] : g.tex_env_src0_rgb[unit],
+                    tex_src, prev_src);
+                GPU_TEVSRC s1_a = get_tev_src(
+                    g.tex_env_src1_alpha[unit] ? g.tex_env_src1_alpha[unit] : g.tex_env_src1_rgb[unit],
+                    tex_src, prev_src);
+                GPU_TEVSRC s2_a = get_tev_src(
+                    g.tex_env_src2_alpha[unit] ? g.tex_env_src2_alpha[unit] : g.tex_env_src2_rgb[unit],
+                    tex_src, prev_src);
+                int op0_a = get_tev_op_alpha(g.tex_env_operand0_alpha[unit]
+                                                ? g.tex_env_operand0_alpha[unit] : GL_SRC_ALPHA);
+                int op1_a = get_tev_op_alpha(g.tex_env_operand1_alpha[unit]
+                                                ? g.tex_env_operand1_alpha[unit] : GL_SRC_ALPHA);
+                int op2_a = get_tev_op_alpha(g.tex_env_operand2_alpha[unit]
+                                                ? g.tex_env_operand2_alpha[unit] : GL_SRC_ALPHA);
+
+                if ((g.tex_env_src0_alpha[unit] ? g.tex_env_src0_alpha[unit] : g.tex_env_src0_rgb[unit]) == GL_CONSTANT ||
+                    (g.tex_env_src1_alpha[unit] ? g.tex_env_src1_alpha[unit] : g.tex_env_src1_rgb[unit]) == GL_CONSTANT ||
+                    (g.tex_env_src2_alpha[unit] ? g.tex_env_src2_alpha[unit] : g.tex_env_src2_rgb[unit]) == GL_CONSTANT)
+                    uses_const = 1;
+
+                switch (alpha_func) {
+                    case GL_REPLACE:
+                        C3D_TexEnvSrc(env, C3D_Alpha, s0_a, (GPU_TEVSRC) 0, (GPU_TEVSRC) 0);
+                        C3D_TexEnvOpAlpha(env, op0_a, 0, 0);
+                        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE); break;
+                    case GL_ADD:
+                        C3D_TexEnvSrc(env, C3D_Alpha, s0_a, s1_a, (GPU_TEVSRC) 0);
+                        C3D_TexEnvOpAlpha(env, op0_a, op1_a, 0);
+                        C3D_TexEnvFunc(env, C3D_Alpha, GPU_ADD); break;
+                    case GL_INTERPOLATE:
+                        C3D_TexEnvSrc(env, C3D_Alpha, s0_a, s1_a, s2_a);
+                        C3D_TexEnvOpAlpha(env, op0_a, op1_a, op2_a);
+                        C3D_TexEnvFunc(env, C3D_Alpha, GPU_INTERPOLATE); break;
+                    case GL_MODULATE:
+                    default:
+                        C3D_TexEnvSrc(env, C3D_Alpha, s0_a, s1_a, (GPU_TEVSRC) 0);
+                        C3D_TexEnvOpAlpha(env, op0_a, op1_a, 0);
+                        C3D_TexEnvFunc(env, C3D_Alpha, GPU_MODULATE); break;
                 }
             } else {
                 switch (g.tex_env_mode[unit]) {
@@ -829,6 +909,11 @@ void apply_gpu_state(void) {
                         C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE); break;
                 }
             }
+
+            if (uses_const) {
+                C3D_TexEnvColor(env, pack_tev_color(g.tex_env_color[unit]));
+            }
+
             tev_stage++;
         }
 

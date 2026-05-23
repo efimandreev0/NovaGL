@@ -271,6 +271,12 @@ extern struct NovaState {
     GLint tex_env_operand1_alpha[3];
     GLint tex_env_operand2_alpha[3];
 
+    /* Per-unit TEV CONSTANT colour. Set via glTexEnvfv(GL_TEXTURE_ENV_COLOR).
+     * Plumbed into C3D_TexEnvColor in apply_gpu_state whenever a stage's GL
+     * source is GL_CONSTANT. Stored as 0..1 floats (GL convention); converted
+     * to packed 0xAABBGGRR for citro3d on the way through. */
+    GLfloat tex_env_color[3][4];
+
     int line_smooth_enabled;
 
     int current_eye; // 0 = left, 1 = right

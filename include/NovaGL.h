@@ -1125,6 +1125,38 @@ void novaDrawObjectsIndexed(GLenum mode, GLsizei count, const GLvoid *indices);
 void novaInvalidateStateCache(void);
 
 /* ------------------------------------------------------------------------
+ * Render-to-texture (FBO) extension
+ * ------------------------------------------------------------------------
+ * NovaGL's stock glGenFramebuffers / glFramebufferTexture2D path attaches
+ * a target to a texture allocated through C3D_TexInit (= linear RAM). PICA's
+ * raster pipeline writes color through GX_MemoryFill / display-transfer
+ * paths that prefer VRAM-resident color buffers; render-targets on linear
+ * textures appear to "work" but produce garbage or silent no-ops on real
+ * hardware (the symptom in fast3d-on-NovaGL is white/transparent blobs
+ * wherever the engine renders to and then samples from an FBO — menu
+ * blur backgrounds, previous-frame motion blur, character thumbnails).
+ *
+ * This helper does the citro3d-canonical sequence in one call:
+ *   1. allocate a TexSlot
+ *   2. C3D_TexInitVRAM for the color buffer
+ *   3. set sane filter / wrap
+ *   4. allocate an FBOSlot
+ *   5. C3D_RenderTargetCreateFromTex with the requested depth format
+ *
+ * On success returns 1 and fills *out_tex_id with the GL texture id (use
+ * with glBindTexture for sampling) and *out_fbo_id with the GL framebuffer
+ * id (use with glBindFramebuffer to draw into the surface).
+ *
+ * has_depth: 0 → color-only target (matches Butterscotch surfaces);
+ *            non-zero → 16-bit depth attached (matches fast3d's needs).
+ *
+ * On failure (out of slots / out of VRAM / target creation failed) returns
+ * 0 and the out-params are left undefined. Caller frees with the standard
+ * glDeleteTextures + glDeleteFramebuffers. */
+int novaCreateRenderTextureFBO(int width, int height, int has_depth,
+                               GLuint *out_tex_id, GLuint *out_fbo_id);
+
+/* ------------------------------------------------------------------------
  * Raw clip-space passthrough (UI/HUD fast lane)
  * ------------------------------------------------------------------------
  * Between novaBeginClipSpace2D() and novaEndClipSpace2D() NovaGL switches

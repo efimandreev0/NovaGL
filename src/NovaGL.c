@@ -143,6 +143,24 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
         g.tex_env_operand0_rgb[i] = GL_SRC_COLOR;
         g.tex_env_operand1_rgb[i] = GL_SRC_COLOR;
         g.tex_env_operand2_rgb[i] = GL_SRC_ALPHA;
+        /* Alpha-combine defaults mirror RGB (the GL ES 1.1 baseline). Leaving
+         * these zero would make the new separate-alpha path interpret missing
+         * fields as "fall back to RGB", which is also correct, but pre-seeding
+         * matches what an app that explicitly enables GL_COMBINE would see. */
+        g.tex_env_combine_alpha[i] = GL_MODULATE;
+        g.tex_env_src0_alpha[i] = GL_TEXTURE;
+        g.tex_env_src1_alpha[i] = GL_PREVIOUS;
+        g.tex_env_src2_alpha[i] = GL_CONSTANT;
+        g.tex_env_operand0_alpha[i] = GL_SRC_ALPHA;
+        g.tex_env_operand1_alpha[i] = GL_SRC_ALPHA;
+        g.tex_env_operand2_alpha[i] = GL_SRC_ALPHA;
+        /* TEV CONSTANT defaults to white — same as C3D_TexEnvInit which sets
+         * env->color = 0xFFFFFFFF. Stays out of the way unless the engine
+         * explicitly calls glTexEnvfv(GL_TEXTURE_ENV_COLOR, ...). */
+        g.tex_env_color[i][0] = 1.0f;
+        g.tex_env_color[i][1] = 1.0f;
+        g.tex_env_color[i][2] = 1.0f;
+        g.tex_env_color[i][3] = 1.0f;
     }
 
     g.stereo_depth = 0.05f;
