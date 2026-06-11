@@ -23,7 +23,15 @@ static inline void mark_cur_dirty(void) {
     g.matrices_dirty = 1;
 }
 
-void glMatrixMode(GLenum mode) { g.matrix_mode = mode; }
+void glMatrixMode(GLenum mode) {
+    /* Reject unknown modes so cur_mtx()/cur_sp()/cur_stack() never index out of
+     * bounds. Spec says GL_INVALID_ENUM in this case. */
+    if (mode != GL_MODELVIEW && mode != GL_PROJECTION && mode != GL_TEXTURE) {
+        g.last_error = GL_INVALID_ENUM;
+        return;
+    }
+    g.matrix_mode = mode;
+}
 
 void glLoadIdentity(void) {
     Mtx_Identity(cur_mtx());
@@ -45,12 +53,15 @@ void glPushMatrix(void) {
             g.tex_mtx_identity_stack[*sp + 1] = g.tex_mtx_identity_stack[*sp];
         }
         (*sp)++;
+    } else {
+        g.last_error = GL_STACK_OVERFLOW;
     }
 }
 
 void glPopMatrix(void) {
     int *sp = cur_sp();
     if (*sp > 0) (*sp)--;
+    else { g.last_error = GL_STACK_UNDERFLOW; return; }
     mark_cur_dirty();
     /* mark_cur_dirty force-clears tex_mtx_is_identity on GL_TEXTURE mode;
      * restore from the per-slot stack after, so popping back to identity

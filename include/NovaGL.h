@@ -125,6 +125,10 @@ typedef float GLdouble;
 #define GL_NORMALIZE                0x0BA1
 #define GL_COLOR_MATERIAL           0x0B57
 #define GL_KEEP                     0x1E00
+/* Stencil-op enums (real path now implemented on PICA200; see raster.c). */
+#define GL_INCR                     0x1E02
+#define GL_DECR                     0x1E03
+#define GL_INVERT                   0x150A
 
 #define GL_FOG_MODE                 0x0B65
 #define GL_FOG_DENSITY              0x0B62
@@ -374,6 +378,7 @@ typedef float GLdouble;
 /* Alpha combine function */
 #define GL_COMBINE_ALPHA_ARB              GL_COMBINE_ALPHA
 #define GL_INTERPOLATE                    0x8575
+#define GL_SUBTRACT                       0x84E7
 #define GL_CONSTANT                       0x8576
 #define GL_PRIMARY_COLOR                  0x8577
 #define GL_PREVIOUS                       0x8578
@@ -1155,6 +1160,87 @@ void novaInvalidateStateCache(void);
  * glDeleteTextures + glDeleteFramebuffers. */
 int novaCreateRenderTextureFBO(int width, int height, int has_depth,
                                GLuint *out_tex_id, GLuint *out_fbo_id);
+
+/* ------------------------------------------------------------------------
+ * Render-target blit (glBlitFramebuffer equivalent on PICA)
+ * ------------------------------------------------------------------------
+ * Copies the colour content of one render target into another by drawing a
+ * textured fullscreen quad — same approach as Butterscotch's surface_copy
+ * and what the citro3d sample code uses for screen → texture transfers.
+ * PICA has no analogue of glBlitFramebuffer; this is the cheapest GPU-side
+ * path that works for arbitrary src/dst size pairs.
+ *
+ * Use cases:
+ *   - fast3d's `gfx_rapi->copy_framebuffer(dst, src, ...)` for the N64
+ *     `gDPCopyFramebufferEXT` opcode (PD's bondview snapshots the screen
+ *     into a transient FBO for distortion / scope / cutscene overlays).
+ *   - Generic "save the current frame for later sampling" patterns in
+ *     engines that ported up from desktop GL.
+ *
+ * src_fbo_id / dst_fbo_id: 0 → on-screen target (g.render_target_top);
+ * anything else → FBO id returned by novaCreateRenderTextureFBO /
+ * glGenFramebuffers.
+ *
+ * Returns 1 on success, 0 if either id is invalid or the underlying GPU
+ * draw call couldn't be staged (e.g. linear-heap exhaustion). Leaves the
+ * NovaGL state cache invalidated so the next draw re-pushes the engine's
+ * own GPU state — we trash render target, viewport, TEV, etc. internally
+ * and don't bother saving them register-by-register. */
+int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id);
+
+/* ------------------------------------------------------------------------
+ * Explicit TEV stage programming (multi-stage CC support)
+ * ------------------------------------------------------------------------
+ * NovaGL's default TEV path emits one PICA TEV stage per active texture
+ * unit (driven by glEnable(GL_TEXTURE_2D) + GL_COMBINE state). That's
+ * sufficient for the common "1 stage of texel * primary" case but breaks
+ * down when the caller needs:
+ *   - Two TEV stages from a single texture binding (e.g. fast3d's 2-cycle
+ *     CC where cycle 1 does `previous * SHADE` after cycle 0 produced
+ *     a colour from texel + primary).
+ *   - A stage that samples GPU_TEXTURE1 from a stage other than unit 1's
+ *     auto-allocated slot (e.g. TRILERP: `mix(TEX0, TEX1, factor)` needs
+ *     both textures referenced from the SAME stage).
+ *
+ * novaSetExplicitTevStages() lets the caller program up to 6 PICA TEV
+ * stages directly. While the explicit list is active (count > 0):
+ *   - apply_gpu_state IGNORES the GL_COMBINE / TEXTURE_ENV_MODE machinery
+ *     and emits exactly the stages provided.
+ *   - GL_TEXTURE_2D enable/disable still controls which texture units are
+ *     bound to the GPU, but does NOT influence stage count or programming.
+ *   - The caller is responsible for matching TEV source enums to texture
+ *     units that are actually bound (otherwise the sample reads stale or
+ *     uninitialised VRAM).
+ *
+ * Call novaClearExplicitTevStages() (or pass count=0) to revert to the
+ * GL_COMBINE-driven path. The explicit list is per-draw state — typically
+ * the caller sets it at the start of a shader's setup and clears it after
+ * the draw or on shader change.
+ *
+ * Source / op / func enums use GL constants (mirroring the GL_COMBINE
+ * vocabulary) so callers don't need to learn citro3d's GPU_TEV* enums:
+ *   src   : GL_TEXTURE0_ARB, GL_TEXTURE1_ARB, GL_TEXTURE2_ARB,
+ *           GL_PREVIOUS, GL_PRIMARY_COLOR, GL_CONSTANT
+ *   op    : GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR,
+ *           GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA
+ *   func  : GL_REPLACE, GL_MODULATE, GL_ADD, GL_INTERPOLATE, GL_SUBTRACT
+ *
+ * `constant_color` is consumed only when one of the src fields is
+ * GL_CONSTANT; otherwise ignored. */
+#define NOVA_TEV_MAX_STAGES 6
+
+typedef struct {
+    GLenum  combine_rgb;
+    GLenum  src_rgb[3];
+    GLenum  op_rgb[3];
+    GLenum  combine_alpha;
+    GLenum  src_alpha[3];
+    GLenum  op_alpha[3];
+    float   constant_color[4];
+} NovaTevStageGL;
+
+void novaSetExplicitTevStages(int count, const NovaTevStageGL *stages);
+void novaClearExplicitTevStages(void);
 
 /* ------------------------------------------------------------------------
  * Raw clip-space passthrough (UI/HUD fast lane)

@@ -474,6 +474,38 @@ static void upload_page_8bit(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t *
     C3D_TexFlush(tex);
 }
 
+/* True iff the (src_w x src_h) source fully covers the (pot_w x pot_h) target
+ * and the input pixel layout matches the hardware format byte-for-byte. When
+ * this holds, GX DisplayTransfer can swizzle in hardware (~10x faster than the
+ * per-pixel CPU morton loop on a 1024^2 texture). */
+static int can_use_hw_swizzle(GPU_TEXCOLOR fmt, int pot_w, int pot_h, int width, int height,
+                              int copy_w, int copy_h, int src_x0, int src_y0,
+                              GLenum format, GLenum type, GLint unpack_alignment) {
+    if (src_x0 != 0 || src_y0 != 0) return 0;
+    if (width != copy_w || height != copy_h) return 0;
+    if (width != pot_w || height != pot_h) return 0;
+    if (unpack_alignment != 1 && unpack_alignment != 2 && unpack_alignment != 4) return 0;
+    /* GX DisplayTransfer is unreliable below 64px per axis (sf2d gated its
+     * hardware-tiling path the same way); small textures go through the CPU
+     * swizzler, which is cheap at those sizes anyway. */
+    if (width < 64 || height < 64) return 0;
+    /* RGB-as-RGBA8 requires a CPU repack step (3→4 bytes) so HW path
+     * doesn't apply; same for RGB565 fed via GL_RGB+UNSIGNED_BYTE. */
+    if (fmt == GPU_RGBA8) {
+        if (format != GL_RGBA && format != GL_RGBA8_OES) return 0;
+        if (type != GL_UNSIGNED_BYTE) return 0;
+        /* DisplayTransfer needs 8-byte row alignment of the linear source; a
+         * 4-aligned row stride for 4 bpp ≥8 pixels wide always satisfies it. */
+        return ((width & 7) == 0 && (height & 7) == 0);
+    }
+    if (fmt == GPU_RGB565 || fmt == GPU_RGBA5551 || fmt == GPU_RGBA4) {
+        return ((width & 7) == 0 && (height & 7) == 0);
+    }
+    /* Single-channel paths: HW transfer formats don't include L8/A8/LA4, so
+     * we keep the CPU swizzler. */
+    return 0;
+}
+
 static void upload_texture_pixels(C3D_Tex *tex, GPU_TEXCOLOR fmt, int pot_w, int pot_h, const GLvoid *pixels, int width,
                                   int height, int src_x0, int src_y0, int copy_w, int copy_h, GLenum format,
                                   GLenum type, GLint unpack_alignment) {
@@ -482,6 +514,59 @@ static void upload_texture_pixels(C3D_Tex *tex, GPU_TEXCOLOR fmt, int pot_w, int
         C3D_TexFlush(tex);
         return;
     }
+    /* HW-accelerated path. Source must be in **linear** RAM for the GX DMA
+     * engine to read it — game-heap pointers will silently produce garbage or
+     * crash the GPU. Easiest safe strategy: always stage through tex_staging
+     * (which IS linearAlloc'd inside get_tex_staging). Skip the path if
+     * staging fails or the texture is bigger than what we want to commit.
+     *
+     * Compile with -DNOVAGL_DISABLE_HW_SWIZZLE=1 to bisect this if something
+     * upstream broke after the GX-DMA path was introduced. */
+#ifndef NOVAGL_DISABLE_HW_SWIZZLE
+    if (can_use_hw_swizzle(fmt, pot_w, pot_h, width, height, copy_w, copy_h, src_x0, src_y0,
+                           format, type, unpack_alignment)) {
+        int bytes = pot_w * pot_h * gpu_texfmt_bpp(fmt);
+        /* Cap HW staging at 1MB — bigger textures are rare on 3DS and we'd
+         * rather pay the soft-swizzle CPU cost than balloon linear RAM. */
+        if (bytes <= 1024 * 1024) {
+            void *linear_src = get_tex_staging(bytes);
+            if (linear_src) {
+                /* The GX transfer engine only re-tiles — it does NOT apply
+                 * NovaGL's texture conventions, so the staging copy must:
+                 *  1. flip vertically (CPU swizzler stores row 0 at the
+                 *     bottom, see morton_offset_local's fy = pot_h-1-y);
+                 *  2. for RGBA8, swap GL byte order (R,G,B,A in memory) to
+                 *     PICA's (A,B,G,R in memory) — a plain bswap32. The
+                 *     16-bit packed formats (565/5551/4444) already match.
+                 * A raw memcpy here scrambled every channel (alpha took the
+                 * red value!) and flipped nothing — textured draws came out
+                 * as transparent garbage. */
+                if (fmt == GPU_RGBA8) {
+                    const uint32_t *src32 = (const uint32_t *) pixels;
+                    uint32_t *dst32 = (uint32_t *) linear_src;
+                    for (int y = 0; y < pot_h; y++) {
+                        const uint32_t *srow = src32 + (size_t) (pot_h - 1 - y) * pot_w;
+                        uint32_t *drow = dst32 + (size_t) y * pot_w;
+                        for (int x = 0; x < pot_w; x++) {
+                            drow[x] = __builtin_bswap32(srow[x]);
+                        }
+                    }
+                } else {
+                    const uint8_t *src8 = (const uint8_t *) pixels;
+                    uint8_t *dst8 = (uint8_t *) linear_src;
+                    int row = pot_w * gpu_texfmt_bpp(fmt);
+                    for (int y = 0; y < pot_h; y++) {
+                        memcpy(dst8 + (size_t) y * row,
+                               src8 + (size_t) (pot_h - 1 - y) * row, (size_t) row);
+                    }
+                }
+                nova_hardware_swizzle(tex, linear_src, pot_w, pot_h, fmt);
+                return;
+            }
+        }
+        /* fall through to soft path */
+    }
+#endif
     if (fmt == GPU_RGBA8) {
         int row_stride = row_stride_bytes(width, format == GL_RGB ? 3 : 4, unpack_alignment);
         upload_page_rgba8(tex, pot_w, pot_h, (const uint8_t *) pixels, row_stride, src_x0, src_y0, copy_w, copy_h,
@@ -519,18 +604,44 @@ void glDeleteTextures(GLsizei n, const GLuint *textures) {
             free_texture_storage(&g.textures[id]);
             g.textures[id].in_use = 0;
 
+            /* Don't C3D_TexBind(unit, NULL) — passing NULL through libctru is
+             * not universally safe; instead invalidate the bind cache so the
+             * next apply_gpu_state re-binds whatever the caller binds next.
+             * Logical state: clear the slot. */
             for (int u = 0; u < 3; u++) {
                 if (g.bound_texture[u] == id) {
                     g.bound_texture[u] = 0;
-                    C3D_TexBind(u, NULL);
                 }
             }
+            nova_invalidate_state_cache();
         }
     }
 }
 
 void glBindTexture(GLenum target, GLuint texture) {
-    (void) target;
+    /* Spec: only GL_TEXTURE_2D exists in ES 1.1; anything else is
+     * GL_INVALID_ENUM and must not change the binding. */
+    if (target != GL_TEXTURE_2D) {
+        g.last_error = GL_INVALID_ENUM;
+        return;
+    }
+    if (texture >= NOVA_MAX_TEXTURES) {
+        /* Out of our id space — can't represent it. Closest spec error. */
+        g.last_error = GL_OUT_OF_MEMORY;
+        return;
+    }
+
+    /* Spec (GL ES 1.1 §3.8.10): binding an unused name CREATES a new texture
+     * object with default state. Desktop-GL ports routinely skip
+     * glGenTextures and just bind arbitrary ids — without this, the slot
+     * had min_filter=0/wrap=0 and filtering silently degraded to NEAREST
+     * with broken wrap modes. */
+    if (texture != 0 && !g.textures[texture].in_use) {
+        memset(&g.textures[texture], 0, sizeof(g.textures[texture]));
+        g.textures[texture].in_use = 1;
+        init_texture_defaults(&g.textures[texture]);
+    }
+
     g.bound_texture[g.active_texture_unit] = texture;
 }
 
@@ -583,6 +694,31 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     GLuint bound = active_bound_texture();
     if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return;
     TexSlot *slot = &g.textures[bound];
+
+    /* Spec: border must be 0 in GL ES (and effectively in modern GL).
+     * GL_INVALID_VALUE, no state change. */
+    if (border != 0) {
+        g.last_error = GL_INVALID_VALUE;
+        return;
+    }
+    if (level < 0) {
+        g.last_error = GL_INVALID_VALUE;
+        return;
+    }
+    /* Manual mip uploads (level > 0): NovaGL stores only level 0 (mips are
+     * auto-generated via GL_GENERATE_MIPMAP / C3D_TexGenerateMipmap). Before
+     * this guard, a game uploading levels 1..N would repeatedly destroy and
+     * re-create level 0 with each smaller image. Accept-and-ignore is
+     * spec-tolerable here: LOD is clamped to 0 when no real mip chain exists
+     * (see apply_slot_params_to_tex), so sampling stays correct. */
+    if (level > 0) {
+        return;
+    }
+    /* ES 1.1: internalformat must equal format (GL_INVALID_OPERATION
+     * otherwise). Desktop ports pass sized formats (GL_RGBA8, 3, 4...), so
+     * we accept those as aliases instead of erroring — leniency keeps ports
+     * working — but a *conflicting* combination (e.g. internal=GL_RGB with
+     * format=GL_ALPHA) is genuinely a caller bug worth surfacing. */
 
     GPU_TEXCOLOR gpu_fmt = gl_to_gpu_texfmt(format, type);
     if (width <= 0 || height <= 0) {
@@ -676,11 +812,13 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
         upload_solid_texture(&slot->tex, gpu_fmt, pixels, format, type);
     } else {
         const GLvoid *upload_pixels = pixels;
-        void *temp_pixels = NULL;
 
         if ((width > 1024 || height > 1024) && pixels) {
             int bpp = gpu_texfmt_bpp(gpu_fmt);
-            temp_pixels = malloc(target_w * target_h * bpp);
+            /* Reuse tex_staging instead of per-call malloc/free — same buffer
+             * grows as needed and stays around for subsequent uploads, no
+             * heap fragmentation. */
+            void *temp_pixels = get_tex_staging(target_w * target_h * bpp);
             if (temp_pixels) {
                 if (gpu_fmt == GPU_RGBA8) downscale_rgba8((uint32_t *) temp_pixels, (const uint32_t *) pixels, width,
                                                           height, target_w, target_h);
@@ -694,7 +832,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
 
         upload_texture_pixels(&slot->tex, gpu_fmt, pot_w, pot_h, upload_pixels, target_w, target_h, 0, 0, target_w,
                               target_h, format, type, g.unpack_alignment);
-        if (temp_pixels) free(temp_pixels);
+        /* tex_staging is owned by the global state; nothing to free here. */
     }
 
     // Auto-generate mip levels 1..N for the freshly-uploaded level 0.
@@ -736,11 +874,22 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
 void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height,
                      GLenum format, GLenum type, const GLvoid *pixels) {
     (void) target;
-    (void) level;
+    /* See glTexImage2D: only level 0 is stored; manual mip uploads are
+     * accepted-and-ignored so they can't corrupt the base level. */
+    if (level < 0 || width < 0 || height < 0 || xoffset < 0 || yoffset < 0) {
+        g.last_error = GL_INVALID_VALUE;
+        return;
+    }
+    if (level > 0) return;
     GLuint bound = active_bound_texture();
     if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return;
     TexSlot *slot = &g.textures[bound];
-    if (!slot->allocated || !pixels) return;
+    if (!slot->allocated) {
+        /* Spec: texture has no defined image to update. */
+        g.last_error = GL_INVALID_OPERATION;
+        return;
+    }
+    if (!pixels) return;
 
     // If game wanna draw on full tex -> uncompressing it.
     if (slot->is_solid_optimized) {
@@ -870,20 +1019,63 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
         }
         C3D_TexFlush(&slot->tex);
     }
+
+    /* GL 1.4 / ES 1.1 GL_GENERATE_MIPMAP semantics: mip levels regenerate on
+     * ANY modification of level 0, including subimage updates. Without this,
+     * a texture-atlas update leaves stale mips that bleed old pixels at
+     * distance. */
+    if (slot->has_mipmap && slot->generate_mipmap) {
+        C3D_TexGenerateMipmap(&slot->tex, GPU_TEXFACE_2D);
+    }
 }
 
 void glTexParameteri(GLenum target, GLenum pname, GLint param) {
-    (void) target;
+    if (target != GL_TEXTURE_2D) {
+        g.last_error = GL_INVALID_ENUM;
+        return;
+    }
     GLuint bound = active_bound_texture();
     if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return;
     TexSlot *slot = &g.textures[bound];
 
-    if (pname == GL_TEXTURE_MIN_FILTER) slot->min_filter = param;
-    else if (pname == GL_TEXTURE_MAG_FILTER) slot->mag_filter = param;
-    else if (pname == GL_TEXTURE_WRAP_S) slot->wrap_s = param;
-    else if (pname == GL_TEXTURE_WRAP_T) slot->wrap_t = param;
-    else if (pname == GL_GENERATE_MIPMAP) slot->generate_mipmap = (param != 0);
-    else if (pname == GL_TEXTURE_MAX_LEVEL) slot->max_level = param;
+    /* Spec: invalid enum values are GL_INVALID_ENUM and must NOT modify
+     * state. Previously garbage params were stored verbatim and silently
+     * decoded as NEAREST / REPEAT downstream. */
+    switch (pname) {
+        case GL_TEXTURE_MIN_FILTER:
+            switch (param) {
+                case GL_NEAREST: case GL_LINEAR:
+                case GL_NEAREST_MIPMAP_NEAREST: case GL_NEAREST_MIPMAP_LINEAR:
+                case GL_LINEAR_MIPMAP_NEAREST: case GL_LINEAR_MIPMAP_LINEAR:
+                    slot->min_filter = param; break;
+                default: g.last_error = GL_INVALID_ENUM; return;
+            }
+            break;
+        case GL_TEXTURE_MAG_FILTER:
+            if (param == GL_NEAREST || param == GL_LINEAR) slot->mag_filter = param;
+            else { g.last_error = GL_INVALID_ENUM; return; }
+            break;
+        case GL_TEXTURE_WRAP_S:
+            if (param == GL_REPEAT || param == GL_CLAMP_TO_EDGE ||
+                param == GL_CLAMP || param == GL_MIRRORED_REPEAT) slot->wrap_s = param;
+            else { g.last_error = GL_INVALID_ENUM; return; }
+            break;
+        case GL_TEXTURE_WRAP_T:
+            if (param == GL_REPEAT || param == GL_CLAMP_TO_EDGE ||
+                param == GL_CLAMP || param == GL_MIRRORED_REPEAT) slot->wrap_t = param;
+            else { g.last_error = GL_INVALID_ENUM; return; }
+            break;
+        case GL_GENERATE_MIPMAP:
+            slot->generate_mipmap = (param != 0);
+            break;
+        case GL_TEXTURE_MAX_LEVEL:
+            if (param < -1) { g.last_error = GL_INVALID_VALUE; return; }
+            slot->max_level = param;
+            break;
+        default:
+            g.last_error = GL_INVALID_ENUM;
+            return;
+    }
 
     if (!slot->allocated) return;
     apply_slot_params_to_tex(&slot->tex, slot);
@@ -899,11 +1091,62 @@ void glTexParameteriv(GLenum target, GLenum pname, const GLint *params) {
     if (params) glTexParameteri(target, pname, params[0]);
 }
 
+/* GL ETC1 / ETC1_RGB8 enum (KHR_compressed_texture_etc1). Not in NovaGL.h but
+ * the format is constant in the GL spec, so accept it inline here. */
+#ifndef GL_ETC1_RGB8_OES
+#define GL_ETC1_RGB8_OES 0x8D64
+#endif
+
 void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height,
                             GLint border, GLsizei imageSize, const GLvoid *data) {
-    (void) data;
-    (void) imageSize;
-    (void) internalformat;
+    (void) target; (void) level; (void) border;
+
+    /* ETC1: PICA200 has native sampler support — just hand the pre-compressed
+     * bytes to C3D_TexInit(.., GPU_ETC1) and copy them in. 4 bits/pixel — vs
+     * 32 for RGBA8 — so 8x VRAM win for textures the engine already shipped
+     * compressed (typical GameCube/Wii port atlas). */
+    if (internalformat == GL_ETC1_RGB8_OES) {
+        GLuint bound = active_bound_texture();
+        if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return;
+        TexSlot *slot = &g.textures[bound];
+
+        int pot_w = nova_next_pow2(width);
+        int pot_h = nova_next_pow2(height);
+        if (pot_w < 8) pot_w = 8;
+        if (pot_h < 8) pot_h = 8;
+
+        if (slot->allocated) {
+            if (slot->fmt != GPU_ETC1 || slot->pot_w != pot_w || slot->pot_h != pot_h) {
+                free_texture_storage(slot);
+            }
+        }
+        if (!slot->allocated) {
+            if (!C3D_TexInit(&slot->tex, pot_w, pot_h, GPU_ETC1)) {
+                g.last_error = GL_OUT_OF_MEMORY;
+                return;
+            }
+            slot->allocated = 1;
+        }
+        slot->fmt = GPU_ETC1;
+        slot->pot_w = pot_w; slot->pot_h = pot_h;
+        slot->width = width; slot->height = height;
+        slot->orig_width = width; slot->orig_height = height;
+        slot->is_solid_optimized = 0;
+        slot->has_mipmap = 0;
+
+        if (data && imageSize > 0) {
+            int expected = (pot_w * pot_h) / 2; /* ETC1 = 4 bpp */
+            int copy = imageSize < expected ? imageSize : expected;
+            memcpy(slot->tex.data, data, copy);
+            C3D_TexFlush(&slot->tex);
+        }
+        apply_slot_params_to_tex(&slot->tex, slot);
+        return;
+    }
+
+    /* Other compressed formats (PVRTC, DXT, …) — PICA200 can't sample them,
+     * allocate an empty RGBA8 placeholder so the binding stays valid. */
+    (void) data; (void) imageSize;
     glTexImage2D(target, level, GL_RGBA, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
 }
 
@@ -1018,6 +1261,22 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
     uint32_t *tex_data = (uint32_t *) slot->tex.data;
     if (!tex_data) return;
 
+    /* HW fast path: full-area FBO→tex copy (same tiled layout, same RGBA8
+     * format). When source is the screen, the axis-swap rule still applies
+     * and we have to keep the per-pixel path. */
+#ifndef NOVAGL_DISABLE_GLCOPYTEXSUB_HW
+    if (g.bound_fbo != 0 && slot->fmt == GPU_RGBA8 &&
+        x == 0 && y == 0 && xoffset == 0 && yoffset == 0 &&
+        width == fb_w && height == fb_h &&
+        slot->pot_w == fb_w && slot->pot_h == fb_h) {
+        C3D_FrameSplit(0);
+        C3D_SyncTextureCopy(fb_data, 0, tex_data, 0,
+                            (u32)(fb_w * fb_h * 4), 8);
+        return;
+    }
+#endif
+
+    C3D_FrameSplit(0);
     gspWaitForP3D();
 
     for (int cy = 0; cy < height; cy++) {

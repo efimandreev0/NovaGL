@@ -5,7 +5,25 @@
 #include "NovaGL.h"
 #include "utils.h"
 
+/* Spec validation helpers (GL ES 1.1 §2.8): invalid size/type/stride raise
+ * an error and leave the array state unchanged. Desktop types (GL_INT,
+ * GL_DOUBLE-as-float ports won't hit this) are accepted leniently where the
+ * draw path can convert them. */
+static int va_validate(GLint size, GLint min_size, GLint max_size, GLsizei stride) {
+    if (size < min_size || size > max_size || stride < 0) {
+        g.last_error = GL_INVALID_VALUE;
+        return 0;
+    }
+    return 1;
+}
+
 void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
+    if (!va_validate(size, 2, 4, stride)) return;
+    if (type != GL_BYTE && type != GL_SHORT && type != GL_FIXED && type != GL_FLOAT &&
+        type != GL_INT) { /* GL_INT: desktop-GL leniency */
+        g.last_error = GL_INVALID_ENUM;
+        return;
+    }
     g.va_vertex.size = size;
     g.va_vertex.type = type;
     g.va_vertex.stride = stride;
@@ -14,6 +32,12 @@ void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *poin
 }
 
 void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
+    if (!va_validate(size, 2, 4, stride)) return;
+    if (type != GL_BYTE && type != GL_SHORT && type != GL_FIXED && type != GL_FLOAT &&
+        type != GL_INT) {
+        g.last_error = GL_INVALID_ENUM;
+        return;
+    }
     g.va_texcoord.size = size;
     g.va_texcoord.type = type;
     g.va_texcoord.stride = stride;
@@ -22,6 +46,20 @@ void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *po
 }
 
 void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
+    /* ES 1.1: size must be 4. We accept 3 as a desktop-GL leniency (the draw
+     * path pads alpha=255), anything else is GL_INVALID_VALUE. */
+    if (size != 3 && size != 4) {
+        g.last_error = GL_INVALID_VALUE;
+        return;
+    }
+    if (stride < 0) {
+        g.last_error = GL_INVALID_VALUE;
+        return;
+    }
+    if (type != GL_UNSIGNED_BYTE && type != GL_FIXED && type != GL_FLOAT) {
+        g.last_error = GL_INVALID_ENUM;
+        return;
+    }
     g.va_color.size = size;
     g.va_color.type = type;
     g.va_color.stride = stride;
@@ -30,6 +68,15 @@ void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *point
 }
 
 void glNormalPointer(GLenum type, GLsizei stride, const GLvoid *pointer) {
+    if (stride < 0) {
+        g.last_error = GL_INVALID_VALUE;
+        return;
+    }
+    if (type != GL_BYTE && type != GL_SHORT && type != GL_FIXED && type != GL_FLOAT) {
+        g.last_error = GL_INVALID_ENUM;
+        return;
+    }
+    g.va_normal.size = 3;
     g.va_normal.type = type;
     g.va_normal.stride = stride;
     g.va_normal.pointer = pointer;
@@ -41,6 +88,7 @@ void glEnableClientState(GLenum cap) {
     else if (cap == GL_TEXTURE_COORD_ARRAY) g.va_texcoord.enabled = 1;
     else if (cap == GL_COLOR_ARRAY) g.va_color.enabled = 1;
     else if (cap == GL_NORMAL_ARRAY) g.va_normal.enabled = 1;
+    else g.last_error = GL_INVALID_ENUM;
 }
 
 void glDisableClientState(GLenum cap) {
@@ -48,6 +96,7 @@ void glDisableClientState(GLenum cap) {
     else if (cap == GL_TEXTURE_COORD_ARRAY) g.va_texcoord.enabled = 0;
     else if (cap == GL_COLOR_ARRAY) g.va_color.enabled = 0;
     else if (cap == GL_NORMAL_ARRAY) g.va_normal.enabled = 0;
+    else g.last_error = GL_INVALID_ENUM;
 }
 
 /* GL 3.0+ VAO stubs */

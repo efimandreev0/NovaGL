@@ -1,5 +1,6 @@
 ; =============================================================================
 ; OpenGL ES 1.1 Fixed-Function Emulation Vertex Shader for PICA200
+; (full variant: GL_LINEAR vertex fog + GL_TEXTURE matrix)
 ; =============================================================================
 
 .fvec projection[4]
@@ -9,7 +10,11 @@
                     ; CPU loop in the GX-emu layer — GameCube ports etc. ship
                     ; texel-space UVs and rely on a GX texture matrix to bring
                     ; them into [0,1]. Applied to (s, t, 0, 1).
-.fvec fogparams[2]  ; [0]: start(x), end(y)  [1]: color
+.fvec fogparams[2]  ; [0]: start(x), end(y), 1/(end-start)(z)  [1]: color
+                    ; CPU contract (apply_gpu_state): f = 1 - (d - start) * inv,
+                    ; so uploading inv = 0 yields f = 1 (fog fully off) — this
+                    ; is how the C side disables the blend without a shader
+                    ; switch. Do NOT recompute 1/(end-start) here.
 
 .alias inPosition  v0
 .alias inTexcoord  v1
@@ -18,50 +23,60 @@
 .out outPosition   position
 .out outColor      color
 .out outTexcoord0  texcoord0
-.out outView       view
 
 .constf CONST1 (1.0, 0.0, 0.0, 0.0)
-.constf CONST2 (0.0, 0.0, 0.0, 1.0)
 .constf my_normalize (0.00392156, 0.00392156, 0.00392156, 0.00392156)
-.constf EPSILON (0.0001, 0.0001, 0.0001, 0.0001)
 
 .proc main
-    ; Force w=1.0 (Arx supplies TexturedVertex with rhw, which we want to ignore
-    ; for the fixed-function path. PicaGL does the same trick.)
-    mov r15.xyz, inPosition
-    mov r15.w,   CONST1.x
+    ; Transform to View Space.
+    ; The attribute loader for this shader is pinned to 3 floats
+    ; (nova_setup_attr_info(3)), so PICA pads inPosition.w = 1.0 for us —
+    ; no need to rebuild (x, y, z, 1) in a temp first. (Arx's TexturedVertex
+    ; rhw never reaches the register: the loader only reads 3 components.)
+    dp4 r0.x, modelview[0], inPosition
+    dp4 r0.y, modelview[1], inPosition
+    dp4 r0.z, modelview[2], inPosition
+    dp4 r0.w, modelview[3], inPosition
 
-    ; Transform to View Space
-    dp4 r0.x, modelview[0], r15
-    dp4 r0.y, modelview[1], r15
-    dp4 r0.z, modelview[2], r15
-    dp4 r0.w, modelview[3], r15
+    ; Projection (into scratch r14 so we can post-process before output).
+    dp4 r14.x, projection[0], r0
+    dp4 r14.y, projection[1], r0
+    dp4 r14.z, projection[2], r0
+    dp4 r14.w, projection[3], r0
 
-    ; Projection
-    dp4 outPosition.x, projection[0], r0
-    dp4 outPosition.y, projection[1], r0
-    dp4 outPosition.z, projection[2], r0
-    dp4 outPosition.w, projection[3], r0
-    ; I fucking hate working with fucking colors on fucking C3D and PICA200
-    mul r1, my_normalize, inColor.xyzw
+    ; --- Depth-clamp emulation (GL_DEPTH_CLAMP equivalent) ---
+    ; After the projection fixup in apply_gpu_state (0.4999*z - 0.5*w),
+    ; valid PICA200 clip-space z is in [-w, 0], NOT GL's [-w, +w]. PICA's
+    ; hardware clip rejects vertices outside that range, taking the whole
+    ; triangle with them. Clamp z into the PICA range so the clip test
+    ; passes:
+    ;   min(z, 0)  — geometry past GL's far plane gets pinned to PICA near
+    ;                (= GL far) so it appears flush instead of vanishing.
+    ;   max(z, -w) — geometry past GL's near plane (first-person hands,
+    ;                close-up blocks) gets pinned to PICA far (= GL near).
+    ; PICA200 only allows constants as src1 — swap operands (min is commutative).
+    min r14.z, CONST1.y, r14.z
+    max r14.z, r14.z, -r14.w
 
+    mov outPosition, r14
+
+    ; Color: byte -> float
+    mul r1, my_normalize, inColor
+
+    ; --- GL_LINEAR fog ---
+    ; d = |view_pos| (true eye distance)
     dp3 r2.x, r0, r0        ; d^2
     rsq r2.y, r2.x          ; 1/d
     rcp r2.x, r2.y          ; d
 
-    ; r3.x = end - d
-    add r3.x, fogparams[0].y, -r2.x
-
-    ; r3.y = end - start (защита от нуля!)
-    mov r7.x, fogparams[0].x
-    add r3.y, fogparams[0].y, -r7.x
-    mov r8.x, EPSILON.x
-    max r3.y, r3.y, r8.x
-
-    ; f = (end - d) / (end - start)
-    rcp r3.z, r3.y
-    mul r2.x, r3.x, r3.z
-
+    ; f = clamp(1 - (d - start) * inv, 0, 1)
+    ; inv is precomputed on the CPU (fogparams[0].z); inv = 0 -> f = 1 -> no
+    ; fog. The old code recomputed rcp(end-start) here, which both wasted 4
+    ; ops and broke the inv=0 "fog off" contract (f collapsed to 0 and every
+    ; vertex went 100% fog color when this shader ran with fog disabled).
+    add r3.x, -fogparams[0].x, r2.x   ; d - start
+    mul r3.y, fogparams[0].z, r3.x    ; (d - start) * inv
+    add r2.x, CONST1.x, -r3.y         ; 1 - ...
     max r2.x, CONST1.y, r2.x
     min r2.x, CONST1.x, r2.x
 
@@ -73,20 +88,15 @@
     add outColor.xyz, r5.xyz, r6.xyz
     mov outColor.w, r1.w
 
-    ; Apply GL_TEXTURE matrix to UV. Build (s, t, 0, 1) in r10, compute the two
-    ; output components into a scratch register r11, then copy out — writing
-    ; to outTexcoord0.x / .y directly from a dp4 destination wasn't producing
-    ; the expected result on picasso, going via r11 is the safe canonical form
-    ; used by other PICA shaders for the same pattern.
-    mov r10.xy, inTexcoord.xy
-    mov r10.z,  CONST1.y         ; 0
-    mov r10.w,  CONST1.x         ; 1
-    dp4 r11.x, texmtx[0], r10
-    dp4 r11.y, texmtx[1], r10
+    ; Apply GL_TEXTURE matrix to UV. The texcoord loader is 2 floats, so PICA
+    ; pads inTexcoord to (s, t, 0, 1) — exactly the vector the matrix wants.
+    ; Compute into scratch r11 then copy out — writing outTexcoord0.x/.y
+    ; directly from a dp4 destination wasn't producing the expected result on
+    ; picasso; going via r11 is the safe canonical form.
+    dp4 r11.x, texmtx[0], inTexcoord
+    dp4 r11.y, texmtx[1], inTexcoord
     mov outTexcoord0.xy, r11.xy
-    mov outTexcoord0.zw, CONST2.zw
-
-    mov outView, r0
+    mov outTexcoord0.zw, CONST1.yyyx  ; z = 0, w = 1
 
     end
 .end

@@ -37,18 +37,29 @@
     ; 4 floats by the attribute loader (configured to match va_vertex.size
     ; in nova_draw_internal). If the caller bound only 3 floats the PICA
     ; loader fills w with 1.0, so 2D-only callers still work.
-    dp4 outPosition.x, projection[0], inPosition
-    dp4 outPosition.y, projection[1], inPosition
-    dp4 outPosition.z, projection[2], inPosition
-    dp4 outPosition.w, projection[3], inPosition
+    dp4 r14.x, projection[0], inPosition
+    dp4 r14.y, projection[1], inPosition
+    dp4 r14.z, projection[2], inPosition
+    dp4 r14.w, projection[3], inPosition
+
+    ; GL_DEPTH_CLAMP emulation — clamp z into PICA's valid clip range
+    ; [-w, 0] (NOT GL's [-w, w]) so the hardware clip doesn't drop
+    ; triangles that slip past the N64-side near plane. Critical for
+    ; fast3d: it does CPU-side projection with its own clip range, then
+    ; hands us clip-space xyzw directly; vertices on the far side of the
+    ; near plane (player gun, dropped weapons, low-altitude geometry under
+    ; the camera) get hard-rejected by PICA without this.
+    ; PICA200 only allows constants as src1 — swap operands (min is commutative).
+    min r14.z, CONST1.y, r14.z
+    max r14.z, r14.z, -r14.w
+
+    mov outPosition, r14
 
     ; Color byte -> float
     mul outColor, my_normalize, inColor
 
-    ; UV passthrough
-    mov outTexcoord0.xy, inTexcoord.xy
-    mov outTexcoord0.z,  CONST1.y
-    mov outTexcoord0.w,  CONST1.x
+    ; UV passthrough — texcoord loader is 2 floats, PICA pads to (s, t, 0, 1).
+    mov outTexcoord0, inTexcoord
 
     end
 .end

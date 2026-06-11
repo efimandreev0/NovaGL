@@ -16,6 +16,8 @@
 #ifndef NOVA_DIAG_DRAW_LIMIT
 #define NOVA_DIAG_DRAW_LIMIT 0
 #endif
+
+#if NOVA_DIAG_DRAW_LIMIT > 0
 static int s_diag_draw_count = 0;
 
 static const uint8_t *diag_resolve_attr_base(const void *raw_pointer, GLuint vbo_id) {
@@ -183,6 +185,12 @@ static void diag_log_draw(const char *tag, GLenum mode, GLint first, GLsizei cou
     }
     fflush(stdout);
 }
+#else
+/* Diagnostic logging compiled out — zero overhead on every glDrawArrays. */
+static inline void diag_log_draw(const char *tag, GLenum mode, GLint first, GLsizei count) {
+    (void)tag; (void)mode; (void)first; (void)count;
+}
+#endif
 
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     diag_log_draw("DrawArrays", mode, first, count);
@@ -232,27 +240,51 @@ static void draw_elements_basevertex_impl(GLenum mode, GLsizei count, GLenum typ
             return;
     }
 
-    size_t bytes = (size_t) count * element_size;
-    void *scratch = malloc(bytes);
-    if (!scratch) {
-        /* Out of memory: skip this draw call rather than crash. */
+    /* Use the linear index ring buffer instead of malloc/free per call —
+     * malloc on 3DS fragments heap and stalls hot draw loops. The ring is
+     * already aligned/cache-flushed by linear_alloc_ring + the GSPGPU flush
+     * below. nova_draw_internal will see the staged pointer and (because it's
+     * not a VBO-backed index buffer) memcpy it again into its own index ring
+     * for the GPU — that second copy is unavoidable given the current draw
+     * path, but we no longer hit the heap. */
+    int bytes = count * (int) element_size;
+    if (bytes > g.index_buf_size) {
+        /* Too big for the ring — fall back to the per-call malloc path. */
+        void *scratch = malloc((size_t) bytes);
+        if (!scratch) return;
+        memcpy(scratch, indices, (size_t) bytes);
+        if (type == GL_UNSIGNED_BYTE) {
+            uint8_t *p = (uint8_t *) scratch;
+            for (GLsizei i = 0; i < count; i++) p[i] = (uint8_t) (p[i] + basevertex);
+        } else if (type == GL_UNSIGNED_SHORT) {
+            uint16_t *p = (uint16_t *) scratch;
+            for (GLsizei i = 0; i < count; i++) p[i] = (uint16_t) (p[i] + basevertex);
+        } else {
+            uint32_t *p = (uint32_t *) scratch;
+            for (GLsizei i = 0; i < count; i++) p[i] = p[i] + (uint32_t) basevertex;
+        }
+        nova_draw_internal(mode, 0, count, 1, type, scratch);
+        free(scratch);
         return;
     }
-    memcpy(scratch, indices, bytes);
 
+    uint8_t *staged = (uint8_t *) linear_alloc_ring(g.index_buf,
+                                                    &g.index_buf_offset,
+                                                    bytes,
+                                                    g.index_buf_size);
+    memcpy(staged, indices, (size_t) bytes);
     if (type == GL_UNSIGNED_BYTE) {
-        uint8_t *p = (uint8_t *) scratch;
+        uint8_t *p = staged;
         for (GLsizei i = 0; i < count; i++) p[i] = (uint8_t) (p[i] + basevertex);
     } else if (type == GL_UNSIGNED_SHORT) {
-        uint16_t *p = (uint16_t *) scratch;
+        uint16_t *p = (uint16_t *) staged;
         for (GLsizei i = 0; i < count; i++) p[i] = (uint16_t) (p[i] + basevertex);
-    } else { /* GL_UNSIGNED_INT */
-        uint32_t *p = (uint32_t *) scratch;
+    } else {
+        uint32_t *p = (uint32_t *) staged;
         for (GLsizei i = 0; i < count; i++) p[i] = p[i] + (uint32_t) basevertex;
     }
-
-    nova_draw_internal(mode, 0, count, 1, type, scratch);
-    free(scratch);
+    GSPGPU_FlushDataCache(staged, bytes);
+    nova_draw_internal(mode, 0, count, 1, type, staged);
 }
 
 void glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type,

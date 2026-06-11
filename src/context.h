@@ -181,7 +181,8 @@ extern struct NovaState {
 
     struct {
         int enabled;
-        GLint size;
+        GLint size;     /* GL_NORMAL_ARRAY is always 3 by spec, but kept here so
+                         * all four arrays share the same layout/type. */
         GLenum type;
         GLsizei stride;
         const void *pointer;
@@ -221,7 +222,10 @@ extern struct NovaState {
     GLint vp_x, vp_y;
     GLsizei vp_w, vp_h;
 
-    DisplayList dl_store[NOVA_DISPLAY_LISTS];
+    /* Heap-allocated on first glNewList — sizeof(DisplayList) * 512 ≈ 786KB
+     * was sitting in .bss for every NovaGL app, even those that never call
+     * glGenLists. Now we pay only when a recording actually happens. */
+    DisplayList *dl_store;
     int dl_recording;
     GLuint dl_next_base;
 
@@ -245,6 +249,19 @@ extern struct NovaState {
     int polygon_offset_fill_enabled;
     GLfloat depth_near;
     GLfloat depth_far;
+
+    /* Stencil state — PICA200 has a real stencil buffer (24+8 depth/stencil)
+     * and a real C3D_StencilTest path; previously NovaGL stored none of this
+     * and stubbed glStencil*. State changes get pushed in apply_gpu_state. */
+    int stencil_test_enabled;
+    GLenum stencil_func;
+    GLint  stencil_ref;
+    GLuint stencil_mask;       /* read mask  (the "mask" arg to glStencilFunc) */
+    GLuint stencil_write_mask; /* write mask (the arg to glStencilMask) */
+    GLenum stencil_op_fail;
+    GLenum stencil_op_zfail;
+    GLenum stencil_op_zpass;
+    GLint  clear_stencil;
 
     void *tex_staging;
     int tex_staging_size;
@@ -276,6 +293,14 @@ extern struct NovaState {
      * source is GL_CONSTANT. Stored as 0..1 floats (GL convention); converted
      * to packed 0xAABBGGRR for citro3d on the way through. */
     GLfloat tex_env_color[3][4];
+
+    /* Explicit TEV stage programming (overrides the per-unit GL_COMBINE
+     * path when active). See NovaGL.h::novaSetExplicitTevStages for the
+     * full contract. `explicit_tev_count > 0` means apply_gpu_state should
+     * emit `explicit_tev_count` stages from this array instead of doing
+     * its usual one-stage-per-active-unit loop. */
+    int explicit_tev_count;
+    NovaTevStageGL explicit_tev_stages[NOVA_TEV_MAX_STAGES];
 
     int line_smooth_enabled;
 

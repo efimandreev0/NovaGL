@@ -32,7 +32,11 @@ void glBegin(GLenum mode) {
     imm.current_texcoord[2] = 0.0f;
     imm.current_texcoord[3] = 1.0f;
 
-    imm.mapped_max_verts = 4096;
+    /* Start small (256 verts = 6KB) and grow on-demand via add_vertex's
+     * overflow path. Pre-reserving 4096 verts (96KB) every glBegin used to
+     * exhaust the 2MB client_array_buf in ~22 calls, triggering a mid-frame
+     * FrameSplit + GPU wait — fatal for HUD-heavy scenes. */
+    imm.mapped_max_verts = 256;
     int req_size = imm.mapped_max_verts * 24;
 
     if (g.client_array_buf_offset + req_size > g.client_array_buf_size) {
@@ -42,6 +46,33 @@ void glBegin(GLenum mode) {
 
     imm.start_offset = g.client_array_buf_offset;
     imm.mapped_ptr = (uint8_t *) g.client_array_buf + g.client_array_buf_offset;
+}
+
+/* If the caller pushes more verts than the current reserve, double the reserve
+ * by allocating fresh space at the next free position in the ring and
+ * memcpy-ing the verts so far. Cheap: glBegin runs are typically dozens of
+ * verts, rare runs scale to thousands and rebuild once or twice. */
+static int imm_grow_reserve(void) {
+    int new_max = imm.mapped_max_verts * 2;
+    int new_size = new_max * 24;
+    if (new_size > g.client_array_buf_size / 2) {
+        /* Don't take more than half the ring for a single glBegin — better to
+         * truncate than evict everything else for one immediate batch. */
+        return 0;
+    }
+    int new_offset = imm.start_offset + new_size;
+    if (new_offset > g.client_array_buf_size) {
+        /* Out of space in the current ring window. Splitting here would stall;
+         * just stop accepting verts. */
+        return 0;
+    }
+    /* Old reserve happens to still be contiguous and live (no draws yet), so
+     * widening it in place is enough — no copy needed. We only need to make
+     * sure g.client_array_buf_offset is far enough out that future allocations
+     * don't tread on us before glEnd; bump it tentatively. */
+    g.client_array_buf_offset = new_offset;
+    imm.mapped_max_verts = new_max;
+    return 1;
 }
 
 static void imm_draw_packed_run(GLenum mode, GPU_Primitive_t prim, uint8_t *base, int count) {
@@ -82,7 +113,10 @@ void glEnd(void) {
 /* Helper function to add a vertex to the mapped ring buffer */
 static inline void add_vertex(GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
     (void) w;
-    if (!imm.in_begin || imm.vertex_count >= imm.mapped_max_verts) return;
+    if (!imm.in_begin) return;
+    if (imm.vertex_count >= imm.mapped_max_verts) {
+        if (!imm_grow_reserve()) return; /* truncate at hard limit */
+    }
 
     float *out_f = (float *) (imm.mapped_ptr + imm.vertex_count * 24);
     uint8_t *out_c = (uint8_t *) (out_f + 5);

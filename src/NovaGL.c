@@ -4,6 +4,12 @@
 
 #include "NovaGL.h"
 #include "utils.h"
+
+/* Value fixed by the GL spec; defined locally if NovaGL.h lacks it. */
+#ifndef GL_FRONT_AND_BACK
+#define GL_FRONT_AND_BACK 0x0408
+#endif
+
 #include "context.h"
 #include <math.h>
 
@@ -16,6 +22,14 @@
 #include "NovaGL_shader_texmtx_shbin.h"
 #include "NovaGL_shader_clipspace_shbin.h"
 
+/* Primitive enums used by the draw-mode validator; values fixed by spec. */
+#ifndef GL_POINTS
+#define GL_POINTS 0x0000
+#endif
+#ifndef GL_LINE_LOOP
+#define GL_LINE_LOOP 0x0002
+#endif
+
 /* Moved out of NovaGL.h: depends on GX_TRANSFER_* from <3ds.h>, which we now keep
  * confined to the .c side so the public header doesn't leak libctru's `Thread`
  * typedef into C++ callers. */
@@ -26,10 +40,67 @@
      GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
      GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
+/* Frame submit mode. C3D_FRAME_SYNCDRAW = wait for previous frame before
+ * accepting new draws (no tearing, simpler timing). 0 = non-blocking, lets
+ * CPU build frame N+1 while GPU still processes N — typically +20–40% FPS
+ * on borderline scenes but you have to be careful about state cache reuse
+ * across frames (our cache is invalidated on frame boundaries implicitly
+ * via novaSwapBuffers's render-target reset, so we're safe).
+ *
+ * Override at compile time:  -DNOVAGL_FRAME_MODE=0   for async. */
+#ifndef NOVAGL_FRAME_MODE
+#define NOVAGL_FRAME_MODE C3D_FRAME_SYNCDRAW
+#endif
+
 struct NovaState g;
 
+/* -----------------------------------------------------------------------------
+ * Intentionally-skipped audit items (kept here so future readers see the
+ * decision trail rather than discovering "why isn't this fixed?" by surprise):
+ *
+ *  #19 Lighting (GL_LIGHTING / glLight*) — not implemented. Would need a PICA
+ *      C3D_LightEnv setup per light plus normal-array plumbing through draw.c.
+ *      Real-world tests on actual lit GL ES 1.1 scenes are required; deferred
+ *      until a target app surfaces (no GL ES 1.1 game currently shipped on
+ *      NovaGL uses fixed-function lights — all of them roll their own through
+ *      TEV / per-vertex colors).
+ *
+ *  #23 lookup.c perfect-hash for eglGetProcAddress — table search is O(N) per
+ *      lookup but lookups happen <100 times per app lifetime (init only).
+ *      Switching to gperf would shave milliseconds at startup and add a build-
+ *      time dep. Not worth it.
+ *
+ *  #34 PICA TEV stage-mask single-register optimization — citro3d doesn't
+ *      expose the active-stage mask register and direct GPUCMD_AddWrite is
+ *      fragile across libctru versions. The current implementation pads
+ *      unused stages with passthrough writes (~5 register writes), only when
+ *      tev_dirty=1 (rare). Skipping.
+ *
+ *  #37 Drop fog math from FULL shader when CPU sets density=0 — would need
+ *      recompiling all .pica shaders and validation against Arx/PD which we
+ *      can't do without a 3DS in hand. The hardware fog path added in #20
+ *      makes the FULL shader the slow path anyway; once games migrate to
+ *      EXP/EXP2 (now functional), FULL is only used for legacy GL_LINEAR.
+ *
+ *  #41 Mixed Russian/English comments — purely stylistic; subjective.
+ *
+ *  #42 No CI / regression tests — out of scope for this pass. Would require
+ *      a Citra headless harness + golden framebuffer CRC fixtures.
+ * ---------------------------------------------------------------------------*/
+
 void nova_init() {
+    /* Defaults reverted to the historical values (2MB array / 512KB index /
+     * 512KB tex_staging). Smaller defaults caused PD-class workloads to wrap
+     * the ring multiple times per frame, hammering linear_alloc_ring's
+     * synchronous wait path and freezing the GPU.
+     *
+     * Compile with -DNOVAGL_SMALL_INIT_DEFAULTS=1 to opt into the lean
+     * variant (good for UI-only apps that never push much geometry). */
+#ifdef NOVAGL_SMALL_INIT_DEFAULTS
+    nova_init_ex(NOVA_CMD_BUF_SIZE, 512 * 1024, 128 * 1024, 256 * 1024);
+#else
     nova_init_ex(NOVA_CMD_BUF_SIZE, 2 * 1024 * 1024, 512 * 1024, 512 * 1024);
+#endif
 }
 
 void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_size, int tex_staging_size) {
@@ -50,9 +121,21 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
                                                  GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
     C3D_RenderTargetSetOutput(g.render_target_top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
 
+    /* Right-eye target is created lazily on the first novaBeginEye(1) call —
+     * if the user never enables stereo we save ~768KB of VRAM (color + depth)
+     * for textures. Originally created up-front "just in case".
+     *
+     * Compile with -DNOVAGL_DISABLE_LAZY_RIGHT_EYE=1 to restore the eager
+     * allocation (debug aid: rules out lazy-init as the cause if stereo
+     * paths behave oddly). */
+#ifdef NOVAGL_DISABLE_LAZY_RIGHT_EYE
     g.render_target_top_right = C3D_RenderTargetCreate(NOVA_SCREEN_H, NOVA_SCREEN_W,
                                                        GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
-    C3D_RenderTargetSetOutput(g.render_target_top_right, GFX_TOP, GFX_RIGHT, DISPLAY_TRANSFER_FLAGS);
+    if (g.render_target_top_right)
+        C3D_RenderTargetSetOutput(g.render_target_top_right, GFX_TOP, GFX_RIGHT, DISPLAY_TRANSFER_FLAGS);
+#else
+    g.render_target_top_right = NULL;
+#endif
 
     g.current_target = g.render_target_top;
 
@@ -120,6 +203,11 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.index_buf_size = index_buf_size;
     g.index_buf = linearAlloc(g.index_buf_size);
 
+    /* Bump from 16384 -> max possible under 16-bit index range. With 4 verts
+     * per quad and uint16 indices, the highest packed base is 65532 ⇒ 16383
+     * quads is the per-batch hard limit if we want indices fit in u16. Keep
+     * at 16384 (192KB static buffer); going higher would force 32-bit indices
+     * which C3D_DrawElements can take but it doubles the index bandwidth. */
     g.static_quad_count = 16384;
     g.static_quad_indices = (uint16_t *) linearAlloc(g.static_quad_count * 6 * sizeof(uint16_t));
     if (g.static_quad_indices) {
@@ -184,6 +272,18 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.depth_func = GL_LEQUAL;
     g.depth_mask = GL_TRUE;
     g.clear_depth = 1.0f;
+
+    /* Stencil defaults — disabled, but parameters set so the first
+     * glEnable(GL_STENCIL_TEST) pushes sane values to PICA. */
+    g.stencil_test_enabled = 0;
+    g.stencil_func = GL_ALWAYS;
+    g.stencil_ref = 0;
+    g.stencil_mask = 0xFF;
+    g.stencil_write_mask = 0xFF;
+    g.stencil_op_fail  = GL_KEEP;
+    g.stencil_op_zfail = GL_KEEP;
+    g.stencil_op_zpass = GL_KEEP;
+    g.clear_stencil = 0;
     g.blend_src = GL_ONE;
     g.blend_dst = GL_ZERO;
     g.alpha_func = GL_ALWAYS;
@@ -223,13 +323,18 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.pack_alignment = 4;
     g.unpack_alignment = 4;
 
-    (void) tex_staging_size;
+    /* Honour the caller's tex_staging hint instead of dropping it. get_tex_staging
+     * will grow lazily, but pre-sizing here lets a heavy texture loader skip
+     * the first realloc spike. */
     g.tex_staging_size = 0;
     g.tex_staging = NULL;
+    if (tex_staging_size > 0) {
+        get_tex_staging(tex_staging_size);
+    }
 
     g.initialized = 1;
 
-    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    C3D_FrameBegin(NOVAGL_FRAME_MODE);
     g.client_array_buf_offset = 0;
     g.index_buf_offset = 0;
 
@@ -261,7 +366,7 @@ void novaSwapBuffers(void) {
     C3D_FrameEnd(0);
     nova_fbo_gc_collect();
 
-    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    C3D_FrameBegin(NOVAGL_FRAME_MODE);
 
     g.client_array_buf_offset = 0;
     g.index_buf_offset = 0;
@@ -303,6 +408,11 @@ void nova_fini(void) {
         g.static_quad_count = 0;
     }
 
+    if (g.dl_store) {
+        free(g.dl_store);
+        g.dl_store = NULL;
+    }
+
     if (g.shader_dvlb) {
         shaderProgramFree(&g.shader_program);
         DVLB_Free(g.shader_dvlb);
@@ -323,7 +433,7 @@ void nova_fini(void) {
     nova_fbo_gc_collect();
 
     C3D_RenderTargetDelete(g.render_target_top);
-    C3D_RenderTargetDelete(g.render_target_top_right);
+    if (g.render_target_top_right) C3D_RenderTargetDelete(g.render_target_top_right);
     C3D_RenderTargetDelete(g.render_target_bot);
     C3D_Fini();
     g.initialized = 0;
@@ -331,6 +441,19 @@ void nova_fini(void) {
 
 void nova_set_render_target(int target_mode) {
     if (target_mode == 1) {
+        /* Lazy-init right-eye target on first use — see comment in nova_init_ex. */
+        if (!g.render_target_top_right) {
+            g.render_target_top_right = C3D_RenderTargetCreate(NOVA_SCREEN_H, NOVA_SCREEN_W,
+                                                               GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+            if (g.render_target_top_right) {
+                C3D_RenderTargetSetOutput(g.render_target_top_right, GFX_TOP, GFX_RIGHT, DISPLAY_TRANSFER_FLAGS);
+            } else {
+                /* Allocation failed — fall back to left-eye, no stereo. */
+                C3D_FrameDrawOn(g.render_target_top);
+                g.current_target = g.render_target_top;
+                return;
+            }
+        }
         C3D_FrameDrawOn(g.render_target_top_right);
         g.current_target = g.render_target_top_right;
     } else if (target_mode == 2) {
@@ -386,7 +509,35 @@ static int packed_ptc_attr_compatible(GLint size, GLenum type, GLsizei stride, c
 }
 
 void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements, GLenum type, const GLvoid *indices) {
-    if (count <= 0) return;
+    /* Spec validation order matters: GL_INVALID_ENUM for bad mode/type,
+     * GL_INVALID_VALUE for negative count/first — all before any drawing. */
+    switch (mode) {
+        case GL_POINTS: case GL_LINES: case GL_LINE_LOOP: case GL_LINE_STRIP:
+        case GL_TRIANGLES: case GL_TRIANGLE_STRIP: case GL_TRIANGLE_FAN:
+        case GL_QUADS: /* desktop-GL leniency for ports */
+            break;
+        default:
+            g.last_error = GL_INVALID_ENUM;
+            return;
+    }
+    if (count < 0 || first < 0) {
+        g.last_error = GL_INVALID_VALUE;
+        return;
+    }
+    if (count == 0) return;
+    /* GL_FRONT_AND_BACK culling: spec says ALL triangles are discarded
+     * (points/lines unaffected — but NovaGL rasterizes everything as
+     * triangles anyway). PICA has no such cull mode; emulate by skipping
+     * the draw entirely. Previously this silently behaved like GL_BACK. */
+    if (g.cull_face_enabled && g.cull_face_mode == GL_FRONT_AND_BACK) {
+        switch (mode) {
+            case GL_TRIANGLES: case GL_TRIANGLE_STRIP: case GL_TRIANGLE_FAN:
+            case GL_QUADS:
+                return;
+            default:
+                break;
+        }
+    }
     if (is_elements && type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_BYTE && type != GL_UNSIGNED_INT) {
         g.last_error = GL_INVALID_ENUM;
         return;
@@ -558,9 +709,14 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
                                ? (const uint8_t *) g.vbos[g.va_color.vbo_id].data + (uintptr_t) g.va_color.pointer
                                : (const uint8_t *) g.va_color.pointer;
 
+    /* Spec: conversion to fixed-point framebuffer color clamps to [0,1].
+     * glColor4f itself must NOT clamp (current color is kept float), so the
+     * clamp belongs here at pack time. */
     uint8_t def_col[4] = {
-        (uint8_t) (g.cur_color[0] * 255.0f), (uint8_t) (g.cur_color[1] * 255.0f),
-        (uint8_t) (g.cur_color[2] * 255.0f), (uint8_t) (g.cur_color[3] * 255.0f)
+        (uint8_t) (clampf(g.cur_color[0], 0.0f, 1.0f) * 255.0f + 0.5f),
+        (uint8_t) (clampf(g.cur_color[1], 0.0f, 1.0f) * 255.0f + 0.5f),
+        (uint8_t) (clampf(g.cur_color[2], 0.0f, 1.0f) * 255.0f + 0.5f),
+        (uint8_t) (clampf(g.cur_color[3], 0.0f, 1.0f) * 255.0f + 0.5f)
     };
 
     for (int i = 0; i < count; i++) {
@@ -609,15 +765,28 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
             if (g.va_color.size == 3) dst[col_offset + 3] = 255;
         } else if (g.va_color.enabled && src_c && (uintptr_t) src_c > 0x1000) {
             const uint8_t *c_ptr = src_c + src_index * c_str;
-            if (g.va_color.type == GL_UNSIGNED_BYTE || (g.va_color.type != GL_FLOAT)) {
+            if (g.va_color.type == GL_UNSIGNED_BYTE) {
                 memcpy(dst + col_offset, c_ptr, g.va_color.size == 3 ? 3 : 4);
                 if (g.va_color.size == 3) dst[col_offset + 3] = 255;
-            } else {
+            } else if (g.va_color.type == GL_FLOAT) {
                 const float *cf = (const float *) c_ptr;
                 dst[col_offset + 0] = (uint8_t) (clampf(cf[0], 0.0f, 1.0f) * 255.0f);
                 dst[col_offset + 1] = (uint8_t) (clampf(cf[1], 0.0f, 1.0f) * 255.0f);
                 dst[col_offset + 2] = (uint8_t) (clampf(cf[2], 0.0f, 1.0f) * 255.0f);
                 dst[col_offset + 3] = g.va_color.size >= 4 ? (uint8_t) (clampf(cf[3], 0.0f, 1.0f) * 255.0f) : 255;
+            } else if (g.va_color.type == GL_FIXED) {
+                /* ES 1.1 allows GL_FIXED colors (16.16). Previously these fell
+                 * into the raw-memcpy branch and produced garbage colors. */
+                const int32_t *cx = (const int32_t *) c_ptr;
+                for (int ch = 0; ch < 4; ch++) {
+                    float v = (ch < g.va_color.size) ? ((float) cx[ch] / 65536.0f) : 1.0f;
+                    dst[col_offset + ch] = (uint8_t) (clampf(v, 0.0f, 1.0f) * 255.0f);
+                }
+            } else {
+                /* Unknown/unsupported color type — treat bytes verbatim as the
+                 * historical fallback rather than reading out of bounds. */
+                memcpy(dst + col_offset, c_ptr, g.va_color.size == 3 ? 3 : 4);
+                if (g.va_color.size == 3) dst[col_offset + 3] = 255;
             }
         } else {
             memcpy(dst + col_offset, def_col, 4);

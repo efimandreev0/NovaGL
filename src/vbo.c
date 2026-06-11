@@ -13,48 +13,6 @@
 #define NOVA_VBO_PTC_PACKED_STRIDE 14
 #define NOVA_VBO_PTC_PACK_THRESHOLD (NOVA_VBO_PTC_RAW_STRIDE * 128)
 
-static uint16_t float_to_half_bits(float value) {
-    union {
-        float f;
-        uint32_t u;
-    } conv;
-    conv.f = value;
-
-    uint32_t sign = (conv.u >> 16) & 0x8000u;
-    uint32_t exponent = (conv.u >> 23) & 0xFFu;
-    uint32_t mantissa = conv.u & 0x7FFFFFu;
-
-    if (exponent == 0xFFu) {
-        if (mantissa) {
-            return (uint16_t) (sign | 0x7E00u);
-        }
-        return (uint16_t) (sign | 0x7C00u);
-    }
-
-    int new_exp = (int) exponent - 127 + 15;
-    if (new_exp >= 0x1F) {
-        return (uint16_t) (sign | 0x7C00u);
-    }
-
-    if (new_exp <= 0) {
-        if (new_exp < -10) {
-            return (uint16_t) sign;
-        }
-        mantissa |= 0x800000u;
-        uint32_t shifted = mantissa >> (uint32_t) (14 - new_exp);
-        if ((mantissa >> (uint32_t) (13 - new_exp)) & 1u) {
-            shifted++;
-        }
-        return (uint16_t) (sign | shifted);
-    }
-
-    uint16_t half = (uint16_t) (sign | ((uint32_t) new_exp << 10) | (mantissa >> 13));
-    if (mantissa & 0x1000u) {
-        half++;
-    }
-    return half;
-}
-
 static float half_bits_to_float(uint16_t value) {
     uint32_t sign = ((uint32_t) value & 0x8000u) << 16;
     uint32_t exponent = ((uint32_t) value >> 10) & 0x1Fu;
@@ -99,33 +57,18 @@ static void free_vbo_storage(VBOSlot *slot) {
     slot->storage_stride = 0;
 }
 
+/* The half-float PTC packing path was wired up but never enabled at the API
+ * surface — can_pack_ptc_vbo() always returned 0, so pack_ptc_vertex() and
+ * float_to_half_bits() were dead code. Removed to slim the binary; the
+ * unpack path stays (vbo_decode_packed_ptc_vertex) so any pre-existing
+ * packed slots from a prior build can still be read back when re-bound.
+ *
+ * To re-enable later: add a real heuristic here (e.g. "raw stride == 24 and
+ * size > some threshold"), reintroduce float_to_half_bits + pack_ptc_vertex,
+ * and the glBufferData path below already honours the pack_ptc flag. */
 static int can_pack_ptc_vbo(GLsizeiptr size, const GLvoid *data, GLenum usage) {
-    (void) size;
-    (void) data;
-    (void) usage;
+    (void) size; (void) data; (void) usage;
     return 0;
-}
-
-static void pack_ptc_vertex(uint8_t *dst, const uint8_t *src) {
-    float x, y, z, u, v;
-    memcpy(&x, src + 0, sizeof(float));
-    memcpy(&y, src + 4, sizeof(float));
-    memcpy(&z, src + 8, sizeof(float));
-    memcpy(&u, src + 12, sizeof(float));
-    memcpy(&v, src + 16, sizeof(float));
-
-    uint16_t hx = float_to_half_bits(x);
-    uint16_t hy = float_to_half_bits(y);
-    uint16_t hz = float_to_half_bits(z);
-    uint16_t hu = float_to_half_bits(u);
-    uint16_t hv = float_to_half_bits(v);
-
-    memcpy(dst + 0, &hx, sizeof(uint16_t));
-    memcpy(dst + 2, &hy, sizeof(uint16_t));
-    memcpy(dst + 4, &hz, sizeof(uint16_t));
-    memcpy(dst + 6, &hu, sizeof(uint16_t));
-    memcpy(dst + 8, &hv, sizeof(uint16_t));
-    memcpy(dst + 10, src + 20, 4);
 }
 
 int vbo_is_packed_ptc(const VBOSlot *slot) {
@@ -190,6 +133,11 @@ void vbo_convert_slot_to_raw(VBOSlot *slot) {
 }
 
 void glGenBuffers(GLsizei n, GLuint *buffers) {
+    if (n < 0) {
+        g.last_error = GL_INVALID_VALUE;
+        return;
+    }
+    if (!buffers) return;
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = 1;
         while (id < NOVA_MAX_VBOS && g.vbos[id].in_use) {
@@ -208,6 +156,11 @@ void glGenBuffers(GLsizei n, GLuint *buffers) {
 }
 
 void glDeleteBuffers(GLsizei n, const GLuint *buffers) {
+    if (n < 0) {
+        g.last_error = GL_INVALID_VALUE;
+        return;
+    }
+    if (!buffers) return;
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = buffers[i];
         if (id > 0 && (int) id < NOVA_MAX_VBOS && g.vbos[id].in_use) {
@@ -225,14 +178,28 @@ void glDeleteBuffers(GLsizei n, const GLuint *buffers) {
 void glBindBuffer(GLenum target, GLuint buffer) {
     if (target == GL_ARRAY_BUFFER) g.bound_array_buffer = buffer;
     else if (target == GL_ELEMENT_ARRAY_BUFFER) g.bound_element_array_buffer = buffer;
+    else g.last_error = GL_INVALID_ENUM; /* spec: binding unchanged */
 }
 
 void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usage) {
     GLuint id = 0;
     if (target == GL_ARRAY_BUFFER) id = g.bound_array_buffer;
     else if (target == GL_ELEMENT_ARRAY_BUFFER) id = g.bound_element_array_buffer;
+    else {
+        g.last_error = GL_INVALID_ENUM;
+        return;
+    }
 
-    if (id == 0 || id >= NOVA_MAX_VBOS) return;
+    if (size < 0) {
+        g.last_error = GL_INVALID_VALUE;
+        return;
+    }
+    if (id == 0) {
+        /* Spec: no buffer object bound to target. */
+        g.last_error = GL_INVALID_OPERATION;
+        return;
+    }
+    if (id >= NOVA_MAX_VBOS) return;
 
     VBOSlot *slot = &g.vbos[id];
     int pack_ptc = (target == GL_ARRAY_BUFFER) && can_pack_ptc_vbo(size, data, usage);
@@ -245,10 +212,24 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
         free_vbo_storage(slot);
     }
 
-    if (!slot->allocated ||
-        slot->capacity < desired_bytes ||
-        (desired_kind == NOVA_VBO_STORAGE_RAW && desired_bytes > 0 && slot->capacity > desired_bytes * 4)) {
+    int is_stream = (usage == GL_STREAM_DRAW || usage == GL_DYNAMIC_DRAW);
+    int reuse_existing = slot->allocated &&
+                         slot->capacity >= desired_bytes &&
+                         /* For STREAM/DYNAMIC, never shrink the storage even
+                          * if the new size is much smaller — we'd just be
+                          * thrashing linearAlloc next time the app grows back
+                          * up. Vita's orphan-trick same idea. */
+                         (is_stream || slot->capacity <= desired_bytes * 4);
+
+    if (!reuse_existing) {
         int new_capacity = desired_bytes;
+        /* For streaming VBOs, round capacity up to next power of two so we
+         * stop reallocating on each minor size jiggle. */
+        if (is_stream) {
+            int p = 256;
+            while (p < new_capacity) p <<= 1;
+            new_capacity = p;
+        }
 
         void *new_buf = linearAlloc((size_t) new_capacity);
         if (!new_buf) {
@@ -263,22 +244,18 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
     }
 
     slot->size = size;
-    slot->is_stream = (usage == GL_STREAM_DRAW);
+    slot->is_stream = is_stream;
     slot->storage_kind = desired_kind;
     slot->storage_stride = (uint8_t) desired_stride;
 
     if (data && slot->data) {
-        if (pack_ptc) {
-            const uint8_t *src = (const uint8_t *) data;
-            uint8_t *dst = (uint8_t *) slot->data;
-            int vertex_count = size / NOVA_VBO_PTC_RAW_STRIDE;
-            for (int i = 0; i < vertex_count; i++) {
-                pack_ptc_vertex(dst + i * NOVA_VBO_PTC_PACKED_STRIDE, src + i * NOVA_VBO_PTC_RAW_STRIDE);
-            }
-        } else {
-            memcpy(slot->data, data, size);
-        }
-        GSPGPU_FlushDataCache(slot->data, (u32) desired_bytes);
+        /* pack_ptc path removed — see can_pack_ptc_vbo comment above. */
+        memcpy(slot->data, data, size);
+        /* Flush only the bytes we actually wrote (size, not the rounded-up
+         * capacity). Big STREAM VBOs grew to capacity=2*size with the
+         * power-of-two rule above; flushing the whole capacity would double
+         * the cache-flush cost for nothing. */
+        GSPGPU_FlushDataCache(slot->data, (u32) size);
     }
 }
 
@@ -286,10 +263,33 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
     GLuint id = 0;
     if (target == GL_ARRAY_BUFFER) id = g.bound_array_buffer;
     else if (target == GL_ELEMENT_ARRAY_BUFFER) id = g.bound_element_array_buffer;
+    else {
+        g.last_error = GL_INVALID_ENUM;
+        return;
+    }
 
-    if (id == 0 || id >= NOVA_MAX_VBOS) return;
+    if (offset < 0 || size < 0) {
+        g.last_error = GL_INVALID_VALUE;
+        return;
+    }
+    if (id == 0) {
+        g.last_error = GL_INVALID_OPERATION;
+        return;
+    }
+    if (id >= NOVA_MAX_VBOS) return;
+    if (size == 0 || !data) return;
 
     VBOSlot *slot = &g.vbos[id];
+
+#ifdef NOVAGL_STRICT_BUFFERSUBDATA
+    /* Spec behaviour: writing past the buffer's data store is
+     * GL_INVALID_VALUE with no effect. Default build keeps the lenient
+     * auto-grow below because several ports rely on it. */
+    if (!slot->allocated || offset + size > slot->size) {
+        g.last_error = GL_INVALID_VALUE;
+        return;
+    }
+#endif
 
     if (vbo_is_packed_ptc(slot)) {
         vbo_convert_slot_to_raw(slot);
@@ -338,7 +338,15 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
 }
 
 void glReadBuffer(int x) {
-    printf("[Nova]: Trying to read buffer");
+    /* Not supported (single color buffer per target on PICA). Print once,
+     * not on every call — some engines call this per-frame.
+     * TODO: change the signature to (GLenum mode) here AND in NovaGL.h. */
+    (void) x;
+    static int warned = 0;
+    if (!warned) {
+        printf("[Nova]: glReadBuffer not supported\n");
+        warned = 1;
+    }
 }
 
 /* ------------------------------------------------------------------------

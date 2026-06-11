@@ -6,6 +6,13 @@
 #include "utils.h"
 
 void glClear(GLbitfield mask) {
+    /* Spec: any bit outside the three valid ones is GL_INVALID_VALUE and the
+     * clear must not happen. (GL_ACCUM_BUFFER_BIT doesn't exist in ES.) */
+    if (mask & ~(GLbitfield)(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) {
+        g.last_error = GL_INVALID_VALUE;
+        return;
+    }
+
     C3D_ClearBits bits = (C3D_ClearBits) 0;
     u32 color = 0;
     u32 depth = 0;
@@ -19,9 +26,26 @@ void glClear(GLbitfield mask) {
                 ((u32) (g.clear_a * 255.0f + 0.5f) << 0);
     }
 
-    if (mask & GL_DEPTH_BUFFER_BIT) {
+    /* PICA's depth/stencil buffer is interleaved D24S8 and shares a single
+     * clear register, so depth and stencil can't be cleared independently.
+     *
+     * GL_DEPTH_BUFFER_BIT and/or GL_STENCIL_BUFFER_BIT both map to
+     * C3D_CLEAR_DEPTH; we always pack BOTH the depth half (from clear_depth)
+     * and the stencil half (from clear_stencil) into the register, so:
+     *   - depth-only clear also rewrites stencil to clear_stencil,
+     *   - stencil-only clear also rewrites depth to clear_depth.
+     * That's a documented hardware compromise: preserving the other channel
+     * would require reading the buffer back. Packing both halves is strictly
+     * better than the previous behaviour where a stencil-only clear wrote
+     * depth=0 (near plane in PICA's inverted convention => everything
+     * z-rejected) and dropped the stencil clear value entirely.
+     *
+     * PICA depth is stored inverted vs GL (see apply_depth_map): GL's
+     * glClearDepth(1.0) = far plane = PICA value 0. */
+    if (mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) {
         bits |= C3D_CLEAR_DEPTH;
-        depth = (u32) (g.clear_depth * 0xFFFFFF);
+        u32 dval = (u32) ((1.0f - g.clear_depth) * 0xFFFFFF);
+        depth = dval | (((u32) g.clear_stencil & 0xFF) << 24);
     }
 
     if (bits && g.current_target) {
@@ -46,6 +70,5 @@ void glClearDepth(GLclampd depth) {
 }
 
 void glClearStencil(GLint s) {
-    (void) s;
-    /* Stencil clear not fully implemented */
+    g.clear_stencil = s & 0xFF;
 }

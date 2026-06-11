@@ -7,11 +7,17 @@
 
 void glFogf(GLenum pname, GLfloat param) {
     switch (pname) {
-        case GL_FOG_MODE: if (g.fog_mode != param) {
-                g.fog_mode = param;
+        case GL_FOG_MODE: {
+            /* fog_mode is GLenum; comparing the freshly-cast float against the
+             * stored enum lets us notice "no change" cases (otherwise this dirties
+             * the fog every frame because float->uint coercion produces a new
+             * compare each time). */
+            GLenum new_mode = (GLenum) param;
+            if (g.fog_mode != new_mode) {
+                g.fog_mode = new_mode;
                 g.fog_dirty = 1;
             }
-            break;
+        } break;
         case GL_FOG_START: if (g.fog_start != param) {
                 g.fog_start = param;
                 g.fog_dirty = 1;
@@ -22,7 +28,13 @@ void glFogf(GLenum pname, GLfloat param) {
                 g.fog_dirty = 1;
             }
             break;
-        case GL_FOG_DENSITY: if (g.fog_density != param) {
+        case GL_FOG_DENSITY:
+            /* Spec: negative density is GL_INVALID_VALUE, state unchanged. */
+            if (param < 0.0f) {
+                g.last_error = GL_INVALID_VALUE;
+                break;
+            }
+            if (g.fog_density != param) {
                 g.fog_density = param;
                 g.fog_dirty = 1;
             }
@@ -43,22 +55,29 @@ void glFogfv(GLenum pname, const GLfloat *params) {
 
 void glFogi(GLenum pname, GLint param) {
     switch (pname) {
-        case GL_FOG_MODE: if (g.fog_mode != param) {
-                g.fog_mode = param;
+        case GL_FOG_MODE: {
+            GLenum new_mode = (GLenum) param;
+            if (g.fog_mode != new_mode) {
+                g.fog_mode = new_mode;
                 g.fog_dirty = 1;
             }
-            break;
-        case GL_FOG_START: if (g.fog_start != param) {
+        } break;
+        case GL_FOG_START: if (g.fog_start != (GLfloat) param) {
                 g.fog_start = (GLfloat) param;
                 g.fog_dirty = 1;
             }
             break;
-        case GL_FOG_END: if (g.fog_end != param) {
+        case GL_FOG_END: if (g.fog_end != (GLfloat) param) {
                 g.fog_end = (GLfloat) param;
                 g.fog_dirty = 1;
             }
             break;
-        case GL_FOG_DENSITY: if (g.fog_density != param) {
+        case GL_FOG_DENSITY:
+            if (param < 0) {
+                g.last_error = GL_INVALID_VALUE;
+                break;
+            }
+            if (g.fog_density != (GLfloat) param) {
                 g.fog_density = (GLfloat) param;
                 g.fog_dirty = 1;
             }
