@@ -514,15 +514,21 @@ static void upload_texture_pixels(C3D_Tex *tex, GPU_TEXCOLOR fmt, int pot_w, int
         C3D_TexFlush(tex);
         return;
     }
-    /* HW-accelerated path. Source must be in **linear** RAM for the GX DMA
-     * engine to read it — game-heap pointers will silently produce garbage or
-     * crash the GPU. Easiest safe strategy: always stage through tex_staging
-     * (which IS linearAlloc'd inside get_tex_staging). Skip the path if
-     * staging fails or the texture is bigger than what we want to commit.
+    /* HW-accelerated path — OPT-IN ONLY (-DNOVAGL_ENABLE_HW_SWIZZLE=1).
      *
-     * Compile with -DNOVAGL_DISABLE_HW_SWIZZLE=1 to bisect this if something
-     * upstream broke after the GX-DMA path was introduced. */
-#ifndef NOVAGL_DISABLE_HW_SWIZZLE
+     * Disabled by default because Citra's emulation of GX DisplayTransfer
+     * linear→tiled for arbitrary texture dimensions is unreliable (it's a
+     * path almost no homebrew exercises — Citra mainly emulates the
+     * framebuffer-present transfer), producing black/garbage textures for
+     * everything that takes this path while the CPU swizzler renders fine.
+     * On real hardware the path is believed correct (byte order + flip are
+     * handled in the staging copy below), but until it's validated on a
+     * console, correctness beats the ~10x swizzle speedup.
+     *
+     * Source must be in **linear** RAM for the GX DMA engine to read it —
+     * game-heap pointers will silently produce garbage or crash the GPU,
+     * hence the tex_staging copy (which IS linearAlloc'd). */
+#ifdef NOVAGL_ENABLE_HW_SWIZZLE
     if (can_use_hw_swizzle(fmt, pot_w, pot_h, width, height, copy_w, copy_h, src_x0, src_y0,
                            format, type, unpack_alignment)) {
         int bytes = pot_w * pot_h * gpu_texfmt_bpp(fmt);

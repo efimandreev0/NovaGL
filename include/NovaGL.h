@@ -379,6 +379,10 @@ typedef float GLdouble;
 #define GL_COMBINE_ALPHA_ARB              GL_COMBINE_ALPHA
 #define GL_INTERPOLATE                    0x8575
 #define GL_SUBTRACT                       0x84E7
+/* NovaGL extension: PICA's GPU_MULTIPLY_ADD combine func — out = (s0*s1)+s2.
+ * Standard GL_COMBINE has no equivalent; valid in NovaTevStageGL.combine_*
+ * (maps through gl_to_gpu_combinefunc). Value outside standard GL ranges. */
+#define GL_MULT_ADD_NOVA                  0xA0F0
 #define GL_CONSTANT                       0x8576
 #define GL_PRIMARY_COLOR                  0x8577
 #define GL_PREVIOUS                       0x8578

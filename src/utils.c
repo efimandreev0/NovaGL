@@ -619,10 +619,14 @@ static GPU_TEVSRC get_tev_src(GLint gl_src, GPU_TEVSRC tex_src, GPU_TEVSRC prev_
 }
 
 static int get_tev_op_rgb(GLint gl_op) {
-    if (gl_op == 0x8590 /* GL_SRC_COLOR */) return GPU_TEVOP_RGB_SRC_COLOR;
-    if (gl_op == 0x8598 /* GL_ONE_MINUS_SRC_COLOR */) return GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR;
+    /* NB: the operand VALUES are GL_SRC_COLOR..GL_ONE_MINUS_SRC_ALPHA
+     * (0x0300..0x0303, NovaGL.h). The old code compared against 0x8590/
+     * 0x8598/0x859A — those are the OPERANDn_RGB *pname* constants, not
+     * values — so ONE_MINUS_* silently decoded as plain SRC_COLOR. */
+    if (gl_op == GL_SRC_COLOR) return GPU_TEVOP_RGB_SRC_COLOR;
+    if (gl_op == GL_ONE_MINUS_SRC_COLOR) return GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR;
     if (gl_op == GL_SRC_ALPHA) return GPU_TEVOP_RGB_SRC_ALPHA;
-    if (gl_op == 0x859A /* GL_ONE_MINUS_SRC_ALPHA */) return GPU_TEVOP_RGB_ONE_MINUS_SRC_ALPHA;
+    if (gl_op == GL_ONE_MINUS_SRC_ALPHA) return GPU_TEVOP_RGB_ONE_MINUS_SRC_ALPHA;
     return GPU_TEVOP_RGB_SRC_COLOR;
 }
 
@@ -631,7 +635,7 @@ static int get_tev_op_rgb(GLint gl_op) {
  * SRC_R / SRC_G / SRC_B / their complements). For our use case we only need
  * the (1-)alpha forms — the R/G/B-broadcast variants are unused. */
 static int get_tev_op_alpha(GLint gl_op) {
-    if (gl_op == 0x859A /* GL_ONE_MINUS_SRC_ALPHA */) return GPU_TEVOP_A_ONE_MINUS_SRC_ALPHA;
+    if (gl_op == GL_ONE_MINUS_SRC_ALPHA) return GPU_TEVOP_A_ONE_MINUS_SRC_ALPHA;
     return GPU_TEVOP_A_SRC_ALPHA;
 }
 
@@ -671,6 +675,7 @@ static GPU_COMBINEFUNC gl_to_gpu_combinefunc(GLenum gl_func) {
         case GL_INTERPOLATE: return GPU_INTERPOLATE;
         case GL_SUBTRACT:    return GPU_SUBTRACT;
         case GL_DOT3_RGBA_ARB: return GPU_DOT3_RGBA;
+        case GL_MULT_ADD_NOVA: return GPU_MULTIPLY_ADD; /* (s0*s1)+s2 */
         default:             return GPU_REPLACE;
     }
 }
@@ -678,6 +683,18 @@ static GPU_COMBINEFUNC gl_to_gpu_combinefunc(GLenum gl_func) {
 void novaSetExplicitTevStages(int count, const NovaTevStageGL *stages) {
     if (count < 0) count = 0;
     if (count > NOVA_TEV_MAX_STAGES) count = NOVA_TEV_MAX_STAGES;
+    /* The fast3d backend re-stages the TEV programme on EVERY draw (the
+     * per-draw constants force it to). Most consecutive draws share the same
+     * programme, so skip the dirty-flag when nothing changed — otherwise we'd
+     * rewrite all 6 TEV stage registers per draw call. memcmp is safe: the
+     * struct is all 4-byte members (no padding) and callers build it with
+     * memset+assignments. */
+    if (count == g.explicit_tev_count &&
+        (count == 0 ||
+         (stages && memcmp(g.explicit_tev_stages, stages,
+                           (size_t) count * sizeof(NovaTevStageGL)) == 0))) {
+        return;
+    }
     g.explicit_tev_count = count;
     if (count > 0 && stages) {
         memcpy(g.explicit_tev_stages, stages, count * sizeof(NovaTevStageGL));

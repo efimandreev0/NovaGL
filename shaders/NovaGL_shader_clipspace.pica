@@ -28,6 +28,7 @@
 .out outPosition   position
 .out outColor      color
 .out outTexcoord0  texcoord0
+.out outTexcoord1  texcoord1
 
 .constf CONST1 (1.0, 0.0, 0.0, 0.0)
 .constf my_normalize (0.00392156, 0.00392156, 0.00392156, 0.00392156)
@@ -60,6 +61,12 @@
 
     ; UV passthrough — texcoord loader is 2 floats, PICA pads to (s, t, 0, 1).
     mov outTexcoord0, inTexcoord
+    ; PICA texture unit 1 samples with TEXCOORD1, which is a separate
+    ; interpolant — without writing it, any TEV stage referencing
+    ; GPU_TEXTURE1 (fast3d TRILERP mip blends) samples with garbage
+    ; coordinates. Mirror unit 0's UV; N64 mip levels share normalized
+    ; coordinates, so this matches what the RDP did.
+    mov outTexcoord1, inTexcoord
 
     end
 .end
