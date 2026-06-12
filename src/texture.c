@@ -169,7 +169,8 @@ int nova_texture_cache_load(uint32_t hash, int *out_orig_w, int *out_orig_h) {
 
     if (slot->allocated) {
         if (slot->fmt != fmt || slot->pot_w != (int) hdr.pot_w || slot->pot_h != (int) hdr.pot_h) {
-            C3D_TexDelete(&slot->tex);
+            /* Deferred delete — queued draws may still sample the old image. */
+            nova_tex_gc_push(&slot->tex);
             slot->allocated = 0;
         }
     }
@@ -318,11 +319,58 @@ static void apply_slot_params_to_tex(C3D_Tex *tex, const TexSlot *slot) {
     C3D_TexSetWrap(tex, ws, wt);
 }
 
+/* ── Deferred texture deletion (orphaning) ────────────────────────────────
+ *
+ * NovaGL records draw commands all frame; the GPU executes them at
+ * C3D_FrameEnd. Freeing or overwriting a texture's storage mid-frame
+ * therefore corrupts any QUEUED draw that still references it. fast3d hits
+ * this constantly: its LRU texture cache evicts and re-uploads texture ids
+ * mid-frame while a level streams in — the "textures randomly swap to other
+ * textures while moving" bug in PD. Desktop GL drivers orphan storage
+ * internally; we do the same: old storage goes into this GC and is only
+ * C3D_TexDelete'd once the frame that referenced it has fully executed
+ * (novaSwapBuffers collects after C3D_FrameBegin's SYNCDRAW wait). */
+#define NOVA_TEX_GC_SLOTS 128
+static C3D_Tex s_tex_gc[NOVA_TEX_GC_SLOTS];
+static int s_tex_gc_count = 0;
+
+void nova_tex_gc_collect(void) {
+    for (int i = 0; i < s_tex_gc_count; i++) {
+        C3D_TexDelete(&s_tex_gc[i]);
+    }
+    s_tex_gc_count = 0;
+}
+
+void nova_tex_gc_push(C3D_Tex *tex) {
+    if (s_tex_gc_count >= NOVA_TEX_GC_SLOTS) {
+        /* GC full mid-frame (128 orphans in one frame — extreme). Flush the
+         * pending draws and wait so the entries become reclaimable. */
+        C3D_FrameSplit(0);
+        gspWaitForP3D();
+        nova_tex_gc_collect();
+    }
+    s_tex_gc[s_tex_gc_count++] = *tex;
+    memset(tex, 0, sizeof(*tex));
+}
+
 static void free_texture_storage(TexSlot *slot) {
     if (slot->allocated) {
-        C3D_TexDelete(&slot->tex);
+        nova_tex_gc_push(&slot->tex);
     }
-    memset(slot, 0, sizeof(TexSlot));
+    /* Clear storage-related state ONLY. The old memset(slot, 0, sizeof)
+     * also wiped in_use and the sampler params, so re-defining a bound
+     * texture silently "deleted" it: the next glBindTexture saw in_use==0
+     * and re-created the slot with default filters/wrap. */
+    slot->allocated = 0;
+    slot->has_mipmap = 0;
+    slot->is_solid_optimized = 0;
+    slot->fmt = (GPU_TEXCOLOR) 0;
+    slot->pot_w = 0;
+    slot->pot_h = 0;
+    slot->width = 0;
+    slot->height = 0;
+    slot->orig_width = 0;
+    slot->orig_height = 0;
 }
 
 static void init_texture_defaults(TexSlot *slot) {
@@ -774,10 +822,13 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     if (pot_w < 8) pot_w = 8;
     if (pot_h < 8) pot_h = 8;
 
+    /* Re-definition ALWAYS orphans the old storage — even when format and
+     * size match. Overwriting the texel data in place corrupts queued draws
+     * that still sample the old image this frame (see tex_gc_push above).
+     * Fresh linearAlloc per re-upload; the old block is reclaimed once the
+     * frame completes. */
     if (slot->allocated) {
-        if (slot->fmt != gpu_fmt || slot->pot_w != pot_w || slot->pot_h != pot_h) {
-            free_texture_storage(slot);
-        }
+        free_texture_storage(slot);
     }
 
     slot->fmt = gpu_fmt;
@@ -791,12 +842,8 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     // is_solid textures stay 8x8 — never worth mipping.
     int want_mips = slot->generate_mipmap && !is_solid && pot_w >= 2 && pot_h >= 2;
 
-    if (slot->allocated && slot->has_mipmap != want_mips) {
-        // Mip-state change requires a re-init: C3D_TexInit and C3D_TexInitMipMap
-        // allocate different amounts of memory.
-        free_texture_storage(slot);
-    }
-
+    /* (The old "mip-state changed → re-init" check is gone: re-definition
+     * orphans unconditionally above, so the slot is never allocated here.) */
     if (!slot->allocated) {
         bool ok = want_mips
             ? C3D_TexInitMipmap(&slot->tex, pot_w, pot_h, gpu_fmt)
@@ -931,9 +978,12 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
                 memset(new_tex.data, col, full_pot_w * full_pot_h);
             }
 
-            // ВАЖНО: Ждем пока GPU закончит работу, чтобы не удалить память во время рендера
-            gspWaitForP3D();
-            C3D_TexDelete(&old_tex);
+            /* Deferred delete via the texture GC — the old gspWaitForP3D
+             * here didn't even flush the still-CPU-side command buffer
+             * (no FrameSplit), so it stalled without protecting anything.
+             * The GC keeps the old storage alive until the frame's queued
+             * draws have executed. */
+            nova_tex_gc_push(&old_tex);
 
             slot->tex = new_tex;
             slot->pot_w = full_pot_w;
@@ -1121,10 +1171,10 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, G
         if (pot_w < 8) pot_w = 8;
         if (pot_h < 8) pot_h = 8;
 
+        /* Always orphan on re-definition — in-place overwrite corrupts
+         * queued draws (see tex_gc_push). */
         if (slot->allocated) {
-            if (slot->fmt != GPU_ETC1 || slot->pot_w != pot_w || slot->pot_h != pot_h) {
-                free_texture_storage(slot);
-            }
+            free_texture_storage(slot);
         }
         if (!slot->allocated) {
             if (!C3D_TexInit(&slot->tex, pot_w, pot_h, GPU_ETC1)) {

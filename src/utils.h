@@ -55,6 +55,15 @@ C3D_Mtx *cur_stack(void);
 
 void *get_tex_staging(int size);
 
+/* Deferred texture deletion (orphaning GC in texture.c). Push retires a
+ * C3D_Tex whose storage may still be referenced by THIS frame's queued
+ * draws — it is deleted later instead of immediately (the struct is copied;
+ * *tex is zeroed). Collect reclaims everything pushed during the previous
+ * frame; call ONLY when the GPU is known to be done with it —
+ * novaSwapBuffers does it right after C3D_FrameBegin's SYNCDRAW wait. */
+void nova_tex_gc_push(C3D_Tex *tex);
+void nova_tex_gc_collect(void);
+
 uint32_t morton_interleave(uint32_t x, uint32_t y);
 
 void swizzle_8bit(uint8_t *dst, const uint8_t *src, int src_w, int src_h, int pot_w, int pot_h);

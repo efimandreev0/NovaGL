@@ -49,6 +49,16 @@ void glClear(GLbitfield mask) {
     }
 
     if (bits && g.current_target) {
+        /* C3D_RenderTargetClear is an IMMEDIATE GX memory-fill, while the
+         * draws recorded so far only reach the GPU at C3D_FrameEnd. Without
+         * a split, a mid-frame clear lands BEFORE this frame's earlier draws
+         * on the GPU timeline. PD's gun pass depends on the ordering:
+         * viPrepareZbuf clears depth BETWEEN the world and the viewmodel,
+         * and with the clear hoisted to frame start the gun was depth-tested
+         * against the world (gun rendered under the floor). The split pushes
+         * the recorded command list into the GX queue ahead of the fill —
+         * the queue executes FIFO, so no CPU-side wait is needed. */
+        C3D_FrameSplit(0);
         C3D_RenderTargetClear(g.current_target, bits, color, depth);
     }
 }

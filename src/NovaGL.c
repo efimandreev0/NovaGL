@@ -368,6 +368,12 @@ void novaSwapBuffers(void) {
 
     C3D_FrameBegin(NOVAGL_FRAME_MODE);
 
+    /* SYNCDRAW above waited for the previous frame to finish on the GPU, so
+     * texture storage orphaned during that frame is reclaimable now. (If
+     * NOVAGL_FRAME_MODE is ever overridden to async (0), this would need a
+     * two-frame delay instead.) */
+    nova_tex_gc_collect();
+
     g.client_array_buf_offset = 0;
     g.index_buf_offset = 0;
 
@@ -386,6 +392,9 @@ void nova_fini(void) {
     // кадр и ждём GPU.
     C3D_FrameEnd(0);
     gspWaitForP3D();
+
+    /* GPU is idle now — flush any texture storage still parked in the GC. */
+    nova_tex_gc_collect();
 
     if (g.client_array_buf) linearFree(g.client_array_buf);
     if (g.index_buf) linearFree(g.index_buf);
