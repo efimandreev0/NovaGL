@@ -844,6 +844,29 @@ GLenum glGetError(void) {
     return e;
 }
 
+void novaDrawClipspaceTris(const void *verts, int vertex_count) {
+    if (!verts || vertex_count <= 0) return;
+    if (g.cull_face_enabled && g.cull_face_mode == GL_FRONT_AND_BACK) return;
+
+    apply_gpu_state();
+
+    const int bytes = vertex_count * 28;
+    if (bytes > g.client_array_buf_size) {
+        g.last_error = GL_OUT_OF_MEMORY;
+        return;
+    }
+    uint8_t *dst = (uint8_t *) linear_alloc_ring(g.client_array_buf, &g.client_array_buf_offset,
+                                                 bytes, g.client_array_buf_size);
+    memcpy(dst, verts, (size_t) bytes);
+    GSPGPU_FlushDataCache(dst, (u32) bytes);
+
+    /* pos 4×float + uv 2×float + colour 4×u8 — exactly the loader layout
+     * nova_setup_attr_info(4) configures, 28-byte stride. */
+    nova_setup_attr_info(4);
+    nova_setup_buf_info(dst, 28);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, vertex_count);
+}
+
 void glFlush(void) {
     C3D_FrameSplit(0);
 }

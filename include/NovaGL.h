@@ -1247,6 +1247,22 @@ void novaSetExplicitTevStages(int count, const NovaTevStageGL *stages);
 void novaClearExplicitTevStages(void);
 
 /* ------------------------------------------------------------------------
+ * Pre-packed clip-space triangle fast lane
+ * ------------------------------------------------------------------------
+ * Draws GL_TRIANGLES from vertices ALREADY packed in NovaGL's native
+ * interleaved layout for the clipspace shader:
+ *     float   x, y, z, w;   // clip-space position (pre perspective divide)
+ *     float   u, v;         // texcoord0 (texcoord1 mirrors it in-shader)
+ *     uint8_t r, g, b, a;   // vertex colour
+ * = 28 bytes per vertex. Skips the glVertexPointer/glDrawArrays conversion
+ * path entirely: one memcpy into the GPU ring instead of a per-vertex
+ * repack + float→byte colour conversion. Built for fast3d-style backends
+ * that already assemble vertices per draw. All current GL state (TEV,
+ * blending, depth, bound textures) applies as usual. Only meaningful while
+ * novaBeginClipSpace2D mode is active. */
+void novaDrawClipspaceTris(const void *verts, int vertex_count);
+
+/* ------------------------------------------------------------------------
  * Raw clip-space passthrough (UI/HUD fast lane)
  * ------------------------------------------------------------------------
  * Between novaBeginClipSpace2D() and novaEndClipSpace2D() NovaGL switches

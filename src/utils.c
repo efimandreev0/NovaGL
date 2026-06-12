@@ -1271,6 +1271,20 @@ void nova_setup_buf_info(void *base, int stride) {
     s_buf_stride = stride;
 }
 
+/* Invalidate the TexBind skip-cache for ONE texture id. Required whenever a
+ * texture's storage is re-created at the same id (orphaning re-upload): the
+ * C3D_Tex gets a NEW data pointer, but the per-unit skip-cache would say
+ * "already bound" and the GPU would keep sampling the old block — which the
+ * texture GC frees a frame later (manifested as textures turning black /
+ * garbage moments after streaming-in). */
+void nova_invalidate_tex_bind(GLuint tex_id) {
+    for (int u = 0; u < 3; u++) {
+        if (s_last_tex_bound[u] == tex_id) {
+            s_last_tex_bound[u] = 0xFFFFFFFFu;
+        }
+    }
+}
+
 void nova_invalidate_state_cache(void) {
     s_last_writemask          = (GPU_WRITEMASK)-1;
     s_last_depth_test_enabled = -1;

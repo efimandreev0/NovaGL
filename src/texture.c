@@ -32,7 +32,12 @@ static void apply_slot_params_to_tex(C3D_Tex *tex, const TexSlot *slot);
 //   <data_size> bytes of morton-swizzled pixels (byte-for-byte what goes into C3D_Tex->data)
 
 #define NOVA_TEXCACHE_MAGIC    0x5753564Eu   // 'NVSW' LE
-#define NOVA_TEXCACHE_VERSION  1u
+/* v2: invalidates every entry written while the (now opt-in) GX HW-swizzle
+ * path was scrambling RGBA byte order — those cache files contain
+ * channel-swapped texel data ("red instead of blue" forever, even after the
+ * upload path was fixed, because the poisoned conversion was re-served from
+ * disk). */
+#define NOVA_TEXCACHE_VERSION  2u
 
 typedef struct {
     uint32_t magic;
@@ -171,6 +176,7 @@ int nova_texture_cache_load(uint32_t hash, int *out_orig_w, int *out_orig_h) {
         if (slot->fmt != fmt || slot->pot_w != (int) hdr.pot_w || slot->pot_h != (int) hdr.pot_h) {
             /* Deferred delete — queued draws may still sample the old image. */
             nova_tex_gc_push(&slot->tex);
+            nova_invalidate_tex_bind((GLuint) (slot - g.textures));
             slot->allocated = 0;
         }
     }
@@ -356,6 +362,9 @@ void nova_tex_gc_push(C3D_Tex *tex) {
 static void free_texture_storage(TexSlot *slot) {
     if (slot->allocated) {
         nova_tex_gc_push(&slot->tex);
+        /* Storage re-created at the same id ⇒ data pointer changes; the
+         * TexBind skip-cache must not treat the id as "already bound". */
+        nova_invalidate_tex_bind((GLuint) (slot - g.textures));
     }
     /* Clear storage-related state ONLY. The old memset(slot, 0, sizeof)
      * also wiped in_use and the sampler params, so re-defining a bound
@@ -984,6 +993,7 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
              * The GC keeps the old storage alive until the frame's queued
              * draws have executed. */
             nova_tex_gc_push(&old_tex);
+            nova_invalidate_tex_bind((GLuint) (slot - g.textures));
 
             slot->tex = new_tex;
             slot->pot_w = full_pot_w;
@@ -1096,29 +1106,44 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) {
 
     /* Spec: invalid enum values are GL_INVALID_ENUM and must NOT modify
      * state. Previously garbage params were stored verbatim and silently
-     * decoded as NEAREST / REPEAT downstream. */
+     * decoded as NEAREST / REPEAT downstream.
+     *
+     * Unchanged-value early-outs: the fast3d backend re-applies sampler
+     * params unconditionally per draw flush (per-texture state has no
+     * reliable cross-draw cache on its side), so the common case here is
+     * "same value again" — skip the apply_slot_params_to_tex recompute. */
     switch (pname) {
         case GL_TEXTURE_MIN_FILTER:
             switch (param) {
                 case GL_NEAREST: case GL_LINEAR:
                 case GL_NEAREST_MIPMAP_NEAREST: case GL_NEAREST_MIPMAP_LINEAR:
                 case GL_LINEAR_MIPMAP_NEAREST: case GL_LINEAR_MIPMAP_LINEAR:
+                    if (slot->min_filter == param) return;
                     slot->min_filter = param; break;
                 default: g.last_error = GL_INVALID_ENUM; return;
             }
             break;
         case GL_TEXTURE_MAG_FILTER:
-            if (param == GL_NEAREST || param == GL_LINEAR) slot->mag_filter = param;
+            if (param == GL_NEAREST || param == GL_LINEAR) {
+                if (slot->mag_filter == param) return;
+                slot->mag_filter = param;
+            }
             else { g.last_error = GL_INVALID_ENUM; return; }
             break;
         case GL_TEXTURE_WRAP_S:
             if (param == GL_REPEAT || param == GL_CLAMP_TO_EDGE ||
-                param == GL_CLAMP || param == GL_MIRRORED_REPEAT) slot->wrap_s = param;
+                param == GL_CLAMP || param == GL_MIRRORED_REPEAT) {
+                if (slot->wrap_s == param) return;
+                slot->wrap_s = param;
+            }
             else { g.last_error = GL_INVALID_ENUM; return; }
             break;
         case GL_TEXTURE_WRAP_T:
             if (param == GL_REPEAT || param == GL_CLAMP_TO_EDGE ||
-                param == GL_CLAMP || param == GL_MIRRORED_REPEAT) slot->wrap_t = param;
+                param == GL_CLAMP || param == GL_MIRRORED_REPEAT) {
+                if (slot->wrap_t == param) return;
+                slot->wrap_t = param;
+            }
             else { g.last_error = GL_INVALID_ENUM; return; }
             break;
         case GL_GENERATE_MIPMAP:

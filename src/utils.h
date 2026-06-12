@@ -64,6 +64,11 @@ void *get_tex_staging(int size);
 void nova_tex_gc_push(C3D_Tex *tex);
 void nova_tex_gc_collect(void);
 
+/* Drop the per-unit TexBind skip-cache entries referring to `tex_id` so the
+ * next draw re-emits the bind. MUST be called whenever a texture's storage
+ * is re-created under the same id (the C3D_Tex data pointer changed). */
+void nova_invalidate_tex_bind(GLuint tex_id);
+
 uint32_t morton_interleave(uint32_t x, uint32_t y);
 
 void swizzle_8bit(uint8_t *dst, const uint8_t *src, int src_w, int src_h, int pot_w, int pot_h);
