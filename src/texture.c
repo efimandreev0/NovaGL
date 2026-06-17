@@ -1434,46 +1434,127 @@ void glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x
     glCopyTexSubImage2D(target, level, 0, 0, x, y, width, height);
 }
 
-void glTexGend(GLenum coord, GLenum pname, GLdouble param) {
-    (void) coord;
-    (void) pname;
-    (void) param;
+
+static NovaTexGenCoord g_texgen[NOVA_MAX_TEXTURE_UNITS][4] = {{{0}}};
+static int g_texgen_init = 0;
+
+static int texgen_coord_index(GLenum coord) {
+    switch (coord) {
+        case GL_S: return 0;
+        case GL_T: return 1;
+        case GL_R: return 2;
+        case GL_Q: return 3;
+        default:   return -1;
+    }
 }
 
-void glTexGendv(GLenum coord, GLenum pname, const GLdouble *params) {
-    (void) coord;
-    (void) pname;
-    (void) params;
-}
-
-void glTexGenf(GLenum coord, GLenum pname, GLfloat param) {
-    (void) coord;
-    (void) pname;
-    (void) param;
-}
-
-void glTexGenfv(GLenum coord, GLenum pname, const GLfloat *params) {
-    (void) coord;
-    (void) pname;
-    (void) params;
+static void texgen_ensure_defaults(void) {
+    if (g_texgen_init) return;
+    g_texgen_init = 1;
+    for (int u = 0; u < NOVA_MAX_TEXTURE_UNITS; u++) {
+        for (int c = 0; c < 4; c++) {
+            g_texgen[u][c].mode = GL_EYE_LINEAR;
+            /* Spec defaults: S plane = (1,0,0,0), T = (0,1,0,0), R/Q = 0. */
+            g_texgen[u][c].object_plane[0] = (c == 0) ? 1.0f : 0.0f;
+            g_texgen[u][c].object_plane[1] = (c == 1) ? 1.0f : 0.0f;
+            g_texgen[u][c].object_plane[2] = 0.0f;
+            g_texgen[u][c].object_plane[3] = 0.0f;
+            memcpy(g_texgen[u][c].eye_plane, g_texgen[u][c].object_plane, sizeof(GLfloat) * 4);
+        }
+    }
 }
 
 void glTexGeni(GLenum coord, GLenum pname, GLint param) {
-    (void) coord;
-    (void) pname;
-    (void) param;
+    texgen_ensure_defaults();
+    int c = texgen_coord_index(coord);
+    if (c < 0) { g.last_error = GL_INVALID_ENUM; return; }
+    if (pname != GL_TEXTURE_GEN_MODE) { g.last_error = GL_INVALID_ENUM; return; }
+    if (param != GL_OBJECT_LINEAR && param != GL_EYE_LINEAR && param != GL_SPHERE_MAP) {
+        g.last_error = GL_INVALID_ENUM;
+        return;
+    }
+    int u = g.active_texture_unit;
+    if (u < 0 || u >= NOVA_MAX_TEXTURE_UNITS) u = 0;
+    g_texgen[u][c].mode = (GLenum) param;
+}
+
+void glTexGenf(GLenum coord, GLenum pname, GLfloat param) {
+    /* The only scalar pname is GL_TEXTURE_GEN_MODE; planes need the *v form. */
+    glTexGeni(coord, pname, (GLint) param);
+}
+
+void glTexGend(GLenum coord, GLenum pname, GLdouble param) {
+    glTexGeni(coord, pname, (GLint) param);
+}
+
+void glTexGenfv(GLenum coord, GLenum pname, const GLfloat *params) {
+    texgen_ensure_defaults();
+    if (!params) return;
+    int c = texgen_coord_index(coord);
+    if (c < 0) { g.last_error = GL_INVALID_ENUM; return; }
+    int u = g.active_texture_unit;
+    if (u < 0 || u >= NOVA_MAX_TEXTURE_UNITS) u = 0;
+    NovaTexGenCoord *tg = &g_texgen[u][c];
+    switch (pname) {
+        case GL_TEXTURE_GEN_MODE:
+            glTexGeni(coord, pname, (GLint) params[0]);
+            break;
+        case GL_OBJECT_PLANE:
+            memcpy(tg->object_plane, params, sizeof(GLfloat) * 4);
+            break;
+        case GL_EYE_PLANE:
+            /* Spec: the eye plane is stored transformed by the current
+             * inverse-modelview at call time. NovaGL keeps the raw plane
+             * (the modelview here is the GL fixed-function stack); a client
+             * relying on the exact eye-linear transform would need that
+             * multiply — recorded verbatim is correct for the common
+             * identity-modelview setup. */
+            memcpy(tg->eye_plane, params, sizeof(GLfloat) * 4);
+            break;
+        default:
+            g.last_error = GL_INVALID_ENUM;
+            break;
+    }
 }
 
 void glTexGeniv(GLenum coord, GLenum pname, const GLint *params) {
-    (void) coord;
-    (void) pname;
-    (void) params;
+    if (!params) return;
+    if (pname == GL_TEXTURE_GEN_MODE) {
+        glTexGeni(coord, pname, params[0]);
+        return;
+    }
+    GLfloat f[4] = {
+        (GLfloat) params[0], (GLfloat) params[1],
+        (GLfloat) params[2], (GLfloat) params[3]
+    };
+    glTexGenfv(coord, pname, f);
 }
 
+void glTexGendv(GLenum coord, GLenum pname, const GLdouble *params) {
+    if (!params) return;
+    if (pname == GL_TEXTURE_GEN_MODE) {
+        glTexGeni(coord, pname, (GLint) params[0]);
+        return;
+    }
+    GLfloat f[4] = {
+        (GLfloat) params[0], (GLfloat) params[1],
+        (GLfloat) params[2], (GLfloat) params[3]
+    };
+    glTexGenfv(coord, pname, f);
+}
+
+/* GL_ARB_multitexture immediate texcoord. NovaGL's immediate path tracks a
+ * single active texcoord set (PICA TEV samples both units with TEXCOORD0/1
+ * but the FFP immediate emitter only carries one). For texture unit 0 this is
+ * exactly glTexCoord2f; higher units have no immediate-mode storage, so we
+ * apply unit 0 and ignore the rest (matches how the draw path consumes a
+ * single texcoord stream). */
 void glMultiTexCoord2fARB(GLenum target, GLfloat s, GLfloat t) {
-    (void) target;
-    (void) s;
-    (void) t;
+    if (target == GL_TEXTURE0 || target == GL_TEXTURE0_ARB) {
+        glTexCoord2f(s, t);
+    }
+    /* else: unit >= 1 immediate texcoords are not represented; drop silently
+     * (no error — valid multitexture call, just unsupported storage here). */
 }
 
 void glActiveTextureARB(GLenum texture) { glActiveTexture(texture); }

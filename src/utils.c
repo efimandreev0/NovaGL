@@ -111,8 +111,12 @@ static void apply_scissor_box(void) {
     int y1 = g.scissor_y + g.scissor_h;
 
     if (g.bound_fbo == 0) {
-        const int logical_w = native_h;
-        const int logical_h = native_w;
+        /* The screen's logical (landscape) dims are FIXED constants, NOT
+         * derived from the current target's framebuffer — the target is now
+         * the POT app surface (256x512), whose padded dims would give a wrong
+         * scissor rotation/offset. Logical screen is always 400x240. */
+        const int logical_w = NOVA_SCREEN_W; /* 400 */
+        const int logical_h = NOVA_SCREEN_H; /* 240 */
         x0 = clampi(x0, 0, logical_w);
         x1 = clampi(x1, 0, logical_w);
         y0 = clampi(y0, 0, logical_h);

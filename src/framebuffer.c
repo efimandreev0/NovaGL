@@ -63,9 +63,12 @@ void glDeleteFramebuffers(GLsizei n, const GLuint *ids) {
         if (id == 0 || id >= NOVA_MAX_FBOS) continue;
         if (!g.fbos[id].in_use) continue;
         if (g.bound_fbo == id) {
+            /* Deleting the bound FBO reverts to the logical screen = app
+             * surface (or the LCD if no app surface). */
             g.bound_fbo = 0;
-            C3D_FrameDrawOn(g.render_target_top);
-            g.current_target = g.render_target_top;
+            C3D_RenderTarget *scr = g.app_target ? g.app_target : g.render_target_top;
+            C3D_FrameDrawOn(scr);
+            g.current_target = scr;
         }
         if (g.fbos[id].target) {
             nova_queue_render_target_delete(g.fbos[id].target);
@@ -81,7 +84,9 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
     C3D_RenderTarget *new_target;
     GLuint new_bound;
     if (framebuffer == 0) {
-        new_target = g.render_target_top;
+        /* "fb 0" = the logical screen = the POT app surface (presented to the
+         * physical LCD at swap). Falls back to the LCD if no app surface. */
+        new_target = g.app_target ? g.app_target : g.render_target_top;
         new_bound = 0;
     } else {
         if (framebuffer >= NOVA_MAX_FBOS || !g.fbos[framebuffer].in_use) {
@@ -470,74 +475,60 @@ int novaCreateRenderTextureFBO(int width, int height, int has_depth,
 // ---------------------------------------------------------------------------
 int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
 {
-    /* --- Resolve source render target ---------------------------------- */
-    C3D_RenderTarget *src_tgt;
+    /* --- Resolve SOURCE as a sampleable C3D_Tex ------------------------- *
+     * PICA texture units only address power-of-two dims, so we must bind a
+     * real POT texture, never alias the NPOT physical LCD. "fb 0" (the
+     * screen) resolves to the POT app surface, whose logical content sits in
+     * the [0,su]x[0,sv] sub-rect. FBO render-textures are POT too; sampling
+     * their logical sub-rect keeps padding out of the copy. */
+    C3D_Tex *bind_tex = NULL;
+    float su = 1.0f, sv = 1.0f; /* source logical/POT UV extent */
     if (src_fbo_id == 0) {
-        src_tgt = g.render_target_top;
+        if (!g.app_target || !g.app_tex.data) return 0; /* no app surface */
+        bind_tex = &g.app_tex;
+        su = (float) g.app_logical_w / (float) g.app_pot_w;
+        sv = (float) g.app_logical_h / (float) g.app_pot_h;
     } else {
         if (src_fbo_id >= NOVA_MAX_FBOS || !g.fbos[src_fbo_id].in_use ||
             !g.fbos[src_fbo_id].target) {
             return 0;
         }
-        src_tgt = g.fbos[src_fbo_id].target;
-    }
-    if (!src_tgt || !src_tgt->frameBuf.colorBuf) return 0;
-
-    /* --- Source must be sampleable as a texture ------------------------- *
-     * PICA texture units ONLY address power-of-two dimensions (8..1024) —
-     * the tiled-address math uses log2(w)/log2(h). The on-screen render
-     * target is 240x400 (NPOT), so aliasing its colorBuf as a C3D_Tex and
-     * sampling it produces structured garbage (the full-screen RGB "noise"
-     * in cutscenes, which copy FROM framebuffer 0). FBO render-textures made
-     * by novaCreateRenderTextureFBO are POT and sample fine (menu blur etc).
-     *
-     * There is no cheap correct way to sample the NPOT screen here: a GX
-     * DisplayTransfer into the POT dst can't reconcile the differing tile
-     * strides (240 vs 256, 400 vs 512). The real fix is to render the whole
-     * frame into a POT render-texture and blit THAT to the screen, so the
-     * effect path has a POT source — a larger change to novaSwapBuffers.
-     * Until then, bail cleanly: the dst keeps its prior (zeroed-at-create or
-     * last-valid) contents instead of seizure-inducing noise. */
-    {
-        unsigned sw = (unsigned) src_tgt->frameBuf.width;
-        unsigned sh = (unsigned) src_tgt->frameBuf.height;
-        int sw_pot = sw && !(sw & (sw - 1));
-        int sh_pot = sh && !(sh & (sh - 1));
-        if (!sw_pot || !sh_pot) {
-            return 0; /* NPOT source (the screen) — can't sample, skip. */
-        }
+        GLuint stex = g.fbos[src_fbo_id].color_tex_id;
+        if (stex == 0 || stex >= NOVA_MAX_TEXTURES || !g.textures[stex].allocated) return 0;
+        TexSlot *ss = &g.textures[stex];
+        bind_tex = &ss->tex;
+        if (ss->pot_w > 0) su = (float) ss->width  / (float) ss->pot_w;
+        if (ss->pot_h > 0) sv = (float) ss->height / (float) ss->pot_h;
     }
 
-    /* --- Resolve destination render target ----------------------------- */
+    /* --- Resolve DESTINATION render target ----------------------------- *
+     * "fb 0" → the app surface (the real screen is only written by the
+     * present blit). dst logical extent sets the viewport so we draw into the
+     * logical region, leaving POT padding untouched. */
     C3D_RenderTarget *dst_tgt;
+    int dst_logical_w, dst_logical_h;
     if (dst_fbo_id == 0) {
-        dst_tgt = g.render_target_top;
+        if (!g.app_target) return 0;
+        dst_tgt = g.app_target;
+        dst_logical_w = g.app_logical_w;
+        dst_logical_h = g.app_logical_h;
     } else {
         if (dst_fbo_id >= NOVA_MAX_FBOS || !g.fbos[dst_fbo_id].in_use ||
             !g.fbos[dst_fbo_id].target) {
             return 0;
         }
         dst_tgt = g.fbos[dst_fbo_id].target;
+        GLuint dtex = g.fbos[dst_fbo_id].color_tex_id;
+        if (dtex > 0 && dtex < NOVA_MAX_TEXTURES && g.textures[dtex].allocated) {
+            dst_logical_w = g.textures[dtex].width;
+            dst_logical_h = g.textures[dtex].height;
+        } else {
+            dst_logical_w = (int) dst_tgt->frameBuf.width;
+            dst_logical_h = (int) dst_tgt->frameBuf.height;
+        }
     }
-    if (!dst_tgt || src_tgt == dst_tgt) return 0;
-
-    /* --- Build transient C3D_Tex that aliases the source colorBuf ------
-     * Same VRAM, same byte order (RGBA8 tiled). We can sample it as a
-     * texture directly. C3D_Tex has more bookkeeping than we need so we
-     * just zero-init and fill the fields that matter for sampling. */
-    C3D_Tex src_tex;
-    memset(&src_tex, 0, sizeof(src_tex));
-    src_tex.data    = src_tgt->frameBuf.colorBuf;
-    src_tex.width   = src_tgt->frameBuf.width;
-    src_tex.height  = src_tgt->frameBuf.height;
-    src_tex.fmt     = GPU_RGBA8;
-    src_tex.size    = src_tex.width * src_tex.height * 4;
-    src_tex.param   = GPU_TEXTURE_MAG_FILTER(GPU_LINEAR)
-                    | GPU_TEXTURE_MIN_FILTER(GPU_LINEAR)
-                    | GPU_TEXTURE_WRAP_S(GPU_CLAMP_TO_EDGE)
-                    | GPU_TEXTURE_WRAP_T(GPU_CLAMP_TO_EDGE);
-    src_tex.border  = 0;
-    src_tex.lodParam = 0;
+    if (!dst_tgt || !bind_tex) return 0;
+    if (src_fbo_id == dst_fbo_id) return 0; /* self-copy is a no-op */
 
     /* --- Commit any pending draws so source is in VRAM ------------------ */
     C3D_FrameSplit(0);
@@ -564,7 +555,7 @@ int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
         C3D_TexEnvFunc(e, C3D_Both, GPU_REPLACE);
     }
 
-    C3D_TexBind(0, &src_tex);
+    C3D_TexBind(0, bind_tex);
 
     /* --- Disable depth / blend / cull / scissor ------------------------- */
     C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
@@ -574,19 +565,19 @@ int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
     C3D_CullFace(GPU_CULL_NONE);
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
 
-    /* --- Set viewport over the dst target's full extent ----------------- */
-    C3D_SetViewport(0, 0, dst_tgt->frameBuf.width, dst_tgt->frameBuf.height);
+    /* --- Set viewport over the dst LOGICAL extent ---------------------- *
+     * Draw into the logical region only (origin (0,0)), leaving POT padding
+     * untouched so a later logical/POT-scaled sample reads clean content. */
+    C3D_SetViewport(0, 0, (u32) dst_logical_w, (u32) dst_logical_h);
 
-    /* --- Quad geometry: clip-space fullscreen, UV covers source --------- *
-     * The quad covers NDC [-1, 1] in xy, w=1 so the depth-clamp shader
-     * leaves z alone. UVs are (0,0)-(1,1) — the linear sampler walks the
-     * full source texture into the destination. */
-    static const float quad_verts[4 * 8] = {
-        /* x     y     z     w     u     v     padding (color slots — TEV
-         *                                       in REPLACE mode ignores them) */
-        -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 1.0f,  1.0f, 1.0f,
-         1.0f, -1.0f, 0.0f, 1.0f, 1.0f, 1.0f,  1.0f, 1.0f,
-         1.0f,  1.0f, 0.0f, 1.0f, 1.0f, 0.0f,  1.0f, 1.0f,
+    /* --- Quad geometry: clip-space fullscreen, UV covers the SOURCE
+     * logical sub-rect [0,su]x[0,sv]. NDC [-1,1], w=1. V uses the same
+     * bottom-NDC→v-max flip convention this blit has always used. */
+    const float quad_verts[4 * 8] = {
+        /* x     y     z     w     u     v      colour (REPLACE ignores) */
+        -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, sv,    1.0f, 1.0f,
+         1.0f, -1.0f, 0.0f, 1.0f, su,   sv,    1.0f, 1.0f,
+         1.0f,  1.0f, 0.0f, 1.0f, su,   0.0f,  1.0f, 1.0f,
         -1.0f,  1.0f, 0.0f, 1.0f, 0.0f, 0.0f,  1.0f, 1.0f,
     };
 

@@ -86,12 +86,24 @@ typedef struct {
     int used;
 } DisplayList;
 
+
+typedef struct {
+    GLenum mode;          /* GL_OBJECT_LINEAR / GL_EYE_LINEAR / GL_SPHERE_MAP */
+    GLfloat object_plane[4];
+    GLfloat eye_plane[4];
+} NovaTexGenCoord;
+
 extern struct NovaState {
     //C3D targets
-    C3D_RenderTarget *render_target_top; // Left eye
-    C3D_RenderTarget *render_target_top_right; // Right eye
+    C3D_RenderTarget *render_target_top; // physical top LCD (left eye)
+    C3D_RenderTarget *render_target_top_right; // physical top LCD (right eye)
     C3D_RenderTarget *render_target_bot;
     C3D_RenderTarget *current_target;
+
+    C3D_Tex           app_tex;
+    C3D_RenderTarget *app_target;
+    int               app_pot_w, app_pot_h;     // texture storage (POT)
+    int               app_logical_w, app_logical_h; // = LCD dims (240x400 native)
 
     //Shader stuff
     /* Full FFP shader: separate proj+modelview dp4 chains, fog, texmtx. */

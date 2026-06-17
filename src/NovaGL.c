@@ -137,7 +137,35 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.render_target_top_right = NULL;
 #endif
 
-    g.current_target = g.render_target_top;
+    /* App surface: POT VRAM render-texture in the SAME orientation as the
+     * physical top target (240x400 native → padded to 256x512). The whole
+     * top-screen frame renders here; novaSwapBuffers presents it 1:1 to
+     * render_target_top. Makes "fb 0" sampleable (see context.h). Carries a
+     * D24S8 depth buffer so 3D rendering works exactly as on the LCD. */
+    g.app_logical_w = NOVA_SCREEN_H; /* native top fb width  = 240 */
+    g.app_logical_h = NOVA_SCREEN_W; /* native top fb height = 400 */
+    g.app_pot_w = (int) nova_next_pow2((unsigned) g.app_logical_w);
+    g.app_pot_h = (int) nova_next_pow2((unsigned) g.app_logical_h);
+    if (C3D_TexInitVRAM(&g.app_tex, (u16) g.app_pot_w, (u16) g.app_pot_h, GPU_RGBA8)) {
+        C3D_TexSetFilter(&g.app_tex, GPU_LINEAR, GPU_LINEAR);
+        C3D_TexSetWrap(&g.app_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+        g.app_target = C3D_RenderTargetCreateFromTex(&g.app_tex, GPU_TEXFACE_2D, 0,
+                                                     GPU_RB_DEPTH24_STENCIL8);
+        /* Zero the whole POT buffer so LINEAR sampling across the logical↔pad
+         * boundary never pulls undefined VRAM (Butterscotch does the same). */
+        if (g.app_target && g.app_tex.data) {
+            memset(g.app_tex.data, 0, g.app_tex.size);
+            GSPGPU_FlushDataCache(g.app_tex.data, g.app_tex.size);
+        }
+    }
+    if (!g.app_target) {
+        /* Allocation failed — fall back to rendering straight to the LCD.
+         * Framebuffer-from-screen effects won't work, but the game renders. */
+        if (g.app_tex.data) { C3D_TexDelete(&g.app_tex); memset(&g.app_tex, 0, sizeof(g.app_tex)); }
+        g.current_target = g.render_target_top;
+    } else {
+        g.current_target = g.app_target;
+    }
 
     g.render_target_bot = C3D_RenderTargetCreate(NOVA_SCREEN_BOTTOM_W, NOVA_SCREEN_BOTTOM_H,
                                                  GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
@@ -338,8 +366,13 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.client_array_buf_offset = 0;
     g.index_buf_offset = 0;
 
-    C3D_FrameDrawOn(g.render_target_top);
-    g.current_target = g.render_target_top;
+    if (g.app_target) {
+        C3D_FrameDrawOn(g.app_target);
+        g.current_target = g.app_target;
+    } else {
+        C3D_FrameDrawOn(g.render_target_top);
+        g.current_target = g.render_target_top;
+    }
 }
 
 int novaGetEyeCount(void) {
@@ -362,7 +395,104 @@ void novaBeginEye(int eye) {
     g.final_proj_cached_valid = 0;
 }
 
+/* Present the app surface (POT VRAM render-tex holding this frame's top-screen
+ * content) onto the physical LCD target with a 1:1 quad. The app content was
+ * rendered in the SAME sideways orientation as the LCD (identical per-draw
+ * tilt + viewport), so this is a straight copy of the logical sub-rect — no
+ * rotation. Must run inside an open C3D frame, before C3D_FrameEnd. */
+static void nova_present_app(C3D_RenderTarget *lcd) {
+    if (!g.app_target || !lcd || !g.app_tex.data) return;
+
+    /* Make sure the app-surface render is finished in VRAM before we sample
+     * it (render-to-texture → sample-in-same-frame hazard). */
+    C3D_FrameSplit(0);
+
+    C3D_FrameDrawOn(lcd);
+
+    /* TEV stage 0 = REPLACE(TEX0); pad the rest. */
+    C3D_TexEnv *env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, (GPU_TEVSRC) 0, (GPU_TEVSRC) 0);
+    C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+    for (int i = 1; i < 6; i++) {
+        C3D_TexEnv *e = C3D_GetTexEnv(i);
+        C3D_TexEnvInit(e);
+        C3D_TexEnvSrc(e, C3D_Both, GPU_PREVIOUS, (GPU_TEVSRC) 0, (GPU_TEVSRC) 0);
+        C3D_TexEnvFunc(e, C3D_Both, GPU_REPLACE);
+    }
+
+    C3D_TexBind(0, &g.app_tex);
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    C3D_CullFace(GPU_CULL_NONE);
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    C3D_SetViewport(0, 0, (u32) lcd->frameBuf.width, (u32) lcd->frameBuf.height);
+
+    /* Logical region of the POT app texture. Content is bottom-left-anchored
+     * because the per-frame viewport origin is (0,0) (see nova_set_render_target
+     * / glViewport: C3D_SetViewport y measured from the bottom). If the present
+     * ever shows the image vertically mirrored, swap the v0/v1 pair below. */
+    const float u1 = (float) g.app_logical_w / (float) g.app_pot_w;
+    const float v1 = (float) g.app_logical_h / (float) g.app_pot_h;
+
+    /* Fullscreen clip-space quad ([-1,1]) covering the LCD as 2 triangles;
+     * UVs sample only the logical sub-rect. Vertex layout = NovaGL native
+     * clipspace (x,y,z,w, u,v, rgba8) — 28 bytes. Colour = white (REPLACE
+     * ignores it). */
+    /* V maps straight (no flip): the app content is stored in the SAME
+     * sideways layout as the LCD, so presenting is a direct 1:1 texel copy.
+     * NB: because that layout is rotated 90°, the texture's V axis is the
+     * screen's HORIZONTAL axis — flipping V here mirrors the screen
+     * left-right (which is exactly what the earlier RTT-style flip did). */
+    float v[6 * 7];
+    const float corners[6][4] = {
+        {-1.f, -1.f, 0.f, 0.f}, /* x,y,u,v */
+        { 1.f, -1.f, u1,  0.f},
+        { 1.f,  1.f, u1,  v1 },
+        {-1.f, -1.f, 0.f, 0.f},
+        { 1.f,  1.f, u1,  v1 },
+        {-1.f,  1.f, 0.f, v1 },
+    };
+    for (int i = 0; i < 6; i++) {
+        float *o = &v[i * 7];
+        o[0] = corners[i][0]; o[1] = corners[i][1]; o[2] = 0.f; o[3] = 1.f;
+        o[4] = corners[i][2]; o[5] = corners[i][3];
+        ((uint8_t *) (o + 6))[0] = 255;
+        ((uint8_t *) (o + 6))[1] = 255;
+        ((uint8_t *) (o + 6))[2] = 255;
+        ((uint8_t *) (o + 6))[3] = 255;
+    }
+
+    int prev_clipspace = g.clipspace_mode_enabled;
+    int prev_shader = g.active_shader;
+    /* Identity post-clip transform: the quad is already in final LCD space. */
+    if (g.shader_clipspace_dvlb) {
+        C3D_BindProgram(&g.shader_clipspace_program);
+        g.active_shader = NOVA_SHADER_CLIPSPACE;
+        C3D_Mtx id; Mtx_Identity(&id);
+        if (g.uLoc_projection_clipspace >= 0)
+            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection_clipspace, &id);
+    }
+
+    const int bytes = 6 * 28;
+    uint8_t *staged = (uint8_t *) linear_alloc_ring(g.client_array_buf, &g.client_array_buf_offset,
+                                                    bytes, g.client_array_buf_size);
+    memcpy(staged, v, (size_t) bytes);
+    GSPGPU_FlushDataCache(staged, (u32) bytes);
+    nova_setup_attr_info(4);
+    nova_setup_buf_info(staged, 28);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 6);
+
+    g.active_shader = prev_shader;
+    g.clipspace_mode_enabled = prev_clipspace;
+    nova_invalidate_state_cache();
+}
+
 void novaSwapBuffers(void) {
+    /* Present the app surface to the physical top LCD before ending the frame. */
+    if (g.app_target) nova_present_app(g.render_target_top);
+
     C3D_FrameEnd(0);
     nova_fbo_gc_collect();
 
@@ -377,8 +507,14 @@ void novaSwapBuffers(void) {
     g.client_array_buf_offset = 0;
     g.index_buf_offset = 0;
 
-    C3D_FrameDrawOn(g.render_target_top);
-    g.current_target = g.render_target_top;
+    /* Resume drawing into the app surface (the logical "screen"). */
+    if (g.app_target) {
+        C3D_FrameDrawOn(g.app_target);
+        g.current_target = g.app_target;
+    } else {
+        C3D_FrameDrawOn(g.render_target_top);
+        g.current_target = g.render_target_top;
+    }
 }
 
 void nova_fini(void) {
@@ -441,6 +577,14 @@ void nova_fini(void) {
 
     nova_fbo_gc_collect();
 
+    if (g.app_target) {
+        C3D_RenderTargetDelete(g.app_target);
+        g.app_target = NULL;
+    }
+    if (g.app_tex.data) {
+        C3D_TexDelete(&g.app_tex);
+        memset(&g.app_tex, 0, sizeof(g.app_tex));
+    }
     C3D_RenderTargetDelete(g.render_target_top);
     if (g.render_target_top_right) C3D_RenderTargetDelete(g.render_target_top_right);
     C3D_RenderTargetDelete(g.render_target_bot);
@@ -469,8 +613,16 @@ void nova_set_render_target(int target_mode) {
         C3D_FrameDrawOn(g.render_target_bot);
         g.current_target = g.render_target_bot;
     } else {
-        C3D_FrameDrawOn(g.render_target_top);
-        g.current_target = g.render_target_top;
+        /* Eye 0 / main "screen" → the POT app surface (presented to the LCD at
+         * swap). Falls back to the LCD directly if the app surface failed to
+         * allocate. */
+        if (g.app_target) {
+            C3D_FrameDrawOn(g.app_target);
+            g.current_target = g.app_target;
+        } else {
+            C3D_FrameDrawOn(g.render_target_top);
+            g.current_target = g.render_target_top;
+        }
     }
 }
 

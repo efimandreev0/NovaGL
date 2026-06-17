@@ -414,6 +414,17 @@ typedef float GLdouble;
 #define GL_PRIMARY_COLOR_ARB              GL_PRIMARY_COLOR
 #define GL_DOT3_RGBA_ARB                  0x86AF
 
+#define GL_S                    0x2000
+#define GL_T                    0x2001
+#define GL_R                    0x2002
+#define GL_Q                    0x2003
+#define GL_TEXTURE_GEN_MODE     0x2500
+#define GL_EYE_LINEAR           0x2400
+#define GL_OBJECT_LINEAR        0x2401
+#define GL_SPHERE_MAP           0x2402
+
+#define NOVA_MAX_TEXTURE_UNITS  3   /* matches g.bound_texture[3] */
+
 #define EGLBoolean    int32_t
 #define EGLDisplay    void*
 #define EGLenum       uint32_t
