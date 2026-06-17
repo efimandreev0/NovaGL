@@ -708,6 +708,28 @@ void glBindTexture(GLenum target, GLuint texture) {
     g.bound_texture[g.active_texture_unit] = texture;
 }
 
+/* UV scale = logical / POT for a texture id. fast3d (and any GL client)
+ * normalizes texcoords to the LOGICAL texture size, but PICA samples [0,1]
+ * across the POT-padded storage, so NPOT textures (font glyphs!) need the
+ * coords scaled down by this ratio or the image collapses into a fraction of
+ * the rect — narrow glyphs degenerate to a vertical sliver ("t/i/l" → "'").
+ * POT textures (most world tiles) return 1.0, so callers can multiply
+ * unconditionally. Returns 1.0 for unknown/zero ids. */
+void novaGetTexCoordScale(GLuint texture, float *su, float *sv) {
+    float u = 1.0f, v = 1.0f;
+    if (texture > 0 && texture < NOVA_MAX_TEXTURES && g.textures[texture].in_use &&
+        g.textures[texture].allocated) {
+        TexSlot *s = &g.textures[texture];
+        /* `width`/`height` are the on-GPU logical extent (after any >1024
+         * downscale); pot_w/pot_h the padded storage. Solid-optimized 8x8
+         * stubs keep su=sv=1 (the whole stub is the colour). */
+        if (s->pot_w > 0 && s->width > 0)  u = (float) s->width  / (float) s->pot_w;
+        if (s->pot_h > 0 && s->height > 0) v = (float) s->height / (float) s->pot_h;
+    }
+    if (su) *su = u;
+    if (sv) *sv = v;
+}
+
 // === [DIAG] dump first N glTexImage2D inputs to SD for offline inspection ===
 // Set NOVA_DIAG_TEX_LIMIT=N at compile time to re-enable; default off.
 #ifndef NOVA_DIAG_TEX_LIMIT

@@ -1262,6 +1262,11 @@ void novaClearExplicitTevStages(void);
  * novaBeginClipSpace2D mode is active. */
 void novaDrawClipspaceTris(const void *verts, int vertex_count);
 
+/* Texcoord scale (logical/POT) for a texture id — see texture.c. Multiply
+ * client texcoords by this when feeding the clipspace fast lane so NPOT
+ * textures (font glyphs) sample the right sub-region. POT textures → 1.0. */
+void novaGetTexCoordScale(GLuint texture, float *su, float *sv);
+
 /* ------------------------------------------------------------------------
  * Raw clip-space passthrough (UI/HUD fast lane)
  * ------------------------------------------------------------------------

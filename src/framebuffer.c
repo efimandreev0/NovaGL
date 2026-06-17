@@ -483,6 +483,31 @@ int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
     }
     if (!src_tgt || !src_tgt->frameBuf.colorBuf) return 0;
 
+    /* --- Source must be sampleable as a texture ------------------------- *
+     * PICA texture units ONLY address power-of-two dimensions (8..1024) —
+     * the tiled-address math uses log2(w)/log2(h). The on-screen render
+     * target is 240x400 (NPOT), so aliasing its colorBuf as a C3D_Tex and
+     * sampling it produces structured garbage (the full-screen RGB "noise"
+     * in cutscenes, which copy FROM framebuffer 0). FBO render-textures made
+     * by novaCreateRenderTextureFBO are POT and sample fine (menu blur etc).
+     *
+     * There is no cheap correct way to sample the NPOT screen here: a GX
+     * DisplayTransfer into the POT dst can't reconcile the differing tile
+     * strides (240 vs 256, 400 vs 512). The real fix is to render the whole
+     * frame into a POT render-texture and blit THAT to the screen, so the
+     * effect path has a POT source — a larger change to novaSwapBuffers.
+     * Until then, bail cleanly: the dst keeps its prior (zeroed-at-create or
+     * last-valid) contents instead of seizure-inducing noise. */
+    {
+        unsigned sw = (unsigned) src_tgt->frameBuf.width;
+        unsigned sh = (unsigned) src_tgt->frameBuf.height;
+        int sw_pot = sw && !(sw & (sw - 1));
+        int sh_pot = sh && !(sh & (sh - 1));
+        if (!sw_pot || !sh_pot) {
+            return 0; /* NPOT source (the screen) — can't sample, skip. */
+        }
+    }
+
     /* --- Resolve destination render target ----------------------------- */
     C3D_RenderTarget *dst_tgt;
     if (dst_fbo_id == 0) {
