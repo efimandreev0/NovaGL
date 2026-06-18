@@ -214,22 +214,43 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
                          (is_stream || slot->capacity <= desired_bytes * 4);
 
     if (!reuse_existing) {
+        /* Round capacity up to the next power of two for ALL usages (not just
+         * streaming). The infinite-world chunk renderer re-tessellates a sliding
+         * window of static VBOs constantly, each time at a slightly different
+         * exact size; allocating those exact sizes shreds the linear heap into
+         * unusable fragments until linearAlloc fails with plenty of free bytes
+         * left. Quantizing to powers of two makes nearby sizes land on the same
+         * capacity, so the reuse path above takes over and we stop reallocating.
+         * The non-stream reuse check still shrinks a buffer that becomes >4x
+         * oversized, so this does not ratchet unbounded. */
         int new_capacity = desired_bytes;
-        /* For streaming VBOs, round capacity up to next power of two so we
-         * stop reallocating on each minor size jiggle. */
-        if (is_stream) {
+        {
             int p = 256;
             while (p < new_capacity) p <<= 1;
             new_capacity = p;
         }
 
+        // Free the old block FIRST, then allocate. Allocating before freeing
+        // means a resize transiently holds both buffers, which both wastes peak
+        // linear RAM and worsens fragmentation of the linear heap (the dominant
+        // failure mode once the sliding chunk window keeps re-tessellating VBOs
+        // of slightly different sizes). Stash the old pointer so a failed alloc
+        // can still leave the slot in a sane (empty) state.
+        void *old_buf = slot->data;
+        if (old_buf) {
+            linearFree(old_buf);
+            slot->data = NULL;
+            slot->allocated = 0;
+        }
+
         void *new_buf = linearAlloc((size_t) new_capacity);
         if (!new_buf) {
+            printf("[NOVA] glBufferData: linearAlloc(%d) FAILED (linearSpaceFree=%u). VBO id=%u left empty.\n",
+                   new_capacity, (unsigned) linearSpaceFree(), (unsigned) id);
             g.last_error = GL_OUT_OF_MEMORY;
             return;
         }
 
-        if (slot->data) linearFree(slot->data);
         slot->data = new_buf;
         slot->capacity = new_capacity;
         slot->allocated = 1;

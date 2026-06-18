@@ -201,6 +201,227 @@ void glColorMaterial(GLenum face, GLenum mode) {
     // no lighting in Nova so color material do nothing
 }
 
+/* glMaterial* — front material is the only one PICA could ever light (no
+ * separate back material), so `face` is accepted but the same store is used
+ * for GL_FRONT / GL_BACK / GL_FRONT_AND_BACK. These fully record the material;
+ * the lighting maths that consumes them is the GPU light path (not built yet). */
+void glMaterialfv(GLenum face, GLenum pname, const GLfloat *params) {
+    (void) face;
+    if (!params) return;
+    switch (pname) {
+        case GL_AMBIENT:
+            g.mat_ambient[0] = params[0]; g.mat_ambient[1] = params[1];
+            g.mat_ambient[2] = params[2]; g.mat_ambient[3] = params[3];
+            break;
+        case GL_DIFFUSE:
+            g.mat_diffuse[0] = params[0]; g.mat_diffuse[1] = params[1];
+            g.mat_diffuse[2] = params[2]; g.mat_diffuse[3] = params[3];
+            break;
+        case GL_SPECULAR:
+            g.mat_specular[0] = params[0]; g.mat_specular[1] = params[1];
+            g.mat_specular[2] = params[2]; g.mat_specular[3] = params[3];
+            break;
+        case GL_EMISSION:
+            g.mat_emission[0] = params[0]; g.mat_emission[1] = params[1];
+            g.mat_emission[2] = params[2]; g.mat_emission[3] = params[3];
+            break;
+        case GL_AMBIENT_AND_DIFFUSE:
+            g.mat_ambient[0] = g.mat_diffuse[0] = params[0];
+            g.mat_ambient[1] = g.mat_diffuse[1] = params[1];
+            g.mat_ambient[2] = g.mat_diffuse[2] = params[2];
+            g.mat_ambient[3] = g.mat_diffuse[3] = params[3];
+            break;
+        case GL_SHININESS:
+            g.mat_shininess = params[0];
+            break;
+        default:
+            break;
+    }
+    g.light_dirty = 1;
+}
+
+void glMaterialf(GLenum face, GLenum pname, GLfloat param) {
+    // only GL_SHININESS is a scalar; spec says other names are an error here
+    if (pname == GL_SHININESS) {
+        (void) face;
+        g.mat_shininess = param;
+        g.light_dirty = 1;
+    }
+}
+
+void glMateriali(GLenum face, GLenum pname, GLint param) {
+    glMaterialf(face, pname, (GLfloat) param);
+}
+
+void glMaterialiv(GLenum face, GLenum pname, const GLint *params) {
+    if (!params) return;
+    if (pname == GL_SHININESS) {
+        glMaterialf(face, pname, (GLfloat) params[0]);
+        return;
+    }
+    // colour names: ints are taken as-is (GL does a scaled map, but the engine
+    // only ever uses the float path, so keep it simple and lossless enough).
+    GLfloat c[4] = { (GLfloat) params[0], (GLfloat) params[1],
+                     (GLfloat) params[2], (GLfloat) params[3] };
+    glMaterialfv(face, pname, c);
+}
+
+void glGetMaterialfv(GLenum face, GLenum pname, GLfloat *params) {
+    (void) face;
+    if (!params) return;
+    switch (pname) {
+        case GL_AMBIENT:
+            params[0] = g.mat_ambient[0]; params[1] = g.mat_ambient[1];
+            params[2] = g.mat_ambient[2]; params[3] = g.mat_ambient[3];
+            break;
+        case GL_DIFFUSE:
+            params[0] = g.mat_diffuse[0]; params[1] = g.mat_diffuse[1];
+            params[2] = g.mat_diffuse[2]; params[3] = g.mat_diffuse[3];
+            break;
+        case GL_SPECULAR:
+            params[0] = g.mat_specular[0]; params[1] = g.mat_specular[1];
+            params[2] = g.mat_specular[2]; params[3] = g.mat_specular[3];
+            break;
+        case GL_EMISSION:
+            params[0] = g.mat_emission[0]; params[1] = g.mat_emission[1];
+            params[2] = g.mat_emission[2]; params[3] = g.mat_emission[3];
+            break;
+        case GL_SHININESS:
+            params[0] = g.mat_shininess;
+            break;
+        default:
+            break;
+    }
+}
+
+void glGetMaterialiv(GLenum face, GLenum pname, GLint *params) {
+    if (!params) return;
+    GLfloat c[4] = {0, 0, 0, 0};
+    glGetMaterialfv(face, pname, c);
+    params[0] = (GLint) c[0];
+    if (pname != GL_SHININESS) {
+        params[1] = (GLint) c[1];
+        params[2] = (GLint) c[2];
+        params[3] = (GLint) c[3];
+    }
+}
+
+/* glLight* — records the full light source state. `light` is GL_LIGHT0..N.
+ * Out-of-range index is a GL_INVALID_ENUM, no state change. */
+static NovaLight *nova_light(GLenum light) {
+    int idx = (int) light - GL_LIGHT0;
+    if (idx < 0 || idx >= NOVA_MAX_LIGHTS) {
+        g.last_error = GL_INVALID_ENUM;
+        return 0;
+    }
+    return &g.lights[idx];
+}
+
+void glLightfv(GLenum light, GLenum pname, const GLfloat *params) {
+    NovaLight *L = nova_light(light);
+    if (!L || !params) return;
+    switch (pname) {
+        case GL_AMBIENT:
+            L->ambient[0] = params[0]; L->ambient[1] = params[1];
+            L->ambient[2] = params[2]; L->ambient[3] = params[3];
+            break;
+        case GL_DIFFUSE:
+            L->diffuse[0] = params[0]; L->diffuse[1] = params[1];
+            L->diffuse[2] = params[2]; L->diffuse[3] = params[3];
+            break;
+        case GL_SPECULAR:
+            L->specular[0] = params[0]; L->specular[1] = params[1];
+            L->specular[2] = params[2]; L->specular[3] = params[3];
+            break;
+        case GL_POSITION:
+            // NOTE: GL transforms POSITION by the current modelview at call time.
+            // NovaGL stores it raw (eye-space contract is the caller's); the GPU
+            // light path will decide the space when it lands.
+            L->position[0] = params[0]; L->position[1] = params[1];
+            L->position[2] = params[2]; L->position[3] = params[3];
+            break;
+        case GL_SPOT_DIRECTION:
+            L->spot_direction[0] = params[0]; L->spot_direction[1] = params[1];
+            L->spot_direction[2] = params[2];
+            break;
+        case GL_SPOT_EXPONENT:   L->spot_exponent   = params[0]; break;
+        case GL_SPOT_CUTOFF:     L->spot_cutoff     = params[0]; break;
+        case GL_CONSTANT_ATTENUATION:  L->atten_constant  = params[0]; break;
+        case GL_LINEAR_ATTENUATION:    L->atten_linear    = params[0]; break;
+        case GL_QUADRATIC_ATTENUATION: L->atten_quadratic = params[0]; break;
+        default: g.last_error = GL_INVALID_ENUM; break;
+    }
+    g.light_dirty = 1;
+}
+
+void glLightf(GLenum light, GLenum pname, GLfloat param) {
+    // only the scalar params (spot exponent/cutoff, attenuations) are valid here
+    GLfloat v[4] = { param, 0.0f, 0.0f, 0.0f };
+    glLightfv(light, pname, v);
+}
+
+void glLighti(GLenum light, GLenum pname, GLint param) {
+    glLightf(light, pname, (GLfloat) param);
+}
+
+void glLightiv(GLenum light, GLenum pname, const GLint *params) {
+    if (!params) return;
+    GLfloat v[4] = { (GLfloat) params[0], (GLfloat) params[1],
+                     (GLfloat) params[2], (GLfloat) params[3] };
+    glLightfv(light, pname, v);
+}
+
+void glGetLightfv(GLenum light, GLenum pname, GLfloat *params) {
+    NovaLight *L = nova_light(light);
+    if (!L || !params) return;
+    switch (pname) {
+        case GL_AMBIENT:
+            params[0]=L->ambient[0]; params[1]=L->ambient[1]; params[2]=L->ambient[2]; params[3]=L->ambient[3]; break;
+        case GL_DIFFUSE:
+            params[0]=L->diffuse[0]; params[1]=L->diffuse[1]; params[2]=L->diffuse[2]; params[3]=L->diffuse[3]; break;
+        case GL_SPECULAR:
+            params[0]=L->specular[0]; params[1]=L->specular[1]; params[2]=L->specular[2]; params[3]=L->specular[3]; break;
+        case GL_POSITION:
+            params[0]=L->position[0]; params[1]=L->position[1]; params[2]=L->position[2]; params[3]=L->position[3]; break;
+        case GL_SPOT_DIRECTION:
+            params[0]=L->spot_direction[0]; params[1]=L->spot_direction[1]; params[2]=L->spot_direction[2]; break;
+        case GL_SPOT_EXPONENT:   params[0] = L->spot_exponent;   break;
+        case GL_SPOT_CUTOFF:     params[0] = L->spot_cutoff;     break;
+        case GL_CONSTANT_ATTENUATION:  params[0] = L->atten_constant;  break;
+        case GL_LINEAR_ATTENUATION:    params[0] = L->atten_linear;    break;
+        case GL_QUADRATIC_ATTENUATION: params[0] = L->atten_quadratic; break;
+        default: g.last_error = GL_INVALID_ENUM; break;
+    }
+}
+
+/* glLightModel* — only GL_LIGHT_MODEL_AMBIENT carries state we keep; the
+ * local-viewer / two-side flags don't map to anything NovaGL renders yet. */
+void glLightModelfv(GLenum pname, const GLfloat *params) {
+    if (!params) return;
+    if (pname == GL_LIGHT_MODEL_AMBIENT) {
+        g.light_model_ambient[0] = params[0]; g.light_model_ambient[1] = params[1];
+        g.light_model_ambient[2] = params[2]; g.light_model_ambient[3] = params[3];
+        g.light_dirty = 1;
+    }
+}
+
+void glLightModelf(GLenum pname, GLfloat param) {
+    (void) pname; (void) param; // scalar light-model params are no-ops here
+}
+
+void glLightModeli(GLenum pname, GLint param) {
+    (void) pname; (void) param;
+}
+
+void glLightModeliv(GLenum pname, const GLint *params) {
+    if (!params) return;
+    if (pname == GL_LIGHT_MODEL_AMBIENT) {
+        GLfloat c[4] = { (GLfloat) params[0], (GLfloat) params[1],
+                         (GLfloat) params[2], (GLfloat) params[3] };
+        glLightModelfv(pname, c);
+    }
+}
+
 void glMultiTexCoord4f(GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q) {
     // PICA pipeline sample only one texcoord set, so unit 0 is the one that
     // realy do something. route it to the normal texcoord, drop higher units.

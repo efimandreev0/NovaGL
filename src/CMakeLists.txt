@@ -6,6 +6,7 @@ set(SHADER_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/NovaGL_shader.pica")
 set(SHADER_BASIC_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/NovaGL_shader_basic.pica")
 set(SHADER_TEXMTX_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/NovaGL_shader_texmtx.pica")
 set(SHADER_CLIPSPACE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/NovaGL_shader_clipspace.pica")
+set(SHADER_LIGHTING_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/NovaGL_shader_lighting.pica")
 set(GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${GENERATED_DIR}")
 
@@ -14,12 +15,15 @@ file(MAKE_DIRECTORY "${GENERATED_DIR}")
 #   NovaGL_shader_basic      — no fog, MVP combined, identity texmtx
 #   NovaGL_shader_texmtx     — no fog, MVP combined, texmtx applied
 #   NovaGL_shader_clipspace  — raw clip-space passthrough (for UI/HUD)
+#   NovaGL_shader_lighting   — eye-space view + normalquat for HW frag lighting
 ctr_add_shader_library(NovaGL_shader "${SHADER_SRC}")
 ctr_add_shader_library(NovaGL_shader_basic "${SHADER_BASIC_SRC}")
 ctr_add_shader_library(NovaGL_shader_texmtx "${SHADER_TEXMTX_SRC}")
 ctr_add_shader_library(NovaGL_shader_clipspace "${SHADER_CLIPSPACE_SRC}")
+ctr_add_shader_library(NovaGL_shader_lighting "${SHADER_LIGHTING_SRC}")
 dkp_add_embedded_binary_library(shaders
-    NovaGL_shader NovaGL_shader_basic NovaGL_shader_texmtx NovaGL_shader_clipspace)
+    NovaGL_shader NovaGL_shader_basic NovaGL_shader_texmtx NovaGL_shader_clipspace
+    NovaGL_shader_lighting)
 
 # Library sources
 add_library(NovaGL STATIC

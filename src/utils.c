@@ -32,6 +32,8 @@ static u8            s_last_alpha_ref8         = 0xFF;
 static int           s_last_blend_enabled      = -1;
 static GLenum        s_last_blend_src          = 0;
 static GLenum        s_last_blend_dst          = 0;
+static GLenum        s_last_blend_eq_rgb       = 0;
+static GLenum        s_last_blend_eq_alpha     = 0;
 static int           s_last_cull_enabled       = -1;
 static GLenum        s_last_cull_mode          = 0;
 static GLenum        s_last_front_face         = 0;
@@ -235,6 +237,17 @@ GPU_BLENDFACTOR gl_to_gpu_blendfactor(GLenum factor) {
         case GL_ONE_MINUS_DST_ALPHA: return GPU_ONE_MINUS_DST_ALPHA;
         case GL_SRC_ALPHA_SATURATE: return GPU_SRC_ALPHA_SATURATE;
         default: return GPU_ONE;
+    }
+}
+
+GPU_BLENDEQUATION gl_to_gpu_blendeq(GLenum mode) {
+    switch (mode) {
+        case GL_FUNC_ADD: return GPU_BLEND_ADD;
+        case GL_FUNC_SUBTRACT: return GPU_BLEND_SUBTRACT;
+        case GL_FUNC_REVERSE_SUBTRACT: return GPU_BLEND_REVERSE_SUBTRACT;
+        case GL_MIN: return GPU_BLEND_MIN;
+        case GL_MAX: return GPU_BLEND_MAX;
+        default: return GPU_BLEND_ADD;
     }
 }
 
@@ -705,6 +718,58 @@ void novaSetExplicitTevStages(int count, const NovaTevStageGL *stages) {
     g.tev_dirty = 1;
 }
 
+/* Rebuild the PICA fragment-lighting environment from GL state and bind it.
+ * Called from apply_gpu_state on lit draws. C3D stores colours in B,G,R order
+ * (see C3D_LightAmbient: ambient[0]=b): the C3D_Light* setters take (r,g,b) and
+ * swap internally, but C3D_Material is filled directly so we pre-swap to BGR. */
+void nova_apply_light_env(void) {
+    if (g.light_dirty || !g.light_env_built) {
+        C3D_LightEnvInit(&g.light_env);
+
+        C3D_Material mtl;
+        /* BGR order to match C3D's internal convention. */
+        mtl.ambient[0]   = g.mat_ambient[2];  mtl.ambient[1]   = g.mat_ambient[1];  mtl.ambient[2]   = g.mat_ambient[0];
+        mtl.diffuse[0]   = g.mat_diffuse[2];  mtl.diffuse[1]   = g.mat_diffuse[1];  mtl.diffuse[2]   = g.mat_diffuse[0];
+        mtl.specular0[0] = g.mat_specular[2]; mtl.specular0[1] = g.mat_specular[1]; mtl.specular0[2] = g.mat_specular[0];
+        mtl.specular1[0] = 0.0f;              mtl.specular1[1] = 0.0f;              mtl.specular1[2] = 0.0f;
+        mtl.emission[0]  = g.mat_emission[2]; mtl.emission[1]  = g.mat_emission[1]; mtl.emission[2]  = g.mat_emission[0];
+        C3D_LightEnvMaterial(&g.light_env, &mtl);
+
+        /* GL_LIGHT_MODEL_AMBIENT — global ambient term. */
+        C3D_LightEnvAmbient(&g.light_env, g.light_model_ambient[0],
+                            g.light_model_ambient[1], g.light_model_ambient[2]);
+
+        /* Specular distribution LUT (Phong). shininess 0 would flatten the LUT
+         * to a step; clamp to >=1 so unset-shininess materials still light. */
+        float shininess = g.mat_shininess > 1.0f ? g.mat_shininess : 1.0f;
+        LightLut_Phong(&g.light_lut_phong, shininess);
+        C3D_LightEnvLut(&g.light_env, GPU_LUT_D0, GPU_LUTINPUT_LN, false, &g.light_lut_phong);
+
+        int n = 0;
+        for (int i = 0; i < NOVA_MAX_LIGHTS && n < NOVA_MAX_LIGHTS; i++) {
+            if (!g.lights[i].enabled) continue;
+            NovaLight *L = &g.lights[i];
+            C3D_Light *cl = &g.c3d_lights[n];
+            C3D_LightInit(cl, &g.light_env);
+            /* (r,g,b) — these setters swap to BGR for us. */
+            C3D_LightColor(cl, L->diffuse[0], L->diffuse[1], L->diffuse[2]);
+            C3D_LightAmbient(cl, L->ambient[0], L->ambient[1], L->ambient[2]);
+            /* GL_POSITION: w==0 -> directional, else positional. C3D_LightPosition
+             * reads w to pick the mode. NOTE: GL transforms POSITION by the
+             * modelview at glLight time into eye space; NovaGL passes it raw, so
+             * the caller's space is whatever it set (the pddi re-sets lights each
+             * frame). This is the main thing to tune if lights look off. */
+            C3D_FVec pos = FVec4_New(L->position[0], L->position[1],
+                                     L->position[2], L->position[3]);
+            C3D_LightPosition(cl, &pos);
+            n++;
+        }
+        g.light_env_built = 1;
+        g.light_dirty = 0;
+    }
+    C3D_LightEnvBind(&g.light_env);
+}
+
 void novaClearExplicitTevStages(void) {
     if (g.explicit_tev_count != 0) {
         g.explicit_tev_count = 0;
@@ -731,9 +796,16 @@ void apply_gpu_state(void) {
      * Switching shaders invalidates the GPU's uniform state, so we force all
      * matrix stacks + fog dirty when the active program changes. */
     int vertex_fog_needed = g.fog_enabled && g.fog_mode == GL_LINEAR;
+    /* Lit when GL_LIGHTING is on AND the caller bound a normal array (no normals
+     * => nothing to light, stay on the normal fast path). */
+    int lit = g.lighting_enabled && g.va_normal.enabled && g.shader_lighting_dvlb
+              && !g.clipspace_mode_enabled;
+    g.lighting_active = lit;
     int desired;
     if (g.clipspace_mode_enabled && g.shader_clipspace_dvlb) {
         desired = NOVA_SHADER_CLIPSPACE;
+    } else if (lit) {
+        desired = NOVA_SHADER_LIGHTING;
     } else if (!vertex_fog_needed && g.tex_mtx_is_identity && g.shader_basic_dvlb) {
         desired = NOVA_SHADER_BASIC;
     } else if (!vertex_fog_needed && g.shader_texmtx_dvlb) {
@@ -744,6 +816,7 @@ void apply_gpu_state(void) {
     if (desired != g.active_shader) {
         switch (desired) {
             case NOVA_SHADER_CLIPSPACE: C3D_BindProgram(&g.shader_clipspace_program); break;
+            case NOVA_SHADER_LIGHTING:  C3D_BindProgram(&g.shader_lighting_program);  break;
             case NOVA_SHADER_BASIC:     C3D_BindProgram(&g.shader_basic_program);     break;
             case NOVA_SHADER_TEXMTX:    C3D_BindProgram(&g.shader_texmtx_program);    break;
             default:                    C3D_BindProgram(&g.shader_program);           break;
@@ -854,6 +927,17 @@ void apply_gpu_state(void) {
                 if (g.uLoc_texmtx_texmtx >= 0 && g.tex_mtx_dirty)
                     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_texmtx_texmtx, &g.tex_stack[g.tex_sp]);
                 break;
+            case NOVA_SHADER_LIGHTING:
+                /* Like FULL: separate proj + modelview. The lighting unit needs
+                 * the eye-space pos/normal the modelview produces, so we MUST
+                 * upload modelview raw (not pre-combined into MVP). */
+                if (need_proj_rebuild && g.uLoc_projection_lighting >= 0) {
+                    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection_lighting, &final_proj);
+                    uploaded_proj_this_call = 1;
+                }
+                if (g.uLoc_modelview_lighting >= 0 && g.mv_dirty)
+                    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_modelview_lighting, &g.mv_stack[g.mv_sp]);
+                break;
             default: /* NOVA_SHADER_FULL */
                 if (need_proj_rebuild && g.uLoc_projection >= 0) {
                     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection, &final_proj);
@@ -868,6 +952,16 @@ void apply_gpu_state(void) {
         (void)uploaded_proj_this_call;
         g.matrices_dirty = 0;
         g.proj_dirty = g.mv_dirty = g.tex_mtx_dirty = 0;
+    }
+
+    /* --- Fragment lighting --------------------------------------------------
+     * Bind the HW light env on lit draws (rebuilding it from GL state when
+     * dirty); explicitly unbind on everything else so non-lit geometry isn't
+     * tinted by a stale env. */
+    if (g.lighting_active) {
+        nova_apply_light_env();
+    } else {
+        C3D_LightEnvBind(NULL);
     }
 
     /* --- Fog --------------------------------------------------------------
@@ -971,17 +1065,21 @@ void apply_gpu_state(void) {
 
     if (s_last_blend_enabled != g.blend_enabled ||
         s_last_blend_src != g.blend_src ||
-        s_last_blend_dst != g.blend_dst) {
+        s_last_blend_dst != g.blend_dst ||
+        s_last_blend_eq_rgb != g.blend_eq_rgb ||
+        s_last_blend_eq_alpha != g.blend_eq_alpha) {
         if (g.blend_enabled) {
-            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, gl_to_gpu_blendfactor(g.blend_src),
-                           gl_to_gpu_blendfactor(g.blend_dst), gl_to_gpu_blendfactor(g.blend_src),
-                           gl_to_gpu_blendfactor(g.blend_dst));
+            C3D_AlphaBlend(gl_to_gpu_blendeq(g.blend_eq_rgb), gl_to_gpu_blendeq(g.blend_eq_alpha),
+                           gl_to_gpu_blendfactor(g.blend_src), gl_to_gpu_blendfactor(g.blend_dst),
+                           gl_to_gpu_blendfactor(g.blend_src), gl_to_gpu_blendfactor(g.blend_dst));
         } else {
             C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
         }
         s_last_blend_enabled = g.blend_enabled;
         s_last_blend_src = g.blend_src;
         s_last_blend_dst = g.blend_dst;
+        s_last_blend_eq_rgb = g.blend_eq_rgb;
+        s_last_blend_eq_alpha = g.blend_eq_alpha;
     }
 
     if (s_last_cull_enabled != g.cull_face_enabled ||
@@ -1032,6 +1130,14 @@ void apply_gpu_state(void) {
     int current_tex_state = 0;
     for (int i = 0; i < 3; i++) {
         if (g.texture_2d_enabled_unit[i] && g.bound_texture[i] > 0) current_tex_state |= (1 << i);
+    }
+
+    /* The TEV base-colour source depends on lighting_active (vertex colour vs
+     * HW fragment primary). Re-emit the chain when that toggles. */
+    static int s_last_lighting_active = -1;
+    if (s_last_lighting_active != g.lighting_active) {
+        g.tev_dirty = 1;
+        s_last_lighting_active = g.lighting_active;
     }
 
     if (g.tev_dirty || g.last_tex_state != current_tex_state) {
@@ -1096,7 +1202,11 @@ void apply_gpu_state(void) {
             C3D_TexEnvInit(env);
 
             GPU_TEVSRC tex_src = (unit == 0) ? GPU_TEXTURE0 : ((unit == 1) ? GPU_TEXTURE1 : GPU_TEXTURE2);
-            GPU_TEVSRC prev_src = (tev_stage == 0) ? GPU_PRIMARY_COLOR : GPU_PREVIOUS;
+            /* On lit draws the "vertex colour" the chain modulates against is
+             * the HW lighting output (GPU_FRAGMENT_PRIMARY_COLOR) instead of the
+             * interpolated GPU_PRIMARY_COLOR — so texture * light works. */
+            GPU_TEVSRC base_prim = g.lighting_active ? GPU_FRAGMENT_PRIMARY_COLOR : GPU_PRIMARY_COLOR;
+            GPU_TEVSRC prev_src = (tev_stage == 0) ? base_prim : GPU_PREVIOUS;
 
             /* Track whether the configured stage references GPU_CONSTANT on
              * either the RGB or Alpha side — if it does, push the unit's
@@ -1219,9 +1329,12 @@ void apply_gpu_state(void) {
         }
 
         if (tev_stage == 0) {
+            /* No texture units active: emit the base colour directly. Lit draws
+             * show the HW lighting result; everything else the vertex colour. */
             C3D_TexEnv *env = C3D_GetTexEnv(0);
             C3D_TexEnvInit(env);
-            C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, (GPU_TEVSRC) 0, (GPU_TEVSRC) 0);
+            GPU_TEVSRC base_prim = g.lighting_active ? GPU_FRAGMENT_PRIMARY_COLOR : GPU_PRIMARY_COLOR;
+            C3D_TexEnvSrc(env, C3D_Both, base_prim, (GPU_TEVSRC) 0, (GPU_TEVSRC) 0);
             C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
             tev_stage++;
         }
@@ -1276,6 +1389,27 @@ void nova_setup_buf_info(void *base, int stride) {
     s_buf_stride = stride;
 }
 
+/* Force the next nova_setup_buf_info to re-apply. Used after the lit draw path
+ * programs BufInfo directly (4 attrs / perm 0x3210), so the 3-attr cache can't
+ * wrongly conclude "already set" on the following non-lit draw. */
+void nova_invalidate_buf_cache(void) {
+    s_buf_base = (void *) -1;
+    s_buf_stride = -1;
+}
+
+/* Lit layout: pos(3f) + texcoord(2f) + color(4ub) + normal(3f), 4 attributes.
+ * Kept on its own cache key so toggling lighting forces a re-setup. */
+void nova_setup_attr_info_lit(void) {
+    if (s_attr_pos_elements == -4) return; /* sentinel: lit layout already set */
+    AttrInfo_Init(&g.attr_info);
+    AttrInfo_AddLoader(&g.attr_info, 0, GPU_FLOAT, 3);          /* v0 position */
+    AttrInfo_AddLoader(&g.attr_info, 1, GPU_FLOAT, 2);          /* v1 texcoord */
+    AttrInfo_AddLoader(&g.attr_info, 2, GPU_UNSIGNED_BYTE, 4);  /* v2 color    */
+    AttrInfo_AddLoader(&g.attr_info, 3, GPU_FLOAT, 3);          /* v3 normal   */
+    C3D_SetAttrInfo(&g.attr_info);
+    s_attr_pos_elements = -4;
+}
+
 /* Invalidate the TexBind skip-cache for ONE texture id. Required whenever a
  * texture's storage is re-created at the same id (orphaning re-upload): the
  * C3D_Tex gets a NEW data pointer, but the per-unit skip-cache would say
@@ -1300,6 +1434,8 @@ void nova_invalidate_state_cache(void) {
     s_last_blend_enabled      = -1;
     s_last_blend_src          = 0;
     s_last_blend_dst          = 0;
+    s_last_blend_eq_rgb       = 0;
+    s_last_blend_eq_alpha     = 0;
     s_last_cull_enabled       = -1;
     s_last_cull_mode          = 0;
     s_last_front_face         = 0;
@@ -1326,6 +1462,10 @@ void nova_invalidate_state_cache(void) {
      * both 0 (full) and 1 (basic), so the next call will C3D_BindProgram. */
     g.active_shader = -1;
     g.final_proj_cached_valid = 0;
+    /* Rebuild the HW light env on the next lit draw (a context reset can wipe
+     * GPU lighting registers). */
+    g.light_dirty = 1;
+    g.light_env_built = 0;
 }
 
 void cleanup_vbo_stream(void) {

@@ -458,6 +458,9 @@ static void upload_solid_texture(C3D_Tex *tex, GPU_TEXCOLOR fmt, const GLvoid *p
         uint32_t out_pixel = 0;
         if (format == GL_RGB) {
             out_pixel = ((uint32_t) px[0] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[2] << 8) | 0xFFu;
+        } else if (format == GL_BGRA) {
+            // BGRA byte order -> swap R/B into the GPU's RGBA8 packing
+            out_pixel = ((uint32_t) px[2] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[0] << 8) | (uint32_t) px[3];
         } else {
             out_pixel = ((uint32_t) px[0] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[2] << 8) | (uint32_t) px[
                             3];
@@ -487,6 +490,10 @@ static void upload_page_rgba8(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t 
                 if (format == GL_RGB) {
                     const uint8_t *px = row + (src_x0 + x) * 3;
                     out_pixel = ((uint32_t) px[0] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[2] << 8) | 0xFFu;
+                } else if (format == GL_BGRA) {
+                    const uint8_t *px = row + (src_x0 + x) * 4;
+                    out_pixel = ((uint32_t) px[2] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[0] << 8) | (
+                                    uint32_t) px[3];
                 } else {
                     const uint8_t *px = row + (src_x0 + x) * 4;
                     out_pixel = ((uint32_t) px[0] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[2] << 8) | (
@@ -1059,6 +1066,10 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
                 if (format == GL_RGB) {
                     const uint8_t *px = row + src_x * 3;
                     out_pixel = ((uint32_t) px[0] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[2] << 8) | 0xFFu;
+                } else if (format == GL_BGRA) {
+                    const uint8_t *px = row + src_x * 4;
+                    out_pixel = ((uint32_t) px[2] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[0] << 8) | (
+                                    uint32_t) px[3];
                 } else {
                     const uint8_t *px = row + src_x * 4;
                     out_pixel = ((uint32_t) px[0] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[2] << 8) | (
@@ -1511,7 +1522,7 @@ void glTexGenfv(GLenum coord, GLenum pname, const GLfloat *params) {
              * inverse-modelview at call time. NovaGL keeps the raw plane
              * (the modelview here is the GL fixed-function stack); a client
              * relying on the exact eye-linear transform would need that
-             * multiply — recorded verbatim is correct for the common
+             * multiply — recorded verbabumped on any glLighttim is correct for the common
              * identity-modelview setup. */
             memcpy(tg->eye_plane, params, sizeof(GLfloat) * 4);
             break;

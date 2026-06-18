@@ -21,6 +21,7 @@
 #include "NovaGL_shader_basic_shbin.h"
 #include "NovaGL_shader_texmtx_shbin.h"
 #include "NovaGL_shader_clipspace_shbin.h"
+#include "NovaGL_shader_lighting_shbin.h"
 
 /* Primitive enums used by the draw-mode validator; values fixed by spec. */
 #ifndef GL_POINTS
@@ -214,6 +215,20 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
             g.shader_clipspace_program.vertexShader, "projection");
     }
 
+    g.shader_lighting_dvlb = DVLB_ParseFile((u32 *) NovaGL_shader_lighting_shbin,
+                                            NovaGL_shader_lighting_shbin_size);
+    if (g.shader_lighting_dvlb) {
+        shaderProgramInit(&g.shader_lighting_program);
+        shaderProgramSetVsh(&g.shader_lighting_program, &g.shader_lighting_dvlb->DVLE[0]);
+        g.uLoc_projection_lighting = shaderInstanceGetUniformLocation(
+            g.shader_lighting_program.vertexShader, "projection");
+        g.uLoc_modelview_lighting = shaderInstanceGetUniformLocation(
+            g.shader_lighting_program.vertexShader, "modelview");
+    }
+    g.light_env_built = 0;
+    g.lighting_active = 0;
+    g.light_dirty = 1;
+
     /* Start on the full shader; apply_gpu_state's selector will switch to
      * a faster variant on the first draw if the state qualifies. */
     C3D_BindProgram(&g.shader_program);
@@ -327,6 +342,35 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.clear_stencil = 0;
     g.blend_src = GL_ONE;
     g.blend_dst = GL_ZERO;
+    g.blend_eq_rgb = GL_FUNC_ADD;
+    g.blend_eq_alpha = GL_FUNC_ADD;
+    /* GL default material: ambient (0.2,0.2,0.2,1), diffuse (0.8,0.8,0.8,1),
+     * specular/emission (0,0,0,1), shininess 0. */
+    g.lighting_enabled = 0;
+    g.mat_ambient[0] = g.mat_ambient[1] = g.mat_ambient[2] = 0.2f; g.mat_ambient[3] = 1.0f;
+    g.mat_diffuse[0] = g.mat_diffuse[1] = g.mat_diffuse[2] = 0.8f; g.mat_diffuse[3] = 1.0f;
+    g.mat_specular[0] = g.mat_specular[1] = g.mat_specular[2] = 0.0f; g.mat_specular[3] = 1.0f;
+    g.mat_emission[0] = g.mat_emission[1] = g.mat_emission[2] = 0.0f; g.mat_emission[3] = 1.0f;
+    g.mat_shininess = 0.0f;
+    /* GL light defaults: all ambient black, dir (0,0,1,0), spot off, atten
+     * (1,0,0). diffuse/specular white only on LIGHT0, black on the rest. */
+    for (int li = 0; li < NOVA_MAX_LIGHTS; li++) {
+        NovaLight *L = &g.lights[li];
+        L->enabled = 0;
+        L->ambient[0] = L->ambient[1] = L->ambient[2] = 0.0f; L->ambient[3] = 1.0f;
+        float c = (li == 0) ? 1.0f : 0.0f;
+        L->diffuse[0]  = L->diffuse[1]  = L->diffuse[2]  = c; L->diffuse[3]  = 1.0f;
+        L->specular[0] = L->specular[1] = L->specular[2] = c; L->specular[3] = 1.0f;
+        L->position[0] = 0.0f; L->position[1] = 0.0f; L->position[2] = 1.0f; L->position[3] = 0.0f;
+        L->spot_direction[0] = 0.0f; L->spot_direction[1] = 0.0f; L->spot_direction[2] = -1.0f;
+        L->spot_exponent = 0.0f;
+        L->spot_cutoff = 180.0f;
+        L->atten_constant = 1.0f;
+        L->atten_linear = 0.0f;
+        L->atten_quadratic = 0.0f;
+    }
+    g.light_model_ambient[0] = g.light_model_ambient[1] = g.light_model_ambient[2] = 0.2f;
+    g.light_model_ambient[3] = 1.0f;
     g.alpha_func = GL_ALWAYS;
     g.alpha_ref = 0.0f;
     g.cull_face_mode = GL_BACK;
@@ -728,7 +772,7 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
     GPU_Primitive_t prim = gl_to_gpu_primitive(mode);
     if (mode == GL_LINES || mode == GL_LINE_STRIP) prim = GPU_TRIANGLES;
 
-    if (!is_elements &&
+    if (!is_elements && !g.lighting_active &&
         g.va_vertex.enabled && g.va_vertex.vbo_id > 0 &&
         g.va_vertex.vbo_id < NOVA_MAX_VBOS && g.vbos[g.va_vertex.vbo_id].allocated &&
         g.va_vertex.size == 3 && g.va_vertex.type == GL_FLOAT && g.va_vertex.stride == 24 && (uintptr_t) g.va_vertex.
@@ -764,7 +808,7 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
         return;
     }
 
-    if (is_elements &&
+    if (is_elements && !g.lighting_active &&
         (type == GL_UNSIGNED_SHORT || type == GL_UNSIGNED_BYTE) &&
         (mode == GL_TRIANGLES || mode == GL_TRIANGLE_STRIP || mode == GL_TRIANGLE_FAN) &&
         g.shade_model != GL_FLAT &&
@@ -826,8 +870,13 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
     // the right place.
     int pos_elements = (g.active_shader == NOVA_SHADER_CLIPSPACE && g.va_vertex.size == 4) ? 4 : 3;
     int pos_bytes = pos_elements * 4;
-    int internal_stride = pos_bytes + 12;
+    /* Lit draws append a 3-float normal (attr3) after the colour, matching the
+     * lighting shader's loader (nova_setup_attr_info_lit). */
+    int lit = g.lighting_active;
+    int normal_bytes = lit ? 12 : 0;
+    int internal_stride = pos_bytes + 12 + normal_bytes;
     int col_offset = pos_bytes + 8;
+    int normal_offset = pos_bytes + 12;
 
     int req_size = count * internal_stride;
     if (req_size > g.client_array_buf_size) {
@@ -860,6 +909,12 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
     int p_str = calc_stride(g.va_vertex.stride, g.va_vertex.size, g.va_vertex.type);
     int t_str = calc_stride(g.va_texcoord.stride, g.va_texcoord.size, g.va_texcoord.type);
     int c_str = calc_stride(g.va_color.stride, g.va_color.size, g.va_color.type);
+    int n_str = calc_stride(g.va_normal.stride, g.va_normal.size, g.va_normal.type);
+
+    const uint8_t *src_n = (g.va_normal.vbo_id > 0 && g.va_normal.vbo_id < NOVA_MAX_VBOS &&
+                            g.vbos[g.va_normal.vbo_id].allocated)
+                               ? (const uint8_t *) g.vbos[g.va_normal.vbo_id].data + (uintptr_t) g.va_normal.pointer
+                               : (const uint8_t *) g.va_normal.pointer;
 
     const uint8_t *src_v = (g.va_vertex.vbo_id > 0 && g.va_vertex.vbo_id < NOVA_MAX_VBOS && g.vbos[g.va_vertex.vbo_id].
                             allocated)
@@ -957,6 +1012,17 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
             memcpy(dst + col_offset, def_col, 4);
         }
 
+        // Normal (lit draws only). Read as float3; falls back to the current
+        // glNormal3f when no array supplies it, default +Z otherwise.
+        if (lit) {
+            float nrm[3] = {g.cur_normal[0], g.cur_normal[1], g.cur_normal[2]};
+            if (g.va_normal.enabled && src_n && (uintptr_t) src_n > 0x1000) {
+                read_vertex_attrib_float(nrm, src_n + src_index * n_str,
+                                         g.va_normal.size >= 3 ? 3 : g.va_normal.size, g.va_normal.type);
+            }
+            memcpy(dst + normal_offset, nrm, 12);
+        }
+
         dst += internal_stride;
     }
 
@@ -990,7 +1056,23 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
     }
 
     GSPGPU_FlushDataCache(dst_start, req_size);
-    draw_packed_run(mode, prim, dst_start, count, internal_stride, pos_elements);
+    if (lit) {
+        /* 4-attribute layout (pos, texcoord, color, normal). buf_info needs the
+         * matching permutation 0x3210, so set it directly rather than via the
+         * 3-attr nova_setup_buf_info. */
+        nova_setup_attr_info_lit();
+        C3D_BufInfo *bufInfo = C3D_GetBufInfo();
+        BufInfo_Init(bufInfo);
+        BufInfo_Add(bufInfo, dst_start, internal_stride, 4, 0x3210);
+        nova_invalidate_buf_cache(); /* bypassed the buf cache; keep it honest */
+        if (mode == GL_QUADS) {
+            draw_emulated_quads(count);
+        } else {
+            C3D_DrawArrays(prim, 0, count);
+        }
+    } else {
+        draw_packed_run(mode, prim, dst_start, count, internal_stride, pos_elements);
+    }
     cleanup_vbo_stream();
 }
 

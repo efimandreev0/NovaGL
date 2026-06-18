@@ -91,6 +91,41 @@ void glBlendFunc(GLenum sfactor, GLenum dfactor) {
     g.blend_dst = dfactor;
 }
 
+static int is_valid_blend_equation(GLenum mode) {
+    switch (mode) {
+        case GL_FUNC_ADD:
+        case GL_FUNC_SUBTRACT:
+        case GL_FUNC_REVERSE_SUBTRACT:
+        case GL_MIN:
+        case GL_MAX:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+void glBlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha) {
+    if (!is_valid_blend_equation(modeRGB) || !is_valid_blend_equation(modeAlpha)) {
+        g.last_error = GL_INVALID_ENUM;
+        return;
+    }
+    g.blend_eq_rgb = modeRGB;
+    g.blend_eq_alpha = modeAlpha;
+}
+
+void glBlendEquation(GLenum mode) {
+    glBlendEquationSeparate(mode, mode);
+}
+
+/* GLES1 OES extension spellings — identical behaviour. */
+void glBlendEquationOES(GLenum mode) {
+    glBlendEquation(mode);
+}
+
+void glBlendEquationSeparateOES(GLenum modeRGB, GLenum modeAlpha) {
+    glBlendEquationSeparate(modeRGB, modeAlpha);
+}
+
 void glAlphaFunc(GLenum func, GLclampf ref) {
     if (!is_valid_cmp_func(func)) {
         g.last_error = GL_INVALID_ENUM;

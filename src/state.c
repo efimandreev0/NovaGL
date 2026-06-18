@@ -162,6 +162,10 @@ void glEnable(GLenum cap) {
             apply_depth_map();
             break;
         case GL_LINE_SMOOTH: g.line_smooth_enabled = 1; break;
+        case GL_LIGHTING: g.lighting_enabled = 1; g.light_dirty = 1; break;
+        case GL_LIGHT0: case GL_LIGHT1: case GL_LIGHT2: case GL_LIGHT3:
+        case GL_LIGHT4: case GL_LIGHT5: case GL_LIGHT6: case GL_LIGHT7:
+            g.lights[cap - GL_LIGHT0].enabled = 1; g.light_dirty = 1; break;
         case GL_VERTEX_ARRAY: g.va_vertex.enabled = 1; break;
         case GL_COLOR_ARRAY: g.va_color.enabled = 1; break;
         case GL_TEXTURE_COORD_ARRAY: g.va_texcoord.enabled = 1; break;
@@ -192,6 +196,10 @@ void glDisable(GLenum cap) {
             apply_depth_map();
             break;
         case GL_LINE_SMOOTH: g.line_smooth_enabled = 0; break;
+        case GL_LIGHTING: g.lighting_enabled = 0; g.light_dirty = 1; break;
+        case GL_LIGHT0: case GL_LIGHT1: case GL_LIGHT2: case GL_LIGHT3:
+        case GL_LIGHT4: case GL_LIGHT5: case GL_LIGHT6: case GL_LIGHT7:
+            g.lights[cap - GL_LIGHT0].enabled = 0; g.light_dirty = 1; break;
         case GL_VERTEX_ARRAY: g.va_vertex.enabled = 0; break;
         case GL_COLOR_ARRAY: g.va_color.enabled = 0; break;
         case GL_TEXTURE_COORD_ARRAY: g.va_texcoord.enabled = 0; break;
@@ -211,6 +219,10 @@ GLboolean glIsEnabled(GLenum cap) {
         case GL_STENCIL_TEST: return g.stencil_test_enabled ? GL_TRUE : GL_FALSE;
         case GL_FOG: return g.fog_enabled;
         case GL_LINE_SMOOTH: return g.line_smooth_enabled ? GL_TRUE : GL_FALSE;
+        case GL_LIGHTING: return g.lighting_enabled ? GL_TRUE : GL_FALSE;
+        case GL_LIGHT0: case GL_LIGHT1: case GL_LIGHT2: case GL_LIGHT3:
+        case GL_LIGHT4: case GL_LIGHT5: case GL_LIGHT6: case GL_LIGHT7:
+            return g.lights[cap - GL_LIGHT0].enabled ? GL_TRUE : GL_FALSE;
         case GL_VERTEX_ARRAY: return g.va_vertex.enabled ? GL_TRUE : GL_FALSE;
         case GL_COLOR_ARRAY: return g.va_color.enabled ? GL_TRUE : GL_FALSE;
         case GL_TEXTURE_COORD_ARRAY: return g.va_texcoord.enabled ? GL_TRUE : GL_FALSE;
@@ -302,6 +314,7 @@ void glGetIntegerv(GLenum pname, GLint *params) {
             return;
         case GL_MAX_TEXTURE_SIZE:     params[0] = 1024; return; /* NovaGL downscales >1024 anyway */
         case GL_MAX_TEXTURE_UNITS:    params[0] = 3; return;
+        case GL_MAX_LIGHTS:           params[0] = NOVA_MAX_LIGHTS; return;
         case GL_UNPACK_ALIGNMENT:     params[0] = g.unpack_alignment; return;
         case GL_PACK_ALIGNMENT:       params[0] = g.pack_alignment; return;
         case GL_MATRIX_MODE:          params[0] = g.matrix_mode; return;

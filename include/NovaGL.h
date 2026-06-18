@@ -48,6 +48,16 @@ typedef int GLfixed;
 typedef ptrdiff_t GLintptr;
 typedef ptrdiff_t GLsizeiptr;
 typedef float GLdouble;
+typedef char GLchar;
+
+/* GL_KHR_debug callback signature + the glad loader proc type. NovaGL is a
+ * static GL implementation (functions are linked directly, not fetched through
+ * a loader), so these exist mainly so the GL-display/loader code that includes
+ * NovaGL.h on 3DS compiles unchanged. */
+typedef void (*GLDEBUGPROC)(GLenum source, GLenum type, GLuint id, GLenum severity,
+                            GLsizei length, const GLchar *message, const void *userParam);
+typedef GLDEBUGPROC GLDEBUGPROCKHR;
+typedef void *(*GLADloadproc)(const char *name);
 //nova_constants
 #define NOVA_MAX_TEXTURES     2048
 #define NOVA_MAX_VBOS         32768
@@ -163,6 +173,75 @@ typedef float GLdouble;
 #define GL_ONE_MINUS_DST_COLOR      0x0307
 #define GL_SRC_ALPHA_SATURATE       0x0308
 
+/* Blend equation (glBlendEquation / glBlendEquationSeparate[OES]). PICA200 has
+ * a real per-channel blend op (GPU_BLENDEQUATION), so these map straight to HW
+ * — not a stub. */
+#define GL_FUNC_ADD                 0x8006
+#define GL_MIN                      0x8007
+#define GL_MAX                      0x8008
+#define GL_BLEND_EQUATION           0x8009
+#define GL_BLEND_EQUATION_RGB       0x8009
+#define GL_FUNC_SUBTRACT            0x800A
+#define GL_FUNC_REVERSE_SUBTRACT    0x800B
+#define GL_BLEND_EQUATION_ALPHA     0x883D
+/* OES aliases used by the GLES blend path. */
+#define GL_FUNC_ADD_OES             0x8006
+#define GL_BLEND_EQUATION_OES       0x8009
+#define GL_FUNC_SUBTRACT_OES        0x800A
+#define GL_FUNC_REVERSE_SUBTRACT_OES 0x800B
+
+/* Material parameter names (glMaterial*). Lighting maths still lives in the
+ * future GPU light path, but these record real, queryable material state. */
+#define GL_AMBIENT                  0x1200
+#define GL_DIFFUSE                  0x1201
+#define GL_SPECULAR                 0x1202
+#define GL_EMISSION                 0x1600
+#define GL_SHININESS                0x1601
+#define GL_AMBIENT_AND_DIFFUSE      0x1602
+#define GL_COLOR_INDEXES            0x1603
+
+/* Fixed-function lighting (glLight* / glLightModel*). Like the material state,
+ * these record real, queryable lighting state. The per-vertex lighting maths is
+ * the future GPU light path (needs a normal-aware shader + C3D_LightEnv). */
+#define GL_MAX_LIGHTS               0x0D31
+#define GL_LIGHT0                   0x4000
+#define GL_LIGHT1                   0x4001
+#define GL_LIGHT2                   0x4002
+#define GL_LIGHT3                   0x4003
+#define GL_LIGHT4                   0x4004
+#define GL_LIGHT5                   0x4005
+#define GL_LIGHT6                   0x4006
+#define GL_LIGHT7                   0x4007
+/* light parameter names (GL_AMBIENT/GL_DIFFUSE/GL_SPECULAR shared w/ material) */
+#define GL_POSITION                 0x1203
+#define GL_SPOT_DIRECTION           0x1204
+#define GL_SPOT_EXPONENT            0x1205
+#define GL_SPOT_CUTOFF              0x1206
+#define GL_CONSTANT_ATTENUATION     0x1207
+#define GL_LINEAR_ATTENUATION       0x1208
+#define GL_QUADRATIC_ATTENUATION    0x1209
+/* light model */
+#define GL_LIGHT_MODEL_LOCAL_VIEWER 0x0B51
+#define GL_LIGHT_MODEL_TWO_SIDE     0x0B52
+#define GL_LIGHT_MODEL_AMBIENT      0x0B53
+
+/* GL_KHR_debug — accepted so debug-build display code compiles. NovaGL has no
+ * async debug message stream (PICA200), so the callback is stored but never
+ * fired and the enables are no-ops. */
+#define GL_DEBUG_OUTPUT_KHR              0x92E0
+#define GL_DEBUG_OUTPUT_SYNCHRONOUS_KHR  0x8242
+#define GL_DEBUG_SEVERITY_HIGH_KHR       0x9146
+#define GL_DEBUG_SEVERITY_MEDIUM_KHR     0x9147
+#define GL_DEBUG_SEVERITY_LOW_KHR        0x9148
+#define GL_DEBUG_SEVERITY_NOTIFICATION_KHR 0x826B
+/* non-KHR aliases (same values) for code that uses the core spellings */
+#define GL_DEBUG_OUTPUT                  0x92E0
+#define GL_DEBUG_OUTPUT_SYNCHRONOUS      0x8242
+#define GL_DEBUG_SEVERITY_HIGH           0x9146
+#define GL_DEBUG_SEVERITY_MEDIUM         0x9147
+#define GL_DEBUG_SEVERITY_LOW            0x9148
+#define GL_DEBUG_SEVERITY_NOTIFICATION   0x826B
+
 #define GL_TEXTURE_WRAP_S           0x2802
 #define GL_TEXTURE_WRAP_T           0x2803
 #define GL_TEXTURE_MAG_FILTER       0x2800
@@ -187,6 +266,11 @@ typedef float GLdouble;
 #define GL_LUMINANCE_ALPHA          0x190A
 #define GL_BGR                      0x80E0
 #define GL_BGRA                     0x80E1
+/* EXT spelling (GL_EXT_bgra / GL_EXT_texture_format_BGRA8888). Same value —
+ * desktop & GameCube ports upload their "native" surfaces as BGRA. NovaGL
+ * honours this by swapping R/B at upload time (see texture.c). */
+#define GL_BGRA_EXT                 0x80E1
+#define GL_BGR_EXT                  0x80E0
 
 /* Sized internal formats — NovaGL stores everything as 8 bits/channel internally,
  * so these are accepted by glTexImage2D but mapped onto the equivalent unsized form. */
@@ -545,6 +629,15 @@ void glDepthRange(GLclampd near_val, GLclampd far_val);
 
 void glBlendFunc(GLenum sfactor, GLenum dfactor);
 
+void glBlendEquation(GLenum mode);
+
+void glBlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha);
+
+/* OES aliases (GLES1 extension names). Same implementation. */
+void glBlendEquationOES(GLenum mode);
+
+void glBlendEquationSeparateOES(GLenum modeRGB, GLenum modeAlpha);
+
 void glAlphaFunc(GLenum func, GLclampf ref);
 
 void glCullFace(GLenum mode);
@@ -619,6 +712,36 @@ void glColor4usv(const GLushort *v);
 void glColorMask(GLboolean r, GLboolean g, GLboolean b, GLboolean a);
 
 void glColorMaterial(GLenum face, GLenum mode);
+
+void glMaterialf(GLenum face, GLenum pname, GLfloat param);
+
+void glMaterialfv(GLenum face, GLenum pname, const GLfloat *params);
+
+void glMateriali(GLenum face, GLenum pname, GLint param);
+
+void glMaterialiv(GLenum face, GLenum pname, const GLint *params);
+
+void glGetMaterialfv(GLenum face, GLenum pname, GLfloat *params);
+
+void glGetMaterialiv(GLenum face, GLenum pname, GLint *params);
+
+void glLightf(GLenum light, GLenum pname, GLfloat param);
+
+void glLightfv(GLenum light, GLenum pname, const GLfloat *params);
+
+void glLighti(GLenum light, GLenum pname, GLint param);
+
+void glLightiv(GLenum light, GLenum pname, const GLint *params);
+
+void glGetLightfv(GLenum light, GLenum pname, GLfloat *params);
+
+void glLightModelf(GLenum pname, GLfloat param);
+
+void glLightModelfv(GLenum pname, const GLfloat *params);
+
+void glLightModeli(GLenum pname, GLint param);
+
+void glLightModeliv(GLenum pname, const GLint *params);
 
 void glShadeModel(GLenum mode);
 
@@ -1114,6 +1237,18 @@ EGLBoolean eglSwapBuffers(EGLDisplay display, EGLSurface surface);
 void *novaglGetProcAddress(const char *name);
 
 char *novaglGetFuncName(uint32_t func);
+
+/* GL_KHR_debug entry point. Stores the callback (real state) but never invokes
+ * it — NovaGL emits no async debug messages. */
+void glDebugMessageCallback(GLDEBUGPROC callback, const void *userParam);
+void glDebugMessageCallbackKHR(GLDEBUGPROC callback, const void *userParam);
+
+/* glad-compatible loaders. NovaGL links its GL entry points directly, so there
+ * is nothing to resolve through `load` — these just report success (non-zero)
+ * so display init code that expects a glad loader proceeds. */
+int gladLoadGLLoader(GLADloadproc load);
+int gladLoadGLES1Loader(GLADloadproc load);
+int gladLoadGLES2Loader(GLADloadproc load);
 
 /* ------------------------------------------------------------------------
  * NovaGL fast-path extensions (vitaGL-inspired)

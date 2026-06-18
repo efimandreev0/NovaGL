@@ -10,6 +10,7 @@
 #define NOVA_SHADER_BASIC      1
 #define NOVA_SHADER_TEXMTX     2
 #define NOVA_SHADER_CLIPSPACE  3
+#define NOVA_SHADER_LIGHTING   4
 
 // internal header, nobody outside src/ include this so we can pull 3ds.h here
 #include <3ds.h>
@@ -87,6 +88,22 @@ typedef struct {
     GLfloat eye_plane[4];
 } NovaTexGenCoord;
 
+/* One fixed-function light (glLight*). GL minimum is 8 lights. */
+#define NOVA_MAX_LIGHTS 8
+typedef struct {
+    int   enabled;
+    float ambient[4];
+    float diffuse[4];
+    float specular[4];
+    float position[4];        /* GL_POSITION; w=0 directional, w!=0 positional */
+    float spot_direction[3];  /* GL_SPOT_DIRECTION */
+    float spot_exponent;      /* GL_SPOT_EXPONENT */
+    float spot_cutoff;        /* GL_SPOT_CUTOFF (degrees, 180 = not a spot) */
+    float atten_constant;     /* GL_CONSTANT_ATTENUATION */
+    float atten_linear;       /* GL_LINEAR_ATTENUATION */
+    float atten_quadratic;    /* GL_QUADRATIC_ATTENUATION */
+} NovaLight;
+
 // one client array (vertex/texcoord/color/normal). same fields for all 4 so
 // VAO can just copy them around like a box
 typedef struct {
@@ -155,6 +172,29 @@ extern struct NovaState {
     int uLoc_projection_clipspace;
     int clipspace_mode_enabled;
 
+    /* Lighting variant: outputs view + normalquat; PICA HW fragment lighting
+     * (C3D_LightEnv) does the per-pixel maths. Selected when GL_LIGHTING is on
+     * AND a normal array is bound. */
+    DVLB_s *shader_lighting_dvlb;
+    shaderProgram_s shader_lighting_program;
+    int uLoc_projection_lighting;
+    int uLoc_modelview_lighting;
+    /* C3D lighting objects, (re)built from g.lights[]/g.mat_* by
+     * nova_apply_light_env(). lighting_active mirrors the per-draw decision so
+     * the TEV path knows to source GPU_FRAGMENT_PRIMARY_COLOR. light_dirty is
+     * bumped on any glLight/glMaterial/enable change. */
+    C3D_LightEnv  light_env;
+    C3D_Light     c3d_lights[NOVA_MAX_LIGHTS];
+    C3D_LightLut  light_lut_phong;
+    int           light_env_built;
+    int           lighting_active;
+    int           light_dirty;
+
+    /* GL_KHR_debug: callback is stored for API completeness but never invoked
+     * (NovaGL produces no async debug stream on PICA200). */
+    GLDEBUGPROC   debug_callback;
+    const void   *debug_user_param;
+
     /* Currently bound program selector. -1 forces re-bind on the next
      * apply_gpu_state (used on init / cache invalidate / clipspace toggle). */
     int active_shader; /* NOVA_SHADER_* constant */
@@ -198,6 +238,22 @@ extern struct NovaState {
     float cur_normal[3]; // current normal from glNormal*. no lighting yet but
                          // we keep it so the state is real and ready if lighting come
 
+    /* GL_LIGHTING enable + front-material state (glMaterial*). PICA fragment
+     * lighting needs a normal-aware shader + C3D_LightEnv we don't build yet,
+     * so these are stored as real, queryable state (like cur_normal) ready for
+     * that path — the setter functions themselves are fully implemented. */
+    int lighting_enabled;
+    float mat_ambient[4];
+    float mat_diffuse[4];
+    float mat_specular[4];
+    float mat_emission[4];
+    float mat_shininess;
+
+    /* Fixed-function light sources (glLight*) + light model. Full per-light
+     * state stored; consumed by the future GPU light path. */
+    NovaLight lights[NOVA_MAX_LIGHTS];
+    float light_model_ambient[4];
+
     //Textures stuff
     TexSlot textures[NOVA_MAX_TEXTURES];
     int active_texture_unit;
@@ -222,6 +278,9 @@ extern struct NovaState {
     GLboolean depth_mask;
     int blend_enabled;
     GLenum blend_src, blend_dst;
+    /* Blend equation, per-channel (glBlendEquationSeparate). PICA's GPU_BLENDEQUATION
+     * is real HW — GL_FUNC_ADD / SUBTRACT / REVERSE_SUBTRACT / MIN / MAX all map. */
+    GLenum blend_eq_rgb, blend_eq_alpha;
     int alpha_test_enabled;
     GLenum alpha_func;
     float alpha_ref;

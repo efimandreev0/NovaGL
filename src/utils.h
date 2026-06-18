@@ -27,6 +27,8 @@ GPU_TESTFUNC gl_to_gpu_testfunc(GLenum func);
 
 GPU_BLENDFACTOR gl_to_gpu_blendfactor(GLenum factor);
 
+GPU_BLENDEQUATION gl_to_gpu_blendeq(GLenum mode);
+
 int gl_type_size(GLenum type);
 
 int calc_stride(GLsizei stride, GLint size, GLenum type);
@@ -94,6 +96,14 @@ void cleanup_vbo_stream(void);
 void draw_emulated_quads(int count);
 
 void nova_setup_attr_info(int pos_elements);
+
+/* Lit-draw attribute/buffer layout: adds a normal loader (attr3, 3 floats)
+ * after pos/texcoord/color. */
+void nova_setup_attr_info_lit(void);
+
+void nova_invalidate_buf_cache(void);
+
+void nova_apply_light_env(void);
 
 void nova_setup_buf_info(void *base, int stride);
 

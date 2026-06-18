@@ -5,6 +5,7 @@
 #include <3ds/os.h>
 
 #include "NovaGL.h"
+#include "context.h"
 
 //#define EGL_PEDANTIC // This flag makes eGL error be properly set when a function success
 
@@ -100,4 +101,38 @@ EGLuint64 eglGetSystemTimeNV(void) {
     egl_error = EGL_SUCCESS;
 #endif
     return svcGetSystemTick();
+}
+
+// === GL_KHR_debug ===========================================================
+// NovaGL has no asynchronous debug message stream on PICA200, so we record the
+// callback (so glGetPointerv(GL_DEBUG_CALLBACK_*) etc. would be honest) but
+// never call it. GL_DEBUG_OUTPUT[_SYNCHRONOUS] go through glEnable's default
+// no-op case.
+void glDebugMessageCallback(GLDEBUGPROC callback, const void *userParam) {
+    g.debug_callback = callback;
+    g.debug_user_param = userParam;
+}
+
+void glDebugMessageCallbackKHR(GLDEBUGPROC callback, const void *userParam) {
+    glDebugMessageCallback(callback, userParam);
+}
+
+// === glad loader shims ======================================================
+// NovaGL's GL entry points are linked directly into the binary, so there is no
+// function-pointer table to populate from `load`. Report success so display
+// init code written against glad keeps going. The loader proc is intentionally
+// unused.
+int gladLoadGLLoader(GLADloadproc load) {
+    (void) load;
+    return 1;
+}
+
+int gladLoadGLES1Loader(GLADloadproc load) {
+    (void) load;
+    return 1;
+}
+
+int gladLoadGLES2Loader(GLADloadproc load) {
+    (void) load;
+    return 1;
 }
