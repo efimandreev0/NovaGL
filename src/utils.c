@@ -111,10 +111,9 @@ static void apply_scissor_box(void) {
     int y1 = g.scissor_y + g.scissor_h;
 
     if (g.bound_fbo == 0) {
-        /* The screen's logical (landscape) dims are FIXED constants, NOT
-         * derived from the current target's framebuffer — the target is now
-         * the POT app surface (256x512), whose padded dims would give a wrong
-         * scissor rotation/offset. Logical screen is always 400x240. */
+        /* Screen is rendered sideways (per-draw tilt); scissor rotated to
+         * match. Logical screen is 400x240 (NOT fb-derived: the app surface fb
+         * is POT-padded). */
         const int logical_w = NOVA_SCREEN_W; /* 400 */
         const int logical_h = NOVA_SCREEN_H; /* 240 */
         x0 = clampi(x0, 0, logical_w);
@@ -796,6 +795,8 @@ void apply_gpu_state(void) {
             Mtx_Identity(&tilt);
 
             // ФИКС ФРЕЙМБУФЕРОВ ЗДЕСЬ: ЭКРАН КРУТИТСЯ, А FBO - НЕТ!
+            // The on-screen frame (app surface OR direct LCD) is rendered
+            // sideways via this per-draw tilt; FBOs stay landscape.
             #ifndef NOVAGL_TILT_VARIANT
             #define NOVAGL_TILT_VARIANT 1
             #endif

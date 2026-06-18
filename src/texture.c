@@ -1194,8 +1194,7 @@ void glTexParameteriv(GLenum target, GLenum pname, const GLint *params) {
     if (params) glTexParameteri(target, pname, params[0]);
 }
 
-/* GL ETC1 / ETC1_RGB8 enum (KHR_compressed_texture_etc1). Not in NovaGL.h but
- * the format is constant in the GL spec, so accept it inline here. */
+// ETC1 enum, not in our header but it constant in the spec so define inline
 #ifndef GL_ETC1_RGB8_OES
 #define GL_ETC1_RGB8_OES 0x8D64
 #endif
@@ -1204,10 +1203,8 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, G
                             GLint border, GLsizei imageSize, const GLvoid *data) {
     (void) target; (void) level; (void) border;
 
-    /* ETC1: PICA200 has native sampler support — just hand the pre-compressed
-     * bytes to C3D_TexInit(.., GPU_ETC1) and copy them in. 4 bits/pixel — vs
-     * 32 for RGBA8 — so 8x VRAM win for textures the engine already shipped
-     * compressed (typical GameCube/Wii port atlas). */
+    // ETC1 the PICA can sample by itself, just feed the bytes. 4 bpp vs 32 for
+    // RGBA8 = 8x less vram, nice for GC/Wii port atlases.
     if (internalformat == GL_ETC1_RGB8_OES) {
         GLuint bound = active_bound_texture();
         if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return;
@@ -1247,9 +1244,16 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, G
         return;
     }
 
-    /* Other compressed formats (PVRTC, DXT, …) — PICA200 can't sample them,
-     * allocate an empty RGBA8 placeholder so the binding stays valid. */
+    // every other compressed format (PVRTC, DXT...) PICA cant read. we put an
+    // empty RGBA8 so binding stay valid, but warn one time becouse the texture
+    // will draw transparent/garbage and that is confusing as hell.
     (void) data; (void) imageSize;
+    static int warned = 0;
+    if (!warned) {
+        printf("[Nova]: compressed format 0x%04X not supported, using empty placeholder\n",
+               (unsigned) internalformat);
+        warned = 1;
+    }
     glTexImage2D(target, level, GL_RGBA, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
 }
 

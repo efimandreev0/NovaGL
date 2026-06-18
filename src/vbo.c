@@ -57,15 +57,9 @@ static void free_vbo_storage(VBOSlot *slot) {
     slot->storage_stride = 0;
 }
 
-/* The half-float PTC packing path was wired up but never enabled at the API
- * surface — can_pack_ptc_vbo() always returned 0, so pack_ptc_vertex() and
- * float_to_half_bits() were dead code. Removed to slim the binary; the
- * unpack path stays (vbo_decode_packed_ptc_vertex) so any pre-existing
- * packed slots from a prior build can still be read back when re-bound.
- *
- * To re-enable later: add a real heuristic here (e.g. "raw stride == 24 and
- * size > some threshold"), reintroduce float_to_half_bits + pack_ptc_vertex,
- * and the glBufferData path below already honours the pack_ptc flag. */
+// half-float PTC packing never got turned on (this always return 0). pack code
+// was dead so i droped it, unpack stay so old packed slots still readable.
+// to turn on later: put a real heuristic here, glBufferData already check the flag
 static int can_pack_ptc_vbo(GLsizeiptr size, const GLvoid *data, GLenum usage) {
     (void) size; (void) data; (void) usage;
     return 0;
@@ -215,10 +209,8 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
     int is_stream = (usage == GL_STREAM_DRAW || usage == GL_DYNAMIC_DRAW);
     int reuse_existing = slot->allocated &&
                          slot->capacity >= desired_bytes &&
-                         /* For STREAM/DYNAMIC, never shrink the storage even
-                          * if the new size is much smaller — we'd just be
-                          * thrashing linearAlloc next time the app grows back
-                          * up. Vita's orphan-trick same idea. */
+                         // for STREAM/DYNAMIC dont shrink, app grow back next
+                         // frame anyway and we just thrash linearAlloc
                          (is_stream || slot->capacity <= desired_bytes * 4);
 
     if (!reuse_existing) {
@@ -249,12 +241,9 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
     slot->storage_stride = (uint8_t) desired_stride;
 
     if (data && slot->data) {
-        /* pack_ptc path removed — see can_pack_ptc_vbo comment above. */
         memcpy(slot->data, data, size);
-        /* Flush only the bytes we actually wrote (size, not the rounded-up
-         * capacity). Big STREAM VBOs grew to capacity=2*size with the
-         * power-of-two rule above; flushing the whole capacity would double
-         * the cache-flush cost for nothing. */
+        // flush only size, not the rounded-up capacity, else we pay double for
+        // big stream VBO for no reason
         GSPGPU_FlushDataCache(slot->data, (u32) size);
     }
 }
@@ -327,9 +316,8 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
     if (required > slot->size)
         slot->size = required;
 
-    /* Range flush: streaming apps call glBufferSubData many times per frame
-     * with small chunks. Flushing the whole buffer dominates CPU for big VBOs.
-     * Cache lines on ARM11 are 32 bytes, so widen to that boundary. */
+    // flush only the range we wrote. ARM11 cache line is 32 byte so round to it.
+    // streaming app call this many times a frame, full flush kill cpu on big VBO
     uintptr_t start = (uintptr_t) slot->data + (uintptr_t) offset;
     uintptr_t end = start + (uintptr_t) size;
     start &= ~(uintptr_t) 31;
@@ -337,11 +325,10 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
     GSPGPU_FlushDataCache((const void *) start, (u32) (end - start));
 }
 
-void glReadBuffer(int x) {
-    /* Not supported (single color buffer per target on PICA). Print once,
-     * not on every call — some engines call this per-frame.
-     * TODO: change the signature to (GLenum mode) here AND in NovaGL.h. */
-    (void) x;
+void glReadBuffer(GLenum mode) {
+    // one color buffer per target on PICA, so nothing to pick. warn one time,
+    // some engines spam this every frame
+    (void) mode;
     static int warned = 0;
     if (!warned) {
         printf("[Nova]: glReadBuffer not supported\n");
@@ -349,17 +336,10 @@ void glReadBuffer(int x) {
     }
 }
 
-/* ------------------------------------------------------------------------
- * Buffer mapping
- * ------------------------------------------------------------------------
- * NovaGL stores every VBO in a linearAlloc'd block, so "mapping" is just
- * handing out slot->data. The kicker is the cache: the GPU reads VBOs out of
- * physical memory bypassing the CPU's data cache, so if the caller writes
- * through the mapped pointer we have to flush the cache range on unmap.
- *
- * Packed-PTC VBOs can't be safely mapped (the bytes aren't in the layout the
- * caller expects). We convert them back to raw before handing out the pointer,
- * which costs a memcpy + decode but is a one-time hit per map. */
+// ---- buffer mapping ----
+// every VBO live in a linearAlloc block so "map" is just give back slot->data.
+// GPU read VBO past the cpu cache, so on unmap we must flush the range or GPU
+// see old garbage. packed-PTC cant be mapped (wrong layout) so convert to raw first.
 
 static VBOSlot *map_resolve_slot(GLenum target) {
     GLuint id = 0;
@@ -383,10 +363,8 @@ void *glMapBuffer(GLenum target, GLenum access) {
 
 void *glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access) {
     (void) length;
-    (void) access; // INVALIDATE_* / UNSYNCHRONIZED_* are accepted but ignored —
-                   // we don't synthesize a discard buffer; callers that pass
-                   // GL_MAP_INVALIDATE_BUFFER_BIT get the same storage back
-                   // because Arx writes the whole buffer before drawing anyway.
+    (void) access; // INVALIDATE_/UNSYNCHRONIZED_ we just ignore, no discard buffer.
+                   // app overwrite whole thing before draw anyway
     VBOSlot *slot = map_resolve_slot(target);
     if (!slot) return NULL;
     if (offset < 0 || offset > slot->capacity) return NULL;
@@ -399,9 +377,7 @@ void *glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitf
 GLboolean glUnmapBuffer(GLenum target) {
     VBOSlot *slot = map_resolve_slot(target);
     if (!slot) return GL_FALSE;
-    // Conservatively flush the full buffer rather than tracking the mapped
-    // range — Arx maps tiny chunks per frame, so flushing the whole VBO is
-    // still cheap on the cache controller.
+    // just flush the whole buffer, we dont track the mapped range. cheap enough.
     GSPGPU_FlushDataCache(slot->data, (u32) slot->size);
     return GL_TRUE;
 }

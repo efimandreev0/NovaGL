@@ -1012,14 +1012,14 @@ void glUniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3)
 
 void glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 
-/* GL 3.0+ VAO (stubs for compat) */
+/* GL 3.0+ VAO (real, store the client arrays per object) */
 void glGenVertexArrays(GLsizei n, GLuint *arrays);
 
 void glBindVertexArray(GLuint array);
 
 void glDeleteVertexArrays(GLsizei n, const GLuint *arrays);
 
-/* GL 2.0+ Vertex attrib pointers (stubs for compat) */
+/* GL 2.0+ Vertex attrib pointers (no-op, PICA is fixed-function) */
 void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride,
                            const GLvoid *pointer);
 
@@ -1090,7 +1090,7 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
 void glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width,
                       GLsizei height, GLint border);
 
-void glReadBuffer(int x);
+void glReadBuffer(GLenum mode);
 
 // egl*
 EGLBoolean eglBindAPI(EGLenum api);
@@ -1277,6 +1277,13 @@ void novaDrawClipspaceTris(const void *verts, int vertex_count);
  * client texcoords by this when feeding the clipspace fast lane so NPOT
  * textures (font glyphs) sample the right sub-region. POT textures → 1.0. */
 void novaGetTexCoordScale(GLuint texture, float *su, float *sv);
+
+/* Texture id that aliases the on-screen app surface, so callers can bind the
+ * SCREEN as a sampleable texture (e.g. an engine sampling "framebuffer 0").
+ * Returns 0 if the app surface isn't available. NOTE: sampling this while the
+ * screen is also the active render target is a read-after-write hazard — the
+ * caller should have snapshotted/finished the frame's screen writes first. */
+GLuint novaGetScreenTextureId(void);
 
 /* ------------------------------------------------------------------------
  * Raw clip-space passthrough (UI/HUD fast lane)

@@ -122,9 +122,37 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
         C3D_SetViewport(g.vp_x, g.vp_y, g.vp_w, g.vp_h);
     }
 
+    /* Reset the scissor to the FULL FBO when binding an offscreen target.
+     *
+     * fast3d's 2D blits (gSPImageRectangleEXT, used by the menu-blur and other
+     * FB-EXT effects) force a full default VIEWPORT but DO NOT reset the
+     * scissor — so a render INTO an FBO inherits whatever scissor the previous
+     * SCREEN pass left set (e.g. the menu panel region, in screen
+     * coordinates). Applied to the FBO that wrongly clips the blit, leaving
+     * most of the FBO at its cleared (black) value — the "dark menu blur" /
+     * empty post-process result. The caller will set its own scissor if it
+     * needs one; until then, don't clip the FBO. (Switching back to fb 0
+     * re-applies the screen scissor via fast3d's viewport_or_scissor_changed.) */
+    if (g.bound_fbo != 0) {
+        GLuint ctex = g.fbos[framebuffer].color_tex_id;
+        int lw = (ctex > 0 && ctex < NOVA_MAX_TEXTURES && g.textures[ctex].allocated)
+                     ? g.textures[ctex].width : (int) new_target->frameBuf.width;
+        int lh = (ctex > 0 && ctex < NOVA_MAX_TEXTURES && g.textures[ctex].allocated)
+                     ? g.textures[ctex].height : (int) new_target->frameBuf.height;
+        g.scissor_x = 0;
+        g.scissor_y = 0;
+        g.scissor_w = lw;
+        g.scissor_h = lh;
+        /* apply_gpu_state re-applies the scissor from g.scissor_* before the
+         * next draw; with the full-FBO box it covers everything. fast3d
+         * re-sets its own scissor on the next screen pass. */
+    }
+
     // Форсируем обновление матриц, чтобы снялась/оделась матрица 'tilt'
     g.matrices_dirty = 1;
 }
+
+GLuint novaGetScreenTextureId(void) { return g.app_screen_tex_id; }
 
 void glGenRenderbuffers(GLsizei n, GLuint *ids) { for (GLsizei i = 0; i < n; i++) ids[i] = i + 1; }
 
@@ -311,12 +339,10 @@ GLenum glCheckFramebufferStatus(GLenum target) {
 
 void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1,
                        GLint dstY1, GLbitfield mask, GLenum filter) {
-    /* PICA200 has no native rect-to-rect blit with arbitrary scaling; we
-     * approximate with the fullscreen quad path used by novaBlitTargetToFBO.
-     * The src/dst rect args are ignored — we always copy the full source into
-     * the full destination — which covers ~all engine use cases (resolve to
-     * screen, frame snapshot, motion-blur capture). mask/filter ignored too:
-     * always color, always linear. */
+    // PICA have no rect->rect blit with scaling, so we cheat with the fullscreen
+    // quad from novaBlitTargetToFBO. src/dst rects ignored, always full->full,
+    // always color, always linear. covers basicaly every engine case (resolve,
+    // snapshot, motion blur), the rest nobody hit yet.
     (void) srcX0; (void) srcY0; (void) srcX1; (void) srcY1;
     (void) dstX0; (void) dstY0; (void) dstX1; (void) dstY1;
     (void) mask;  (void) filter;

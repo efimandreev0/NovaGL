@@ -216,12 +216,11 @@ void glStencilOp(GLenum fail, GLenum zfail, GLenum zpass) {
 }
 #endif
 
-/* ===[ GL 2.0+ Shader pipeline stubs ]===
- * NovaGL is fixed-function only. Default behaviour (returns 0) makes callers
- * that do `if (GLuint p = glCreateProgram())` fall back to FFP. Some apps
- * (notably fast3d-based ports) don't gate on that and just call glUseProgram
- * unconditionally; for them, define NOVAGL_GL2_RETURN_DUMMY=1 to keep the
- * original "return 1, lie about success" behaviour. */
+// ===[ GL 2.0+ shader stubs ]===
+// Nova is fixed-function only, no GLSL on PICA. default we return 0 so apps that
+// do `if (glCreateProgram())` fall back to FFP nicely. some ports (fast3d) dont
+// check and call glUseProgram anyway - for them set NOVAGL_GL2_RETURN_DUMMY=1
+// and we lie that everything compiled ok. vodka balalaika.
 #ifndef NOVAGL_GL2_RETURN_DUMMY
 #define NOVAGL_GL2_RETURN_DUMMY 0
 #endif

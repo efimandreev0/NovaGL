@@ -11,10 +11,7 @@
 #define NOVA_SHADER_TEXMTX     2
 #define NOVA_SHADER_CLIPSPACE  3
 
-// Internal NovaGL header: safe to drag in <3ds.h> here because no NovaGL caller
-// includes context.h (it lives under src/). All NovaGL .c files reach this via
-// utils.h or by including context.h directly, so this is where the libctru/citro3d
-// definitions get pulled in.
+// internal header, nobody outside src/ include this so we can pull 3ds.h here
 #include <3ds.h>
 #include <citro3d.h>
 #include "NovaGL.h"
@@ -36,16 +33,13 @@ typedef struct {
     int wrap_t;
     int in_use;
 
-    int is_solid_optimized; //if texture have only 1 color -> creating 1x1 stub.
+    int is_solid_optimized; // texture with 1 color -> we make 1x1 to save vram
 
-    // Mipmap state. Arx sets GL_GENERATE_MIPMAP before glTexImage2D when it
-    // wants automatic mip generation, and GL_TEXTURE_MAX_LEVEL=0 for textures
-    // that must never sample beyond level 0. We honour both — PICA200 with
-    // unset MAX_LEVEL on a single-level C3D_Tex reads garbage memory for the
-    // missing mips, which manifests as tiled-repeat corruption on screen.
-    int generate_mipmap;   //!< glTexParameteri(GL_GENERATE_MIPMAP, GL_TRUE) was set
-    int max_level;         //!< glTexParameteri(GL_TEXTURE_MAX_LEVEL, N); -1 = unset
-    int has_mipmap;        //!< the underlying C3D_Tex actually has mip levels
+    // mipmap flags. if max_level unset PICA read garbage for missing mips and
+    // you get ugly tiled repeat on screen, so we track it
+    int generate_mipmap;   // GL_GENERATE_MIPMAP was set
+    int max_level;         // GL_TEXTURE_MAX_LEVEL, -1 = not set
+    int has_mipmap;        // real C3D_Tex have mips or no
 } TexSlot;
 
 typedef struct {
@@ -93,6 +87,26 @@ typedef struct {
     GLfloat eye_plane[4];
 } NovaTexGenCoord;
 
+// one client array (vertex/texcoord/color/normal). same fields for all 4 so
+// VAO can just copy them around like a box
+typedef struct {
+    int enabled;
+    GLint size;
+    GLenum type;
+    GLsizei stride;
+    const void *pointer;
+    GLuint vbo_id;
+} NovaVertArray;
+
+// VAO is realy just a container that remember the 4 arrays + index buffer.
+// bind = swap current live state in/out. slot 0 keep the default VAO.
+#define NOVA_MAX_VAOS 64
+typedef struct {
+    int in_use;
+    NovaVertArray vertex, texcoord, color, normal;
+    GLuint element_buffer;
+} VAOSlot;
+
 extern struct NovaState {
     //C3D targets
     C3D_RenderTarget *render_target_top; // physical top LCD (left eye)
@@ -104,6 +118,9 @@ extern struct NovaState {
     C3D_RenderTarget *app_target;
     int               app_pot_w, app_pot_h;     // texture storage (POT)
     int               app_logical_w, app_logical_h; // = LCD dims (240x400 native)
+    /* A normal g.textures[] slot that ALIASES app_tex, so the screen can be
+     * sampled as a texture (PD's framebuffer-0-as-texture effects). 0 = none. */
+    GLuint            app_screen_tex_id;
 
     //Shader stuff
     /* Full FFP shader: separate proj+modelview dp4 chains, fog, texmtx. */
@@ -178,6 +195,8 @@ extern struct NovaState {
     int tex_mtx_dirty;
 
     float cur_color[4];
+    float cur_normal[3]; // current normal from glNormal*. no lighting yet but
+                         // we keep it so the state is real and ready if lighting come
 
     //Textures stuff
     TexSlot textures[NOVA_MAX_TEXTURES];
@@ -191,15 +210,12 @@ extern struct NovaState {
     GLuint bound_element_array_buffer;
     int vbo_next_id;
 
-    struct {
-        int enabled;
-        GLint size;     /* GL_NORMAL_ARRAY is always 3 by spec, but kept here so
-                         * all four arrays share the same layout/type. */
-        GLenum type;
-        GLsizei stride;
-        const void *pointer;
-        GLuint vbo_id;
-    } va_vertex, va_texcoord, va_color, va_normal;
+    // live client array state. when a VAO is bound this is that VAO arrays.
+    NovaVertArray va_vertex, va_texcoord, va_color, va_normal;
+
+    // VAO pool. slot 0 = default VAO storage, bound_vao 0 means default.
+    VAOSlot vaos[NOVA_MAX_VAOS];
+    GLuint bound_vao;
 
     int depth_test_enabled;
     GLenum depth_func;

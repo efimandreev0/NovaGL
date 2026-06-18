@@ -54,39 +54,17 @@
 
 struct NovaState g;
 
-/* -----------------------------------------------------------------------------
- * Intentionally-skipped audit items (kept here so future readers see the
- * decision trail rather than discovering "why isn't this fixed?" by surprise):
- *
- *  #19 Lighting (GL_LIGHTING / glLight*) — not implemented. Would need a PICA
- *      C3D_LightEnv setup per light plus normal-array plumbing through draw.c.
- *      Real-world tests on actual lit GL ES 1.1 scenes are required; deferred
- *      until a target app surfaces (no GL ES 1.1 game currently shipped on
- *      NovaGL uses fixed-function lights — all of them roll their own through
- *      TEV / per-vertex colors).
- *
- *  #23 lookup.c perfect-hash for eglGetProcAddress — table search is O(N) per
- *      lookup but lookups happen <100 times per app lifetime (init only).
- *      Switching to gperf would shave milliseconds at startup and add a build-
- *      time dep. Not worth it.
- *
- *  #34 PICA TEV stage-mask single-register optimization — citro3d doesn't
- *      expose the active-stage mask register and direct GPUCMD_AddWrite is
- *      fragile across libctru versions. The current implementation pads
- *      unused stages with passthrough writes (~5 register writes), only when
- *      tev_dirty=1 (rare). Skipping.
- *
- *  #37 Drop fog math from FULL shader when CPU sets density=0 — would need
- *      recompiling all .pica shaders and validation against Arx/PD which we
- *      can't do without a 3DS in hand. The hardware fog path added in #20
- *      makes the FULL shader the slow path anyway; once games migrate to
- *      EXP/EXP2 (now functional), FULL is only used for legacy GL_LINEAR.
- *
- *  #41 Mixed Russian/English comments — purely stylistic; subjective.
- *
- *  #42 No CI / regression tests — out of scope for this pass. Would require
- *      a Citra headless harness + golden framebuffer CRC fixtures.
- * ---------------------------------------------------------------------------*/
+// stuff we skip on purpose, so nobody ask "why this not fixed" later:
+//
+//  - lighting (glLight*): not done. need C3D_LightEnv per light + normals
+//    trough draw.c. no real GL ES 1.1 game we run use FF lights anyway, they
+//    all do their own thing with TEV / vertex colors. maybe later.
+//  - eglGetProcAddress is O(N) table scan, but it only called on init (<100
+//    times ever) so who care. gperf not worth a build dep.
+//  - TEV stage mask single-reg trick: citro3d dont expose the reg and raw
+//    GPUCMD_AddWrite break between libctru versions. we pad unused stages, fine.
+//  - no CI / regresion tests yet. would need headless Citra + golden crc. todo
+//    someday when i have time and more vodka balalaika.
 
 void nova_init() {
     /* Defaults reverted to the historical values (2MB array / 512KB index /
@@ -117,8 +95,12 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
 
     gfxSet3D(true);
 
+    /* The physical top LCD target only ever receives the present blit (a
+     * depth-test-off fullscreen quad) — it needs NO depth buffer. Dropping it
+     * frees ~384KB of VRAM, headroom the POT app surface below needs. (-1 =
+     * the citro3d "no depth" sentinel for C3D_RenderTargetCreate.) */
     g.render_target_top = C3D_RenderTargetCreate(NOVA_SCREEN_H, NOVA_SCREEN_W,
-                                                 GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+                                                 GPU_RB_RGBA8, -1);
     C3D_RenderTargetSetOutput(g.render_target_top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
 
     /* Right-eye target is created lazily on the first novaBeginEye(1) call —
@@ -163,8 +145,34 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
          * Framebuffer-from-screen effects won't work, but the game renders. */
         if (g.app_tex.data) { C3D_TexDelete(&g.app_tex); memset(&g.app_tex, 0, sizeof(g.app_tex)); }
         g.current_target = g.render_target_top;
+        g.app_screen_tex_id = 0;
     } else {
         g.current_target = g.app_target;
+
+        /* Register a g.textures[] slot that ALIASES app_tex so the screen can
+         * be bound as a sampleable texture (PD samples framebuffer 0 directly
+         * for cutscene/scope distortion — "fb 0 as texture"). The slot shares
+         * app_tex's VRAM (struct copy; app_tex's fields are fixed after init).
+         * Marked in_use so glGenTextures skips it. */
+        GLuint sid = 1;
+        while (sid < NOVA_MAX_TEXTURES && g.textures[sid].in_use) sid++;
+        if (sid < NOVA_MAX_TEXTURES) {
+            TexSlot *s = &g.textures[sid];
+            memset(s, 0, sizeof(*s));
+            s->tex = g.app_tex;          /* alias: same VRAM .data */
+            s->allocated = 1;
+            s->in_use = 1;
+            s->fmt = GPU_RGBA8;
+            s->width = g.app_logical_w;  s->height = g.app_logical_h;
+            s->orig_width = g.app_logical_w; s->orig_height = g.app_logical_h;
+            s->pot_w = g.app_pot_w;      s->pot_h = g.app_pot_h;
+            s->min_filter = GL_LINEAR;   s->mag_filter = GL_LINEAR;
+            s->wrap_s = GL_CLAMP_TO_EDGE; s->wrap_t = GL_CLAMP_TO_EDGE;
+            s->max_level = 0;
+            g.app_screen_tex_id = sid;
+        } else {
+            g.app_screen_tex_id = 0;
+        }
     }
 
     g.render_target_bot = C3D_RenderTargetCreate(NOVA_SCREEN_BOTTOM_W, NOVA_SCREEN_BOTTOM_H,
@@ -295,6 +303,11 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.cur_color[1] = 1.0f;
     g.cur_color[2] = 1.0f;
     g.cur_color[3] = 1.0f;
+
+    // GL default current normal is (0,0,1), not zero
+    g.cur_normal[0] = 0.0f;
+    g.cur_normal[1] = 0.0f;
+    g.cur_normal[2] = 1.0f;
 
     g.depth_test_enabled = 1;
     g.depth_func = GL_LEQUAL;
@@ -429,22 +442,13 @@ static void nova_present_app(C3D_RenderTarget *lcd) {
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
     C3D_SetViewport(0, 0, (u32) lcd->frameBuf.width, (u32) lcd->frameBuf.height);
 
-    /* Logical region of the POT app texture. Content is bottom-left-anchored
-     * because the per-frame viewport origin is (0,0) (see nova_set_render_target
-     * / glViewport: C3D_SetViewport y measured from the bottom). If the present
-     * ever shows the image vertically mirrored, swap the v0/v1 pair below. */
+    /* App is stored in the SAME sideways layout as the LCD, so the present is
+     * a straight 1:1 copy of the logical sub-rect (no rotation). V maps
+     * straight — flipping it mirrors the screen left-right (the texture's V
+     * axis is the screen's horizontal axis under the 90° storage). */
     const float u1 = (float) g.app_logical_w / (float) g.app_pot_w;
     const float v1 = (float) g.app_logical_h / (float) g.app_pot_h;
 
-    /* Fullscreen clip-space quad ([-1,1]) covering the LCD as 2 triangles;
-     * UVs sample only the logical sub-rect. Vertex layout = NovaGL native
-     * clipspace (x,y,z,w, u,v, rgba8) — 28 bytes. Colour = white (REPLACE
-     * ignores it). */
-    /* V maps straight (no flip): the app content is stored in the SAME
-     * sideways layout as the LCD, so presenting is a direct 1:1 texel copy.
-     * NB: because that layout is rotated 90°, the texture's V axis is the
-     * screen's HORIZONTAL axis — flipping V here mirrors the screen
-     * left-right (which is exactly what the earlier RTT-style flip did). */
     float v[6 * 7];
     const float corners[6][4] = {
         {-1.f, -1.f, 0.f, 0.f}, /* x,y,u,v */

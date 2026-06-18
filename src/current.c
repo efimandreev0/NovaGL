@@ -5,9 +5,8 @@
 #include "NovaGL.h"
 #include "utils.h"
 
-/* GL spec: signed integer color components normalize as (2c+1)/(2^N-1) clamped
- * to [-1, 1]; since framebuffer storage is unsigned [0, 1], we clamp to that
- * range after. Unsigned variants are c/(2^N-1) which is already in [0, 1]. */
+// signed color -> (2c+1)/max then clamp to [0,1] becouse our framebuffer is
+// unsigned. unsigned variants are already 0..1 so no clamp needed.
 static inline GLfloat norm_b(GLbyte c)   { return clampf((2.0f * (float)c + 1.0f) / 255.0f,        0.0f, 1.0f); }
 static inline GLfloat norm_s(GLshort c)  { return clampf((2.0f * (float)c + 1.0f) / 65535.0f,      0.0f, 1.0f); }
 static inline GLfloat norm_i(GLint c)    { return clampf((2.0f * (float)c + 1.0f) / 4294967295.0f, 0.0f, 1.0f); }
@@ -199,28 +198,25 @@ void glColor4usv(const GLushort *v) {
 void glColorMaterial(GLenum face, GLenum mode) {
     (void) face;
     (void) mode;
-    /* Color material not implemented - PICA200 doesn't support it directly */
+    // no lighting in Nova so color material do nothing
 }
 
 void glMultiTexCoord4f(GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q) {
-    (void) target;
-    (void) s;
-    (void) t;
-    (void) r;
-    (void) q;
+    // PICA pipeline sample only one texcoord set, so unit 0 is the one that
+    // realy do something. route it to the normal texcoord, drop higher units.
+    if (target == GL_TEXTURE0) glTexCoord4f(s, t, r, q);
 }
 
+// integer normals map to [-1,1] by dividing on the type max (spec rule)
 void glNormal3f(GLfloat nx, GLfloat ny, GLfloat nz) {
-    (void) nx;
-    (void) ny;
-    (void) nz;
+    g.cur_normal[0] = nx;
+    g.cur_normal[1] = ny;
+    g.cur_normal[2] = nz;
 }
 
 /* Additional glNormal variants */
 void glNormal3b(GLbyte nx, GLbyte ny, GLbyte nz) {
-    (void) nx;
-    (void) ny;
-    (void) nz;
+    glNormal3f((float) nx / 127.0f, (float) ny / 127.0f, (float) nz / 127.0f);
 }
 
 void glNormal3bv(const GLbyte *v) {
@@ -228,9 +224,7 @@ void glNormal3bv(const GLbyte *v) {
 }
 
 void glNormal3d(GLdouble nx, GLdouble ny, GLdouble nz) {
-    (void) nx;
-    (void) ny;
-    (void) nz;
+    glNormal3f((GLfloat) nx, (GLfloat) ny, (GLfloat) nz);
 }
 
 void glNormal3dv(const GLdouble *v) {
@@ -242,9 +236,7 @@ void glNormal3fv(const GLfloat *v) {
 }
 
 void glNormal3i(GLint nx, GLint ny, GLint nz) {
-    (void) nx;
-    (void) ny;
-    (void) nz;
+    glNormal3f((float) nx / 2147483647.0f, (float) ny / 2147483647.0f, (float) nz / 2147483647.0f);
 }
 
 void glNormal3iv(const GLint *v) {
@@ -252,9 +244,7 @@ void glNormal3iv(const GLint *v) {
 }
 
 void glNormal3s(GLshort nx, GLshort ny, GLshort nz) {
-    (void) nx;
-    (void) ny;
-    (void) nz;
+    glNormal3f((float) nx / 32767.0f, (float) ny / 32767.0f, (float) nz / 32767.0f);
 }
 
 void glNormal3sv(const GLshort *v) {

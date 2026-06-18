@@ -2,13 +2,13 @@
 // created by efimandreev0 on 05.04.2026.
 //
 
+#include <stdio.h>
+
 #include "NovaGL.h"
 #include "utils.h"
 
-/* Spec validation helpers (GL ES 1.1 §2.8): invalid size/type/stride raise
- * an error and leave the array state unchanged. Desktop types (GL_INT,
- * GL_DOUBLE-as-float ports won't hit this) are accepted leniently where the
- * draw path can convert them. */
+// bad size/type/stride -> error and dont touch the array. GL_INT we let pass
+// becouse some desktop ports give it and draw path can eat it
 static int va_validate(GLint size, GLint min_size, GLint max_size, GLsizei stride) {
     if (size < min_size || size > max_size || stride < 0) {
         g.last_error = GL_INVALID_VALUE;
@@ -46,8 +46,7 @@ void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *po
 }
 
 void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
-    /* ES 1.1: size must be 4. We accept 3 as a desktop-GL leniency (the draw
-     * path pads alpha=255), anything else is GL_INVALID_VALUE. */
+    // spec want 4 but we also take 3 (draw path put alpha=255), other is error
     if (size != 3 && size != 4) {
         g.last_error = GL_INVALID_VALUE;
         return;
@@ -99,29 +98,127 @@ void glDisableClientState(GLenum cap) {
     else g.last_error = GL_INVALID_ENUM;
 }
 
-/* GL 3.0+ VAO stubs */
-void glGenVertexArrays(GLsizei n, GLuint *arrays) {
-    for (GLsizei i = 0; i < n; i++) arrays[i] = i + 1;
+// ---- VAO ----
+// real now, not a lie. a VAO just hold the 4 client arrays + index buffer.
+// live state always sit in g.va_* , bind = save old slot, load new slot.
+
+// copy the live arrays into a slot (and the element buffer binding too)
+static void vao_save_live(VAOSlot *slot) {
+    slot->vertex   = g.va_vertex;
+    slot->texcoord = g.va_texcoord;
+    slot->color    = g.va_color;
+    slot->normal   = g.va_normal;
+    slot->element_buffer = g.bound_element_array_buffer;
 }
 
-void glBindVertexArray(GLuint array) { (void) array; }
+// load slot back into live state
+static void vao_load_live(const VAOSlot *slot) {
+    g.va_vertex   = slot->vertex;
+    g.va_texcoord = slot->texcoord;
+    g.va_color    = slot->color;
+    g.va_normal   = slot->normal;
+    g.bound_element_array_buffer = slot->element_buffer;
+}
+
+void glGenVertexArrays(GLsizei n, GLuint *arrays) {
+    if (n < 0 || !arrays) {
+        g.last_error = GL_INVALID_VALUE;
+        return;
+    }
+    for (GLsizei i = 0; i < n; i++) {
+        GLuint id = 1; // 0 is reserved for default VAO
+        while (id < NOVA_MAX_VAOS && g.vaos[id].in_use) id++;
+        if (id == NOVA_MAX_VAOS) {
+            g.last_error = GL_OUT_OF_MEMORY;
+            arrays[i] = 0;
+            break;
+        }
+        memset(&g.vaos[id], 0, sizeof(g.vaos[id]));
+        g.vaos[id].in_use = 1;
+        arrays[i] = id;
+    }
+}
+
+void glBindVertexArray(GLuint array) {
+    if (array >= NOVA_MAX_VAOS) {
+        g.last_error = GL_INVALID_OPERATION;
+        return;
+    }
+    if (array == g.bound_vao) return; // already there, dont thrash
+    // stash what we have now, then bring the new one in
+    vao_save_live(&g.vaos[g.bound_vao]);
+    g.bound_vao = array;
+    vao_load_live(&g.vaos[array]);
+}
 
 void glDeleteVertexArrays(GLsizei n, const GLuint *arrays) {
-    (void) n;
-    (void) arrays;
+    if (n < 0 || !arrays) {
+        g.last_error = GL_INVALID_VALUE;
+        return;
+    }
+    for (GLsizei i = 0; i < n; i++) {
+        GLuint id = arrays[i];
+        if (id == 0 || id >= NOVA_MAX_VAOS || !g.vaos[id].in_use) continue;
+        // killing the bound one -> spec say go back to default (0)
+        if (id == g.bound_vao) {
+            g.bound_vao = 0;
+            vao_load_live(&g.vaos[0]);
+        }
+        memset(&g.vaos[id], 0, sizeof(g.vaos[id]));
+    }
 }
 
-/* GL 2.0+ vertex attrib pointer stubs */
+// ---- generic vertex attribs (GL2 style) ----
+// PICA have no generic attrib slots, BUT we can still make the common apps work
+// by aliasing the classic ARB_vertex_program index layout onto the fixed-function
+// arrays: 0=position, 2=normal, 3=color, 8=texcoord0. apps that use weird custom
+// indexes (from glGetAttribLocation, wich we return -1 anyway) fall trough to the
+// warn. not perfect but cover the typical case.
+#define NOVA_ATTR_POSITION 0
+#define NOVA_ATTR_NORMAL   2
+#define NOVA_ATTR_COLOR    3
+#define NOVA_ATTR_TEXCOORD 8
+
+static void warn_unknown_attrib(GLuint index) {
+    static int warned = 0;
+    if (!warned) {
+        printf("[Nova]: generic vertex attrib %u has no fixed-function slot, ignored\n", (unsigned) index);
+        warned = 1;
+    }
+}
+
+// turn a generic index into the matching GL client-state cap. 0 = no match.
+static GLenum generic_attrib_cap(GLuint index) {
+    switch (index) {
+        case NOVA_ATTR_POSITION: return GL_VERTEX_ARRAY;
+        case NOVA_ATTR_NORMAL:   return GL_NORMAL_ARRAY;
+        case NOVA_ATTR_COLOR:    return GL_COLOR_ARRAY;
+        case NOVA_ATTR_TEXCOORD: return GL_TEXTURE_COORD_ARRAY;
+        default:                 return 0;
+    }
+}
+
 void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride,
                            const GLvoid *pointer) {
-    (void) index;
-    (void) size;
-    (void) type;
+    // normalized flag we cant fully honor, but the conventional layout lines up
+    // (color = normalized ubyte, position/texcoord = float) so it mostly fine.
     (void) normalized;
-    (void) stride;
-    (void) pointer;
+    switch (index) {
+        case NOVA_ATTR_POSITION: glVertexPointer(size, type, stride, pointer);   break;
+        case NOVA_ATTR_NORMAL:   glNormalPointer(type, stride, pointer);         break;
+        case NOVA_ATTR_COLOR:    glColorPointer(size, type, stride, pointer);    break;
+        case NOVA_ATTR_TEXCOORD: glTexCoordPointer(size, type, stride, pointer); break;
+        default:                 warn_unknown_attrib(index);                     break;
+    }
 }
 
-void glEnableVertexAttribArray(GLuint index) { (void) index; }
+void glEnableVertexAttribArray(GLuint index) {
+    GLenum cap = generic_attrib_cap(index);
+    if (cap) glEnableClientState(cap);
+    else warn_unknown_attrib(index);
+}
 
-void glDisableVertexAttribArray(GLuint index) { (void) index; }
+void glDisableVertexAttribArray(GLuint index) {
+    GLenum cap = generic_attrib_cap(index);
+    if (cap) glDisableClientState(cap);
+}

@@ -2,16 +2,15 @@
 // created by efimandreev0 on 05.04.2026.
 //
 
+#include <stdio.h>
+
 #include "NovaGL.h"
 #include "utils.h"
 
 void glFogf(GLenum pname, GLfloat param) {
     switch (pname) {
         case GL_FOG_MODE: {
-            /* fog_mode is GLenum; comparing the freshly-cast float against the
-             * stored enum lets us notice "no change" cases (otherwise this dirties
-             * the fog every frame because float->uint coercion produces a new
-             * compare each time). */
+            // cast to enum first then compare, so we dont dirty fog every frame
             GLenum new_mode = (GLenum) param;
             if (g.fog_mode != new_mode) {
                 g.fog_mode = new_mode;
@@ -100,12 +99,16 @@ void glFogiv(GLenum pname, const GLint *params) {
 
 void glFogx(GLenum pname, GLfixed param) { glFogf(pname, (float) param / 65536.0f); }
 
-/* GL_EXT_fog_coord: lets the app supply a per-vertex fog coordinate. We compute
- * fog from depth in the vertex shader, so the pointer is silently discarded.
- * Kept as a real symbol so callers that only need the function to exist for
- * conditional code paths can link. */
+// GL_EXT_fog_coord. we make fog from depth in the shader so per-vertex fog coord
+// is droped. keep the symbol so apps that just need it to link are happy, but
+// yell once so nobody think the pointer is actualy used.
 void glFogCoordPointer(GLenum type, GLsizei stride, const GLvoid *pointer) {
     (void) type;
     (void) stride;
     (void) pointer;
+    static int warned = 0;
+    if (!warned) {
+        printf("[Nova]: glFogCoordPointer ignored, fog come from depth\n");
+        warned = 1;
+    }
 }
