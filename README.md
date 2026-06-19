@@ -1,43 +1,73 @@
 # NovaGL
 <p align="center"><img width="50%" src="./NovaGL.png"></p>
+
 OpenGL ES 1.1 → Citro3D translation layer for Nintendo 3DS (PICA200 GPU).
 
-Drop-in replacement for `<GLES/gl.h>` that maps fixed-function GL calls to Citro3D's API. Designed for porting GL ES 1.1 applications (like Minecraft PE) to the 3DS.
+Drop-in replacement for `<GLES/gl.h>` that maps fixed-function GL calls to Citro3D. Built for porting GL ES 1.1 applications (like Minecraft PE, PD port, various homebrew engines) to the 3DS without rewriting the renderer from scratch.
 
-## Features
+**Full API reference with per-function implementation status → [api.md](api.md)**
 
-- 225 and 30+ stubbed GL ES 1.1 functions implemented
-- Matrix stacks (projection, modelview, texture)
-- VBO support with linearAlloc-backed GPU memory
-- Texture management with automatic Morton swizzle for PICA200
-- TEV-based texture environment (GL_MODULATE, GL_REPLACE, GL_DECAL, GL_BLEND)
-- Alpha blending, depth test, alpha test, scissor test, culling
-- Fog support
-- Display list recording/playback (for font rendering)
-- Embedded PICA200 vertex shader (no romfs dependency)
+## What actually works
+
+- Matrix stacks (modelview, projection, texture) — 32 deep each
+- VBO with linearAlloc-backed GPU memory, with map/unmap
+- Textures: auto-PoT downscale, Morton swizzle, up to 2048 slots, persistent SD card cache
+- 3 texture units, full GL_COMBINE / TEV compiler including PICA-specific extensions
+- Alpha blend (all GL ES 1.1 factors + separate RGB/alpha equations), depth test, alpha test, scissor, stencil (real PICA path)
+- Culling, polygon offset (approximate), fog (LINEAR/EXP/EXP2)
+- Immediate mode emulation via internal ring buffer (`glBegin`/`glEnd`)
+- Display list recording/playback (limited op set, good enough for font rendering)
+- Hardware lighting via C3D_LightEnv (works on real HW, Citra's lighting emulation is patchy)
+- Render-to-texture FBOs backed by VRAM (the stock `glFramebufferTexture2D` path, plus `novaCreateRenderTextureFBO` for the correct VRAM-backed path)
+- Stereoscopic 3D (`novaBeginEye` / `novaSet3DDepth`)
+- Clip-space 2D fast lane for UI/HUD (`novaBeginClipSpace2D` + `novaDrawClipspaceTris`)
+- VAO (GL 3.0-style, stores client array state per object)
+- `glReadPixels` (slow CPU path; optional DisplayTransfer HW path via compile flag)
+- GL 2.0 shader pipeline stubs so ports that link against GL 2.0 headers compile
+
+## What doesn't work
+
+- GLSL shaders (PICA is fixed-function, period)
+- `glClipPlane` (no user clip planes on PICA)
+- `glPolygonMode` (no wireframe)
+- `glLineWidth` (always 1px)
+- `glBlitFramebuffer` (use `novaBlitTargetToFBO` instead)
+- TexGen
+- EGL (stubs only — not needed on 3DS)
 
 ## Building
 
-Requires [devkitPro](https://devkitpro.org/) with devkitARM, libctru, citro3d, and CMake 3.13+ installed.
+Requires [devkitPro](https://devkitpro.org/) with devkitARM, libctru, citro3d, and CMake 3.13+.
 
 ```bash
 mkdir build && cd build
 cmake ..
 make
 
-# Build without examples
+# Without examples
 cmake -DGL2CITRO3D_BUILD_EXAMPLES=OFF ..
 make
 ```
+
+Useful compile flags:
+
+| Flag | Effect |
+|---|---|
+| `-DNOVAGL_SMALL_INIT_DEFAULTS=1` | 512KB/128KB/256KB buffers instead of 2MB/512KB/512KB. For UI-only apps. |
+| `-DNOVAGL_FRAME_MODE=0` | Async frame submission. ~20–40% faster on GPU-bound scenes, slightly riskier. |
+| `-DNOVAGL_DISABLE_STENCIL=1` | Turn stencil back into a no-op if you hit citro3d asserts. |
+| `-DNOVAGL_GL2_RETURN_DUMMY=1` | glCreateShader/glCreateProgram return fake non-zero ids. For ports that don't check and call glUseProgram regardless. |
+| `-DNOVAGL_ENABLE_GLREADPIXELS_HW=1` | Use DisplayTransfer for full-screen glReadPixels. Faster but output is transposed relative to GL convention. |
+
 ## Usage
 
 ### Integration
 
 1. Add as a CMake subdirectory or build separately
-2. Include the header: `#include <NovaGL.h>`
-3. Link with CMake: `target_link_libraries(your_app PRIVATE NovaGL)`
+2. `#include <NovaGL.h>` — intentionally does **not** include `<3ds.h>` so it won't collide with a `Thread` typedef in your engine
+3. `target_link_libraries(your_app PRIVATE NovaGL)`
 
-### Initialization
+### Basic init
 
 ```c
 #include <3ds.h>
@@ -46,62 +76,83 @@ make
 
 int main(void) {
     gfxInitDefault();
-    nova_init();       // Initialize translator + Citro3D
+    nova_init();
 
     while (aptMainLoop()) {
-        
-        // ... your GL ES 1.1 drawing code ...
-        
-        NovaSwapBuffers();
+        // your GL ES 1.1 drawing code
+        novaSwapBuffers();
     }
 
-    nova_fini();       // Cleanup
+    nova_fini();
     gfxExit();
     return 0;
 }
 ```
-### 3D Usage
+
+### Stereoscopic 3D
+
 ```c
-void RenderFrame() {
+void RenderFrame(void) {
     int eyes = novaGetEyeCount();
 
     for (int i = 0; i < eyes; i++) {
-        novaBeginEye(i); 
+        novaBeginEye(i);
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        DrawWorld();
 
-        DrawWorld(); 
-
-        // Setting 3D to 0.0 to the UI doesn't corrupt.
         novaSet3DDepth(0.0f);
         DrawUI();
-        
-        // 3D for next frame
-        novaSet3DDepth(0.05f); 
+
+        novaSet3DDepth(0.05f);
     }
 
-    // Buffer swap
     novaSwapBuffers();
 }
 ```
-### Vertex Format
 
-The translator uses a fixed vertex layout matching MCPE's `VertexDeclPTC`:
+### Vertex format
+
+The default draw path expects this layout (matches MCPE's `VertexDeclPTC`):
 
 ```c
 typedef struct {
-    float x, y, z;       // Position (12 bytes)
-    float u, v;           // Texcoord (8 bytes)
-    unsigned int color;   // ABGR packed color (4 bytes)
-} Vertex;                 // Total: 24 bytes
+    float x, y, z;       // Position  (12 bytes)
+    float u, v;           // Texcoord  (8 bytes)
+    unsigned int color;   // ABGR packed (4 bytes)
+} Vertex;                 // 24 bytes total
 ```
 
-### Key Differences from Desktop GL
+Vertex data must live in linear memory (`linearAlloc` or a VBO backed by it) — the GPU reads it directly.
+
+### Texture cache (optional)
+
+Skips PNG decode + Morton swizzle on subsequent boots. ~300ms → ~30ms per texture on a 268MHz ARM11.
+
+```c
+nova_texture_cache_set_directory("sdmc:/Nova/cache/MyGame");
+
+// ...
+
+uint32_t hash = my_hash(blob, blobSize);
+glBindTexture(GL_TEXTURE_2D, texId);
+int origW, origH;
+if (!nova_texture_cache_load(hash, &origW, &origH)) {
+    uint8_t *pixels = stbi_load_from_memory(blob, blobSize, ...);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    stbi_image_free(pixels);
+    nova_texture_cache_save(hash);
+}
+```
+
+### Key differences from desktop GL
 
 - Vertex data **must** be in linear memory (`linearAlloc`) for GPU access
-- Textures are automatically Morton-swizzled during `glTexImage2D`
-- `nova_set_render_target(0)` for top screen, `(1)` for bottom screen
-- Max texture size limited by PICA200 (typically 1024x1024)
+- Textures are automatically Morton-swizzled and PoT-rounded during `glTexImage2D`
+- `nova_set_render_target(0)` for top screen, `(1)` for right eye, `(2)` for bottom screen
+- Max texture size: 1024×1024 (PICA200 limit)
+- Depth buffer is D24S8 — clearing depth also clears stencil and vice versa (HW limitation)
+- No GLSL, no compute, no geometry shaders, no transform feedback — it's a 2011 handheld
 
 ## License
 
