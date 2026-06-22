@@ -44,7 +44,9 @@ add_library(NovaGL STATIC
         immediate.c
         lookup.c
         egl.c
+        splashscreen.c
         nova_stb_ds_impl.c
+        nova_glfw.c
 )
 
 set_property(TARGET NovaGL PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
@@ -58,6 +60,35 @@ target_compile_options(NovaGL PRIVATE
 option(NOVA_VBO_STREAM "Use VBO stream" ON)
 if (NOVA_VBO_STREAM)
     target_compile_definitions(NovaGL PRIVATE NOVA_VBO_STREAM)
+endif ()
+
+# ---- Performance hacks (off by default; trade compliance/safety for speed) ----
+# Master switch: enables NO_DEBUG + DRAW_SPEEDHACK + ASYNC_FRAME together.
+option(NOVAGL_SPEEDHACKS "Enable the full NovaGL speedhack bundle" ON)
+if (NOVAGL_SPEEDHACKS)
+    target_compile_definitions(NovaGL PRIVATE NOVAGL_SPEEDHACKS=1)
+endif ()
+
+# Individual knobs (also implied by NOVAGL_SPEEDHACKS via context.h).
+option(NOVAGL_NO_DEBUG "Strip per-draw GL validation + pointer guards" OFF)
+if (NOVAGL_NO_DEBUG)
+    target_compile_definitions(NovaGL PRIVATE NOVAGL_NO_DEBUG=1)
+endif ()
+
+option(NOVAGL_DRAW_SPEEDHACK "Tighter vertex-ring alignment + trust caller pointers" OFF)
+if (NOVAGL_DRAW_SPEEDHACK)
+    target_compile_definitions(NovaGL PRIVATE NOVAGL_DRAW_SPEEDHACK=1)
+endif ()
+
+option(NOVAGL_ASYNC_FRAME "Non-blocking frame submission (NOVAGL_FRAME_MODE=0)" OFF)
+if (NOVAGL_ASYNC_FRAME)
+    target_compile_definitions(NovaGL PRIVATE NOVAGL_ASYNC_FRAME=1)
+endif ()
+
+# Boot splashscreen is ON by default; flip this OFF to compile it out.
+option(NOVAGL_SPLASHSCREEN "Show the animated NovaGL boot splashscreen" ON)
+if (NOT NOVAGL_SPLASHSCREEN)
+    target_compile_definitions(NovaGL PRIVATE NOVAGL_NO_SPLASHSCREEN=1)
 endif ()
 
 target_include_directories(NovaGL
@@ -78,4 +109,5 @@ target_link_libraries(NovaGL
 
 install(TARGETS NovaGL DESTINATION lib)
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../include/NovaGL.h" DESTINATION include)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../include/nova_glfw.h" DESTINATION include)
 

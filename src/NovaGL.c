@@ -430,6 +430,14 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
         C3D_FrameDrawOn(g.render_target_top);
         g.current_target = g.render_target_top;
     }
+
+    /* Animated "Powered by NovaGL" boot splash. Runs synchronously here, inside
+     * the freshly-opened frame, and leaves the exact post-init invariant behind
+     * (open frame on the app surface, ring offsets at 0). Disable with
+     * -DNOVAGL_NO_SPLASHSCREEN=1 (or vitaGL's -DNO_SPLASHSCREEN=1). */
+#if !(defined(NOVAGL_NO_SPLASHSCREEN) && NOVAGL_NO_SPLASHSCREEN) && !defined(NO_SPLASHSCREEN)
+    nova_splash_run();
+#endif
 }
 
 int novaGetEyeCount(void) {
@@ -719,7 +727,15 @@ static int packed_ptc_attr_compatible(GLint size, GLenum type, GLsizei stride, c
 
 void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements, GLenum type, const GLvoid *indices) {
     /* Spec validation order matters: GL_INVALID_ENUM for bad mode/type,
-     * GL_INVALID_VALUE for negative count/first — all before any drawing. */
+     * GL_INVALID_VALUE for negative count/first — all before any drawing.
+     * Compiled out under NOVAGL_NO_DEBUG: the enum/value checks become pure
+     * CPU overhead once a port is known-good, and on the ARM11 they add up
+     * across thousands of draws per frame. We keep the count<=0 early-out
+     * (a negative count would blow the interleave loop) but drop the error
+     * bookkeeping and the per-call enum scans. */
+#if defined(NOVAGL_NO_DEBUG) && NOVAGL_NO_DEBUG
+    if (count <= 0) return;
+#else
     switch (mode) {
         case GL_POINTS: case GL_LINES: case GL_LINE_LOOP: case GL_LINE_STRIP:
         case GL_TRIANGLES: case GL_TRIANGLE_STRIP: case GL_TRIANGLE_FAN:
@@ -734,6 +750,7 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
         return;
     }
     if (count == 0) return;
+#endif
     /* GL_FRONT_AND_BACK culling: spec says ALL triangles are discarded
      * (points/lines unaffected — but NovaGL rasterizes everything as
      * triangles anyway). PICA has no such cull mode; emulate by skipping
@@ -747,10 +764,12 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
                 break;
         }
     }
+#if !(defined(NOVAGL_NO_DEBUG) && NOVAGL_NO_DEBUG)
     if (is_elements && type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_BYTE && type != GL_UNSIGNED_INT) {
         g.last_error = GL_INVALID_ENUM;
         return;
     }
+#endif
 
     if (g.va_vertex.enabled && g.va_vertex.vbo_id > 0 && g.va_vertex.vbo_id < NOVA_MAX_VBOS) {
         if (!g.vbos[g.va_vertex.vbo_id].allocated || g.vbos[g.va_vertex.vbo_id].data == NULL) return;
@@ -955,7 +974,7 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
             vbo_decode_packed_ptc_vertex(v_slot, src_index, packed_vertex);
             packed_vertex_slot = v_slot;
             memcpy(dst, packed_vertex, pos_bytes);
-        } else if (g.va_vertex.enabled && src_v && (uintptr_t) src_v > 0x1000) {
+        } else if (g.va_vertex.enabled && src_v && NOVA_PTR_OK(src_v)) {
             float pos[4] = {0.0f, 0.0f, 0.0f, 1.0f};
             read_vertex_attrib_float(pos, src_v + src_index * p_str, g.va_vertex.size, g.va_vertex.type);
             memcpy(dst, pos, pos_bytes);
@@ -968,7 +987,7 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
                 packed_vertex_slot = t_slot;
             }
             memcpy(dst + pos_bytes, packed_vertex + 12, 8);
-        } else if (g.va_texcoord.enabled && src_t && (uintptr_t) src_t > 0x1000) {
+        } else if (g.va_texcoord.enabled && src_t && NOVA_PTR_OK(src_t)) {
             float tc[2] = {0.0f, 0.0f};
             read_vertex_attrib_float(tc, src_t + src_index * t_str, g.va_texcoord.size > 2 ? 2 : g.va_texcoord.size,
                                      g.va_texcoord.type);
@@ -983,7 +1002,7 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
             }
             memcpy(dst + col_offset, packed_vertex + 20, 4);
             if (g.va_color.size == 3) dst[col_offset + 3] = 255;
-        } else if (g.va_color.enabled && src_c && (uintptr_t) src_c > 0x1000) {
+        } else if (g.va_color.enabled && src_c && NOVA_PTR_OK(src_c)) {
             const uint8_t *c_ptr = src_c + src_index * c_str;
             if (g.va_color.type == GL_UNSIGNED_BYTE) {
                 memcpy(dst + col_offset, c_ptr, g.va_color.size == 3 ? 3 : 4);
@@ -1016,7 +1035,7 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
         // glNormal3f when no array supplies it, default +Z otherwise.
         if (lit) {
             float nrm[3] = {g.cur_normal[0], g.cur_normal[1], g.cur_normal[2]};
-            if (g.va_normal.enabled && src_n && (uintptr_t) src_n > 0x1000) {
+            if (g.va_normal.enabled && src_n && NOVA_PTR_OK(src_n)) {
                 read_vertex_attrib_float(nrm, src_n + src_index * n_str,
                                          g.va_normal.size >= 3 ? 3 : g.va_normal.size, g.va_normal.type);
             }

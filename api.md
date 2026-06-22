@@ -42,6 +42,22 @@ These don't exist in stock GL. Use them.
 
 ---
 
+## GLFW Gamepad State
+
+| Function                 | Status    | Notes            |
+|--------------------------|-----------|------------------|
+| `glfwJoystickPresent`    | ⚠️ Partial |                  |
+| `glfwJoystickIsGamepad`  | ⚠️ Partial |                  |
+| `glfwGetJoystickName`    | ⚠️ Partial | Returns "Nova 3DS" |
+| `glfwGetJoystickButtons` | ⚠️ Partial |                  |
+| `glfwGetJoystickAxes`    | ⚠️ Partial |                  |
+| `glfwGetGamepadState`    | ⚠️ Partial |                  |
+| `glfwGetCursorPos`       | ❌ Stub    |                  |
+| `glfwSetCursorPos`       | ❌ Stub    |                  |
+| `glfwGetMouseButton`     | ❌ Stub    |                  |
+| `glfwSetInputMode`       | ❌ Stub    |                  |
+---
+
 ## Core State
 
 | Function | Status | Notes |
@@ -261,3 +277,44 @@ NovaGL doesn't need EGL on 3DS. These exist purely so engines that initialise vi
 | `gladLoadGLLoader` / `gladLoadGLES1Loader` / `gladLoadGLES2Loader` | ❌ Stub | Reports success (returns non-zero) so glad-based init code proceeds. NovaGL links its symbols directly. |
 | `glDebugMessageCallback` / `glDebugMessageCallbackKHR` | ❌ Stub | Stores the callback pointer, never calls it. PICA has no async debug stream. |
 | `glBlendEquationOES` / `glBlendEquationSeparateOES` | ✅ Full | OES extension aliases, identical to core. |
+
+---
+
+## Compile-time flags
+
+These are not functions — they're `-D` defines (or matching `cmake -DNOVAGL_...=ON` options) that change how the library is built. See README.md for the full prose.
+
+### Buffers / init
+
+| Flag | Effect |
+|---|---|
+| `NOVAGL_SMALL_INIT_DEFAULTS=1` | `nova_init()` uses 512KB/128KB/256KB buffers instead of 2MB/512KB/512KB. UI-only apps. |
+| `NOVAGL_DISABLE_LAZY_RIGHT_EYE=1` | Allocate the stereo right-eye target up-front instead of on first `novaBeginEye(1)`. Debug aid. |
+| `NOVA_SPLASH_DURATION_MS=<n>` / `NOVA_SPLASH_FADE_MS=<n>` | Splashscreen total / fade duration in ms (defaults 2200 / 500). |
+
+### Performance hacks (all OFF by default — speed vs. compliance/safety)
+
+| Flag | Effect | Risk |
+|---|---|---|
+| `NOVAGL_SPEEDHACKS=1` | Master switch: turns on `NO_DEBUG` + `DRAW_SPEEDHACK` + `ASYNC_FRAME`. | Union of the three. |
+| `NOVAGL_NO_DEBUG=1` | Strips per-draw GL validation (mode/count/type) and per-vertex pointer guards in `nova_draw_internal`. Largest CPU win on draw-bound scenes. | No more catching bad enums/pointers/negative counts — crashes/corruption if you feed garbage. |
+| `NOVAGL_DRAW_SPEEDHACK=1` | 64-byte vertex-ring alignment (fewer ring wraps/stalls) + trusts caller array pointers. Implies `NOVAGL_RING_ALIGN_64`. | Assumes valid client pointers; looser fetch alignment. |
+| `NOVAGL_ASYNC_FRAME=1` | Alias for `NOVAGL_FRAME_MODE=0`: non-blocking frame submission, CPU/GPU overlap. ~20–40% on GPU-bound scenes. | Harder timing reasoning; state cache reset on frame boundary keeps it safe. |
+| `NOVAGL_RING_ALIGN_64=1` | Only the 64-byte ring alignment (subset of `DRAW_SPEEDHACK`). | Low. |
+| `NOVAGL_FRAME_MODE=0` | Raw form of `ASYNC_FRAME`. | Same as above. |
+
+### Splashscreen
+
+| Flag | Effect |
+|---|---|
+| `NOVAGL_NO_SPLASHSCREEN=1` | Compile out the boot splashscreen (`nova_splash_run` becomes a no-op). |
+| `NO_SPLASHSCREEN` | vitaGL-compatible alias for the above. |
+
+### Other
+
+| Flag | Effect |
+|---|---|
+| `NOVAGL_DISABLE_STENCIL=1` | Stencil becomes a no-op (escape hatch for citro3d asserts). |
+| `NOVAGL_GL2_RETURN_DUMMY=1` | GL 2.0 shader stubs return fake non-zero ids. |
+| `NOVAGL_ENABLE_GLREADPIXELS_HW=1` | DisplayTransfer HW path for full-screen `glReadPixels` (transposed output). |
+| `NOVAGL_QUAD_AS_FAN` | Draw `GL_QUADS` as `GPU_TRIANGLE_FAN` instead of indexed (diagnostic). |

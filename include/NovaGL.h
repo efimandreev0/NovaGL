@@ -139,6 +139,8 @@ typedef void *(*GLADloadproc)(const char *name);
 #define GL_INCR                     0x1E02
 #define GL_DECR                     0x1E03
 #define GL_INVERT                   0x150A
+#define GL_INCR_WRAP                0x8507
+#define GL_DECR_WRAP                0x8508
 
 #define GL_FOG_MODE                 0x0B65
 #define GL_FOG_DENSITY              0x0B62
@@ -241,6 +243,13 @@ typedef void *(*GLADloadproc)(const char *name);
 #define GL_DEBUG_SEVERITY_MEDIUM         0x9147
 #define GL_DEBUG_SEVERITY_LOW            0x9148
 #define GL_DEBUG_SEVERITY_NOTIFICATION   0x826B
+#define GL_DEBUG_SOURCE_APPLICATION      0x824A
+#define GL_DEBUG_SOURCE_THIRD_PARTY      0x8249
+
+/* KHR_debug is not available on PICA200. Report it absent so callers that gate
+ * on `if (GLAD_GL_KHR_debug)` skip the debug-group annotations; the push/pop
+ * entry points below are inert stubs for the dead branch. */
+#define GLAD_GL_KHR_debug 0
 
 #define GL_TEXTURE_WRAP_S           0x2802
 #define GL_TEXTURE_WRAP_T           0x2803
@@ -254,6 +263,7 @@ typedef void *(*GLADloadproc)(const char *name);
 #define GL_CLAMP                    0x2900
 #define GL_REPEAT                   0x2901
 #define GL_CLAMP_TO_EDGE            0x812F
+#define GL_CLAMP_TO_BORDER          0x812D
 #define GL_MIRRORED_REPEAT          0x8370
 
 #define GL_RED                      0x1903
@@ -266,6 +276,14 @@ typedef void *(*GLADloadproc)(const char *name);
 #define GL_LUMINANCE_ALPHA          0x190A
 #define GL_BGR                      0x80E0
 #define GL_BGRA                     0x80E1
+
+/* Sized RGBA + packed depth-stencil internal formats used by librw's gl3
+ * raster code. PICA200's on-screen depth buffer is D24S8; these tokens mostly
+ * exist so the gl3 raster/FBO switch statements compile. */
+#define GL_RGB5_A1                  0x8057
+#define GL_DEPTH_STENCIL            0x84F9
+#define GL_UNSIGNED_INT_24_8        0x84FA
+#define GL_DEPTH24_STENCIL8         0x88F0
 /* EXT spelling (GL_EXT_bgra / GL_EXT_texture_format_BGRA8888). Same value —
  * desktop & GameCube ports upload their "native" surfaces as BGRA. NovaGL
  * honours this by swapping R/B at upload time (see texture.c). */
@@ -313,6 +331,14 @@ typedef void *(*GLADloadproc)(const char *name);
 #define GL_RGBA8_OES                0x8058
 #define GL_COMPRESSED_RGBA_PVRTC_4BPPV1_IMG  0x8C02
 #define GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG   0x8C00
+/* S3TC / DXT format tokens. PICA200 cannot sample S3TC (only ETC1), so these
+ * exist only so callers that switch on the format compile. The actual DXT data
+ * is decompressed to RGBA on the CPU before upload (librw image.cpp does this
+ * when gl3Caps.dxtSupported == false). */
+#define GL_COMPRESSED_RGB_S3TC_DXT1_EXT      0x83F0
+#define GL_COMPRESSED_RGBA_S3TC_DXT1_EXT     0x83F1
+#define GL_COMPRESSED_RGBA_S3TC_DXT3_EXT     0x83F2
+#define GL_COMPRESSED_RGBA_S3TC_DXT5_EXT     0x83F3
 
 #define GL_UNSIGNED_SHORT_4_4_4_4   0x8033
 #define GL_UNSIGNED_SHORT_5_5_5_1   0x8034
@@ -364,6 +390,7 @@ typedef void *(*GLADloadproc)(const char *name);
 #define GL_RENDERBUFFER             0x8D41
 #define GL_COLOR_ATTACHMENT0        0x8CE0
 #define GL_DEPTH_ATTACHMENT         0x8D00
+#define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
 #define GL_DEPTH24_STENCIL8_OES     0x88F0
 
 #define GL_FILL                     0x1B02
@@ -796,6 +823,15 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
 void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height,
                      GLenum format, GLenum type, const GLvoid *pixels);
 
+/* Mipmap generation. NovaGL builds mips when GL_GENERATE_MIPMAP is set on a
+ * texture; this entry point exists for GL3-style callers. */
+void glGenerateMipmap(GLenum target);
+
+/* Desktop-GL texture readback. PICA200/citro3d can't read back tiled texture
+ * memory cheaply; these are no-op stubs so gl3 readback code links. */
+void glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type, GLvoid *pixels);
+void glGetCompressedTexImage(GLenum target, GLint level, GLvoid *pixels);
+
 void glTexParameteri(GLenum target, GLenum pname, GLint param);
 
 void glTexParameterf(GLenum target, GLenum pname, GLfloat param);
@@ -1135,6 +1171,19 @@ void glUniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3)
 
 void glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 
+void glUniform3fv(GLint location, GLsizei count, const GLfloat *value);
+
+void glUniform4fv(GLint location, GLsizei count, const GLfloat *value);
+
+void glUniform4iv(GLint location, GLsizei count, const GLint *value);
+
+void glBindAttribLocation(GLuint program, GLuint index, const char *name);
+
+/* GL 3.1 uniform blocks (UBOs) — stubs; PICA has no uniform blocks. */
+GLuint glGetUniformBlockIndex(GLuint program, const char *uniformBlockName);
+
+void glUniformBlockBinding(GLuint program, GLuint uniformBlockIndex, GLuint uniformBlockBinding);
+
 /* GL 3.0+ VAO (real, store the client arrays per object) */
 void glGenVertexArrays(GLsizei n, GLuint *arrays);
 
@@ -1242,6 +1291,10 @@ char *novaglGetFuncName(uint32_t func);
  * it — NovaGL emits no async debug messages. */
 void glDebugMessageCallback(GLDEBUGPROC callback, const void *userParam);
 void glDebugMessageCallbackKHR(GLDEBUGPROC callback, const void *userParam);
+
+/* KHR_debug group annotations — inert stubs (PICA has no debug stream). */
+void glPushDebugGroup(GLenum source, GLuint id, GLsizei length, const GLchar *message);
+void glPopDebugGroup(void);
 
 /* glad-compatible loaders. NovaGL links its GL entry points directly, so there
  * is nothing to resolve through `load` — these just report success (non-zero)

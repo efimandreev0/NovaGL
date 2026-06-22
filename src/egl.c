@@ -117,6 +117,13 @@ void glDebugMessageCallbackKHR(GLDEBUGPROC callback, const void *userParam) {
     glDebugMessageCallback(callback, userParam);
 }
 
+void glPushDebugGroup(GLenum source, GLuint id, GLsizei length, const GLchar *message) {
+    (void) source; (void) id; (void) length; (void) message;
+}
+
+void glPopDebugGroup(void) {
+}
+
 // === glad loader shims ======================================================
 // NovaGL's GL entry points are linked directly into the binary, so there is no
 // function-pointer table to populate from `load`. Report success so display

@@ -209,6 +209,10 @@ static GPU_STENCILOP stencil_op_to_gpu(GLenum op) {
         case GL_REPLACE:   return GPU_STENCIL_REPLACE;
         case GL_INCR:      return GPU_STENCIL_INCR;
         case GL_DECR:      return GPU_STENCIL_DECR;
+        /* PICA has no saturating-vs-wrapping distinction exposed here; the
+         * wrap variants behave like plain INCR/DECR. Good enough for re3. */
+        case GL_INCR_WRAP: return GPU_STENCIL_INCR;
+        case GL_DECR_WRAP: return GPU_STENCIL_DECR;
         case GL_INVERT:    return GPU_STENCIL_INVERT;
         case GL_KEEP:
         default:           return GPU_STENCIL_KEEP;
@@ -366,4 +370,40 @@ void glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, cons
     (void) count;
     (void) transpose;
     (void) value;
+}
+
+void glUniform3fv(GLint location, GLsizei count, const GLfloat *value) {
+    (void) location;
+    (void) count;
+    (void) value;
+}
+
+void glUniform4fv(GLint location, GLsizei count, const GLfloat *value) {
+    (void) location;
+    (void) count;
+    (void) value;
+}
+
+void glUniform4iv(GLint location, GLsizei count, const GLint *value) {
+    (void) location;
+    (void) count;
+    (void) value;
+}
+
+void glBindAttribLocation(GLuint program, GLuint index, const char *name) {
+    (void) program;
+    (void) index;
+    (void) name;
+}
+
+GLuint glGetUniformBlockIndex(GLuint program, const char *uniformBlockName) {
+    (void) program;
+    (void) uniformBlockName;
+    return 0;
+}
+
+void glUniformBlockBinding(GLuint program, GLuint uniformBlockIndex, GLuint uniformBlockBinding) {
+    (void) program;
+    (void) uniformBlockIndex;
+    (void) uniformBlockBinding;
 }

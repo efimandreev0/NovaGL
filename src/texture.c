@@ -316,10 +316,10 @@ static void apply_slot_params_to_tex(C3D_Tex *tex, const TexSlot *slot) {
     // texture, so patch the field directly.
     tex->lodParam = (tex->lodParam & ~(0xFu << 16)) | ((u32)(max_lod & 0xF) << 16);
 
-    GPU_TEXTURE_WRAP_PARAM ws = (slot->wrap_s == GL_CLAMP_TO_EDGE || slot->wrap_s == GL_CLAMP)
+    GPU_TEXTURE_WRAP_PARAM ws = (slot->wrap_s == GL_CLAMP_TO_EDGE || slot->wrap_s == GL_CLAMP || slot->wrap_s == GL_CLAMP_TO_BORDER)
                                     ? GPU_CLAMP_TO_EDGE
                                     : ((slot->wrap_s == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
-    GPU_TEXTURE_WRAP_PARAM wt = (slot->wrap_t == GL_CLAMP_TO_EDGE || slot->wrap_t == GL_CLAMP)
+    GPU_TEXTURE_WRAP_PARAM wt = (slot->wrap_t == GL_CLAMP_TO_EDGE || slot->wrap_t == GL_CLAMP || slot->wrap_t == GL_CLAMP_TO_BORDER)
                                     ? GPU_CLAMP_TO_EDGE
                                     : ((slot->wrap_t == GL_MIRRORED_REPEAT) ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
     C3D_TexSetWrap(tex, ws, wt);
@@ -1128,6 +1128,28 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
     }
 }
 
+/* GL3-style explicit mipmap generation. NovaGL builds mip levels at
+ * glTexImage2D time when GL_GENERATE_MIPMAP is enabled, so here we only need to
+ * validate the target. (Full on-demand regeneration could be added later.) */
+void glGenerateMipmap(GLenum target) {
+    if (target != GL_TEXTURE_2D) {
+        g.last_error = GL_INVALID_ENUM;
+        return;
+    }
+    /* no-op: mips, if any, were generated on upload */
+}
+
+/* Desktop-GL texture readback. PICA200 texture memory is Morton-tiled in VRAM
+ * and not cheaply/portably readable here; these are no-op stubs so gl3 readback
+ * paths (needToReadBackTextures == false on this profile) link and run. */
+void glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type, GLvoid *pixels) {
+    (void)target; (void)level; (void)format; (void)type; (void)pixels;
+}
+
+void glGetCompressedTexImage(GLenum target, GLint level, GLvoid *pixels) {
+    (void)target; (void)level; (void)pixels;
+}
+
 void glTexParameteri(GLenum target, GLenum pname, GLint param) {
     if (target != GL_TEXTURE_2D) {
         g.last_error = GL_INVALID_ENUM;
@@ -1165,7 +1187,8 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) {
             break;
         case GL_TEXTURE_WRAP_S:
             if (param == GL_REPEAT || param == GL_CLAMP_TO_EDGE ||
-                param == GL_CLAMP || param == GL_MIRRORED_REPEAT) {
+                param == GL_CLAMP || param == GL_MIRRORED_REPEAT ||
+                param == GL_CLAMP_TO_BORDER) {
                 if (slot->wrap_s == param) return;
                 slot->wrap_s = param;
             }
@@ -1173,7 +1196,8 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) {
             break;
         case GL_TEXTURE_WRAP_T:
             if (param == GL_REPEAT || param == GL_CLAMP_TO_EDGE ||
-                param == GL_CLAMP || param == GL_MIRRORED_REPEAT) {
+                param == GL_CLAMP || param == GL_MIRRORED_REPEAT ||
+                param == GL_CLAMP_TO_BORDER) {
                 if (slot->wrap_t == param) return;
                 slot->wrap_t = param;
             }

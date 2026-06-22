@@ -59,6 +59,36 @@ Useful compile flags:
 | `-DNOVAGL_GL2_RETURN_DUMMY=1` | glCreateShader/glCreateProgram return fake non-zero ids. For ports that don't check and call glUseProgram regardless. |
 | `-DNOVAGL_ENABLE_GLREADPIXELS_HW=1` | Use DisplayTransfer for full-screen glReadPixels. Faster but output is transposed relative to GL convention. |
 
+### Performance hacks
+
+All **off by default** — each trades some OpenGL compliance/safety for raw throughput on the 268 MHz ARM11. Turn them on only once a port is known-good. Either `-D...=1` directly or flip the matching `cmake -DNOVAGL_...=ON` option.
+
+| Flag | Effect | Risk |
+|---|---|---|
+| `-DNOVAGL_SPEEDHACKS=1` | **Master switch.** Enables `NO_DEBUG` + `DRAW_SPEEDHACK` + `ASYNC_FRAME` in one go. The "just make it fast" bundle. | The union of the three below. |
+| `-DNOVAGL_NO_DEBUG=1` | Strips per-draw GL spec validation (enum/value/type checks) and the per-vertex pointer sanity guards in the interleave loop. Biggest CPU win on draw-call-bound scenes. | Bad enums / negative counts / wild client pointers stop being caught and will crash or corrupt. |
+| `-DNOVAGL_DRAW_SPEEDHACK=1` | Tightens the vertex ring buffer to 64-byte alignment (less padding → fewer ring wraps and GPU stalls) and trusts caller-supplied array pointers. Implies `NOVAGL_RING_ALIGN_64`. | Slightly looser GPU fetch alignment; assumes valid pointers. |
+| `-DNOVAGL_ASYNC_FRAME=1` | Friendly alias for `-DNOVAGL_FRAME_MODE=0` — non-blocking frame submission, overlaps CPU frame N+1 with GPU frame N. ~20–40% on GPU-bound scenes. | None we know of (state cache is reset on frame boundaries), but harder to reason about timing. |
+| `-DNOVAGL_RING_ALIGN_64=1` | Just the 64-byte ring alignment, without the rest of `DRAW_SPEEDHACK`. | Low. |
+
+```bash
+# fastest preset
+cmake -DNOVAGL_SPEEDHACKS=ON ..
+make
+```
+
+### Boot splashscreen
+
+NovaGL shows a short animated **"Powered by NovaGL"** splash (gradient backdrop, embedded bitmap-font wordmark, breathing accent bar) the first time you call `nova_init()` / `nova_init_ex()`. It's self-contained (no assets, no PNG decoder), runs synchronously for ~2.2s, and hides early loading time. Disable it with:
+
+```bash
+cmake -DNOVAGL_SPLASHSCREEN=OFF ..        # CMake option
+# or
+-DNOVAGL_NO_SPLASHSCREEN=1                 # raw define (vitaGL's -DNO_SPLASHSCREEN=1 also works)
+```
+
+Tune timing with `-DNOVA_SPLASH_DURATION_MS=...` / `-DNOVA_SPLASH_FADE_MS=...`.
+
 ## Usage
 
 ### Integration

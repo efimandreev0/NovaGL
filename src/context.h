@@ -17,6 +17,69 @@
 #include <citro3d.h>
 #include "NovaGL.h"
 
+/* =========================================================================
+ * NovaGL performance-hack resolution
+ * =========================================================================
+ * Drop-in, compile-time toggles inspired by vitaGL's speedhack flags, mapped
+ * onto the PICA200/citro3d reality. None of them are on by default — every one
+ * trades some OpenGL compliance / safety for raw CPU/GPU throughput, so you opt
+ * in only once you know your port behaves. See README.md / api.md for the table.
+ *
+ * Master switch:
+ *   -DNOVAGL_SPEEDHACKS=1   turns the whole safe-ish "go fast" bundle on
+ *                           (NO_DEBUG + DRAW_SPEEDHACK + ASYNC_FRAME).
+ *
+ * Individual switches (also settable on their own):
+ *   -DNOVAGL_NO_DEBUG=1       strip per-draw GL validation + per-vertex pointer
+ *                             sanity guards. Big win on draw-call-bound scenes
+ *                             on the 268 MHz ARM11; feed it bad enums/pointers
+ *                             and it will happily march off a cliff.
+ *   -DNOVAGL_DRAW_SPEEDHACK=1 tighter vertex-ring alignment (64B vs 128B → less
+ *                             padding, fewer ring wraps/stalls) + trust caller
+ *                             pointers in the interleave loop.
+ *   -DNOVAGL_ASYNC_FRAME=1    non-blocking frame submission (alias that forces
+ *                             NOVAGL_FRAME_MODE=0). Overlaps CPU frame N+1 with
+ *                             GPU frame N; typically +20–40% on GPU-bound scenes.
+ * ====================================================================== */
+#if defined(NOVAGL_SPEEDHACKS) && NOVAGL_SPEEDHACKS
+#  ifndef NOVAGL_NO_DEBUG
+#    define NOVAGL_NO_DEBUG 1
+#  endif
+#  ifndef NOVAGL_DRAW_SPEEDHACK
+#    define NOVAGL_DRAW_SPEEDHACK 1
+#  endif
+#  ifndef NOVAGL_ASYNC_FRAME
+#    define NOVAGL_ASYNC_FRAME 1
+#  endif
+#endif
+
+/* DRAW_SPEEDHACK implies the 64-byte ring alignment that linear_alloc_ring
+ * keys off of (utils.c). Defining it here keeps the one knob authoritative. */
+#if defined(NOVAGL_DRAW_SPEEDHACK) && NOVAGL_DRAW_SPEEDHACK
+#  ifndef NOVAGL_RING_ALIGN_64
+#    define NOVAGL_RING_ALIGN_64 1
+#  endif
+#endif
+
+/* ASYNC_FRAME is a friendly alias for NOVAGL_FRAME_MODE=0 (C3D non-blocking).
+ * NovaGL.c reads NOVAGL_FRAME_MODE after including this header, so seeding it
+ * here wins over its internal default. */
+#if defined(NOVAGL_ASYNC_FRAME) && NOVAGL_ASYNC_FRAME
+#  ifndef NOVAGL_FRAME_MODE
+#    define NOVAGL_FRAME_MODE 0
+#  endif
+#endif
+
+/* Per-vertex "is this pointer plausibly real" guard used in the generic
+ * interleave loop. The hacks assume the caller handed us valid client arrays,
+ * so it collapses to a constant-true and the compiler drops the branch. */
+#if (defined(NOVAGL_NO_DEBUG) && NOVAGL_NO_DEBUG) || \
+    (defined(NOVAGL_DRAW_SPEEDHACK) && NOVAGL_DRAW_SPEEDHACK)
+#  define NOVA_PTR_OK(p) (1)
+#else
+#  define NOVA_PTR_OK(p) ((uintptr_t)(p) > 0x1000)
+#endif
+
 
 typedef struct {
     C3D_Tex tex;
@@ -417,5 +480,10 @@ extern struct NovaState {
 } g;
 
 void nova_fbo_gc_collect(void);
+
+/* Animated boot splashscreen (src/splashscreen.c). Runs synchronously at the
+ * tail of nova_init_ex unless compiled out with -DNOVAGL_NO_SPLASHSCREEN=1
+ * (vitaGL's -DNO_SPLASHSCREEN=1 is accepted as an alias). */
+void nova_splash_run(void);
 
 #endif //NOVAGL_CONTEXT_H
