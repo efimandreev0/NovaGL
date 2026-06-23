@@ -124,11 +124,26 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
      * physical top target (240x400 native → padded to 256x512). The whole
      * top-screen frame renders here; novaSwapBuffers presents it 1:1 to
      * render_target_top. Makes "fb 0" sampleable (see context.h). Carries a
-     * D24S8 depth buffer so 3D rendering works exactly as on the LCD. */
+     * D24S8 depth buffer so 3D rendering works exactly as on the LCD.
+     *
+     * DISABLED BY DEFAULT (NOVAGL_APP_SURFACE=0): the POT surface is 256x512
+     * while the logical screen is 240x400, and a draw that doesn't call
+     * glViewport inherits C3D's default viewport = the FULL target (256x512),
+     * so its content lands in the wrong sub-rect and the 1:1 present then
+     * shows it zoomed into a corner with a wrong aspect ratio (the cube demo
+     * looked warped/spinning-wrong for the same reason). Rendering straight to
+     * render_target_top — as before commit 6500431 — sizes the default
+     * viewport to the real screen and Just Works. Flip this to 1 only for the
+     * "framebuffer 0 as a texture" effects (PD scope/cutscene distortion);
+     * those paths also need a viewport that's clamped to the logical region. */
     g.app_logical_w = NOVA_SCREEN_H; /* native top fb width  = 240 */
     g.app_logical_h = NOVA_SCREEN_W; /* native top fb height = 400 */
     g.app_pot_w = (int) nova_next_pow2((unsigned) g.app_logical_w);
     g.app_pot_h = (int) nova_next_pow2((unsigned) g.app_logical_h);
+#ifndef NOVAGL_APP_SURFACE
+#define NOVAGL_APP_SURFACE 0
+#endif
+#if NOVAGL_APP_SURFACE
     if (C3D_TexInitVRAM(&g.app_tex, (u16) g.app_pot_w, (u16) g.app_pot_h, GPU_RGBA8)) {
         C3D_TexSetFilter(&g.app_tex, GPU_LINEAR, GPU_LINEAR);
         C3D_TexSetWrap(&g.app_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
@@ -141,6 +156,7 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
             GSPGPU_FlushDataCache(g.app_tex.data, g.app_tex.size);
         }
     }
+#endif
     if (!g.app_target) {
         /* Allocation failed — fall back to rendering straight to the LCD.
          * Framebuffer-from-screen effects won't work, but the game renders. */
@@ -556,11 +572,27 @@ static void nova_present_app(C3D_RenderTarget *lcd) {
     nova_invalidate_state_cache();
 }
 
+/* Frame-rate cap. citro3d's C3D_FRAME_SYNCDRAW only waits for the GPU to
+ * finish drawing — it does NOT pace the CPU loop to the display. On real
+ * hardware the slow ARM11 hides this, but under Citra the GPU "finishes"
+ * instantly, so the main loop free-runs at hundreds of fps. Games that advance
+ * animation per-frame (e.g. the rotating-cube demo does `angle += 1.0` each
+ * iteration) then spin absurdly fast. Waiting one VBlank per swap caps the
+ * loop at 60 fps — the standard 3DS main-loop idiom — so per-frame animation
+ * runs at a sane, hardware-consistent rate. Compile with -DNOVAGL_VSYNC=0 to
+ * free-run (e.g. for benchmarking). */
+#ifndef NOVAGL_VSYNC
+#define NOVAGL_VSYNC 1
+#endif
+
 void novaSwapBuffers(void) {
     /* Present the app surface to the physical top LCD before ending the frame. */
     if (g.app_target) nova_present_app(g.render_target_top);
 
     C3D_FrameEnd(0);
+#if NOVAGL_VSYNC
+    gspWaitForVBlank();
+#endif
     nova_fbo_gc_collect();
 
     C3D_FrameBegin(NOVAGL_FRAME_MODE);
