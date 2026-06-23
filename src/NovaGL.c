@@ -96,12 +96,15 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
 
     gfxSet3D(true);
 
-    /* The physical top LCD target only ever receives the present blit (a
-     * depth-test-off fullscreen quad) — it needs NO depth buffer. Dropping it
-     * frees ~384KB of VRAM, headroom the POT app surface below needs. (-1 =
-     * the citro3d "no depth" sentinel for C3D_RenderTargetCreate.) */
+    /* Top LCD target. With the app surface DISABLED (the default, see below)
+     * the game renders straight into this target, so it MUST carry a depth/
+     * stencil buffer — without it depth testing is a no-op and 3D geometry
+     * renders with back faces showing through (the rotating-cube demo bug).
+     * The "-1 / no depth" optimisation only made sense when every draw went to
+     * the POT app surface (which has its own D24S8) and this target received
+     * just the depth-test-off present quad; that path is off by default now. */
     g.render_target_top = C3D_RenderTargetCreate(NOVA_SCREEN_H, NOVA_SCREEN_W,
-                                                 GPU_RB_RGBA8, -1);
+                                                 GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
     C3D_RenderTargetSetOutput(g.render_target_top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
 
     /* Right-eye target is created lazily on the first novaBeginEye(1) call —
