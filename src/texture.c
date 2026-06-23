@@ -1236,26 +1236,35 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
         C3D_TexFlush(&slot->tex);
     } else if (gpu_texfmt_bpp(slot->fmt) == 2) {
         int row_stride = row_stride_bytes(width, 2, g.unpack_alignment);
-        uint16_t *tex_data = (uint16_t *) slot->tex.data;
-        for (int y = 0; y < real_height; y++) {
-            int src_y = (int) (y * step_y);
-            if (src_y >= height) src_y = height - 1;
-            const uint8_t *row = (const uint8_t *) pixels + src_y * row_stride;
-            int dy = real_yoffset + y;
-            for (int x = 0; x < real_width; x++) {
-                int src_x = (int) (x * step_x);
-                if (src_x >= width) src_x = width - 1;
-                int dx = real_xoffset + x;
-                if (dx < 0 || dy < 0 || dx >= slot->pot_w || dy >= slot->pot_h) continue;
 
-                uint16_t val;
-                const uint8_t *sp = row + src_x * 2;
-                if (slot->fmt == GPU_LA8)
-                    val = ((uint16_t) sp[0] << 8) | sp[1];   /* [L,A] -> (L<<8)|A, see upload_page_16bit */
-                else
-                    memcpy(&val, sp, sizeof(uint16_t));       /* packed short, layouts match */
-                // И здесь убран переворот
-                tex_data[morton_offset_local(dx, dy, slot->pot_w, slot->pot_h)] = val;
+        if (xoffset == 0 && yoffset == 0 &&
+            width == slot->orig_width && height == slot->orig_height &&
+            slot->width == slot->orig_width && slot->height == slot->orig_height &&
+            row_stride == width * 2 && slot->fmt != GPU_LA8) {
+            swizzle_16bit((uint16_t *) slot->tex.data, (const uint16_t *) pixels,
+                          width, height, slot->pot_w, slot->pot_h);
+        } else {
+            uint16_t *tex_data = (uint16_t *) slot->tex.data;
+            for (int y = 0; y < real_height; y++) {
+                int src_y = (int) (y * step_y);
+                if (src_y >= height) src_y = height - 1;
+                const uint8_t *row = (const uint8_t *) pixels + src_y * row_stride;
+                int dy = real_yoffset + y;
+                for (int x = 0; x < real_width; x++) {
+                    int src_x = (int) (x * step_x);
+                    if (src_x >= width) src_x = width - 1;
+                    int dx = real_xoffset + x;
+                    if (dx < 0 || dy < 0 || dx >= slot->pot_w || dy >= slot->pot_h) continue;
+
+                    uint16_t val;
+                    const uint8_t *sp = row + src_x * 2;
+                    if (slot->fmt == GPU_LA8)
+                        val = ((uint16_t) sp[0] << 8) | sp[1];   /* [L,A] -> (L<<8)|A, see upload_page_16bit */
+                    else
+                        memcpy(&val, sp, sizeof(uint16_t));       /* packed short, layouts match */
+                    // И здесь убран переворот
+                    tex_data[morton_offset_local(dx, dy, slot->pot_w, slot->pot_h)] = val;
+                }
             }
         }
         C3D_TexFlush(&slot->tex);
