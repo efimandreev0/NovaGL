@@ -141,9 +141,11 @@ void glEnable(GLenum cap) {
     switch (cap) {
         case GL_DEPTH_TEST: g.depth_test_enabled = 1; break;
         case GL_BLEND: g.blend_enabled = 1; break;
+        case GL_COLOR_LOGIC_OP: g.color_logic_op_enabled = 1; break;
         case GL_ALPHA_TEST: g.alpha_test_enabled = 1; break;
         case GL_CULL_FACE: g.cull_face_enabled = 1; break;
         case GL_TEXTURE_2D:
+        case GL_TEXTURE_CUBE_MAP: /* shares the per-unit sampler enable */
             g.texture_2d_enabled_unit[g.active_texture_unit] = 1;
             g.tev_dirty = 1;
             break;
@@ -178,9 +180,11 @@ void glDisable(GLenum cap) {
     switch (cap) {
         case GL_DEPTH_TEST: g.depth_test_enabled = 0; break;
         case GL_BLEND: g.blend_enabled = 0; break;
+        case GL_COLOR_LOGIC_OP: g.color_logic_op_enabled = 0; break;
         case GL_ALPHA_TEST: g.alpha_test_enabled = 0; break;
         case GL_CULL_FACE: g.cull_face_enabled = 0; break;
         case GL_TEXTURE_2D:
+        case GL_TEXTURE_CUBE_MAP:
             g.texture_2d_enabled_unit[g.active_texture_unit] = 0;
             g.tev_dirty = 1;
             break;
@@ -212,6 +216,7 @@ GLboolean glIsEnabled(GLenum cap) {
     switch (cap) {
         case GL_DEPTH_TEST: return g.depth_test_enabled;
         case GL_BLEND: return g.blend_enabled;
+        case GL_COLOR_LOGIC_OP: return g.color_logic_op_enabled ? GL_TRUE : GL_FALSE;
         case GL_ALPHA_TEST: return g.alpha_test_enabled;
         case GL_CULL_FACE: return g.cull_face_enabled;
         case GL_TEXTURE_2D: return g.texture_2d_enabled_unit[g.active_texture_unit];
@@ -384,6 +389,9 @@ typedef struct {
     int texture_2d_units[3];
     GLboolean scissor_test, fog;
     GLenum depth_func, blend_src, blend_dst, alpha_func;
+    GLenum blend_src_alpha, blend_dst_alpha;
+    int color_logic_op; GLenum logic_op;
+    GLfloat blend_color[4];
     GLfloat alpha_ref;
     GLenum cull_face_mode, front_face;
 } AttribState;
@@ -409,6 +417,11 @@ void glPushAttrib(GLbitfield mask) {
         s->depth_func = g.depth_func;
         s->blend_src = g.blend_src;
         s->blend_dst = g.blend_dst;
+        s->blend_src_alpha = g.blend_src_alpha;
+        s->blend_dst_alpha = g.blend_dst_alpha;
+        s->color_logic_op = g.color_logic_op_enabled;
+        s->logic_op = g.logic_op;
+        for (int i = 0; i < 4; i++) s->blend_color[i] = g.blend_color[i];
         s->alpha_func = g.alpha_func;
         s->alpha_ref = g.alpha_ref;
         s->cull_face_mode = g.cull_face_mode;
@@ -433,6 +446,11 @@ void glPopAttrib(void) {
         g.depth_func = s->depth_func;
         g.blend_src = s->blend_src;
         g.blend_dst = s->blend_dst;
+        g.blend_src_alpha = s->blend_src_alpha;
+        g.blend_dst_alpha = s->blend_dst_alpha;
+        g.color_logic_op_enabled = s->color_logic_op;
+        g.logic_op = s->logic_op;
+        for (int i = 0; i < 4; i++) g.blend_color[i] = s->blend_color[i];
         g.alpha_func = s->alpha_func;
         g.alpha_ref = s->alpha_ref;
         g.cull_face_mode = s->cull_face_mode;

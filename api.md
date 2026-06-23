@@ -99,6 +99,8 @@ These don't exist in stock GL. Use them.
 | `glBlendFunc(src, dst)` | ✅ Full | All ES 1.1 factors including SRC_ALPHA_SATURATE. |
 | `glBlendEquation(mode)` | ✅ Full | ADD, SUBTRACT, REVERSE_SUBTRACT, MIN, MAX — real GPU_BLENDEQUATION path, not a stub. |
 | `glBlendEquationSeparate` | ✅ Full | Separate RGB/alpha equations, both OES and core spellings. |
+| `glBlendColor(r, g, b, a)` | ✅ Full | Sets the constant for `GL_CONSTANT_COLOR` / `GL_ONE_MINUS_CONSTANT_COLOR` / `GL_CONSTANT_ALPHA` / `GL_ONE_MINUS_CONSTANT_ALPHA` blend factors. Backed by `C3D_BlendingColor`. |
+| `glLogicOp(opcode)` + `glEnable(GL_COLOR_LOGIC_OP)` | ✅ Full | All 16 ops (CLEAR…SET) via `C3D_ColorLogicOp`. Logic op and blending are mutually exclusive on PICA — when enabled, logic op overrides blending (per the GL spec). |
 | `glAlphaFunc(func, ref)` | ✅ Full | |
 | `glCullFace(mode)` | ✅ Full | |
 | `glFrontFace(mode)` | ✅ Full | |
@@ -136,12 +138,15 @@ These don't exist in stock GL. Use them.
 
 | Function | Status | Notes |
 |---|---|---|
-| `glGenTextures` / `glDeleteTextures` / `glBindTexture` | ✅ Full | Up to 2048 texture slots. Deletion queues GPU-side cleanup for deferred frame safety. |
+| `glGenTextures` / `glDeleteTextures` / `glBindTexture` | ✅ Full | Up to 2048 texture slots. Deletion queues GPU-side cleanup for deferred frame safety. `glBindTexture` also accepts `GL_TEXTURE_CUBE_MAP`. |
 | `glIsTexture(tex)` | ✅ Full | |
 | `glTexImage2D` | ✅ Full | Handles RGB, RGBA, LUMINANCE, LUMINANCE_ALPHA, ALPHA, BGR, BGRA, packed types (5_6_5, 4_4_4_4, 5_5_5_1). Auto-downscales to nearest PoT ≤ 1024. Morton-swizzles to PICA tiling on CPU. |
-| `glTexSubImage2D` | ✅ Full | Updates a sub-region, re-swizzles only the affected tiles. |
-| `glTexParameteri/f/fv/iv` | ✅ Full | MIN/MAG filter (including mip variants), WRAP_S/T (CLAMP, REPEAT, CLAMP_TO_EDGE, MIRRORED_REPEAT), GENERATE_MIPMAP. |
-| `glCompressedTexImage2D` | ⚠️ Partial | ETC1 (GL_ETC1_RGB8_OES) works. PVRTC formats are accepted for compatibility, may not render correctly. |
+| `glTexImage2D(GL_TEXTURE_CUBE_MAP_*, …)` | ⚠️ Partial | Cube-map **storage** is real (`C3D_TexInitCube`, per-face upload, bind). **Caveat:** NovaGL's vertex path emits 2-component texcoords, so cube sampling (which needs `s,t,r`) won't produce correct reflections/skyboxes until 3-component texcoord/texgen is added. Faces are upload-once (no `glTexSubImage2D`, no mips). |
+| `glTexSubImage2D` | ✅ Full | Updates a sub-region, re-swizzles only the affected tiles. Cube faces are rejected (`GL_INVALID_OPERATION`). |
+| `glTexParameteri/f/fv/iv` | ✅ Full | MIN/MAG filter (including mip variants), WRAP_S/T (CLAMP, REPEAT, CLAMP_TO_EDGE, MIRRORED_REPEAT), GENERATE_MIPMAP, MAX_LEVEL. **Mip correctness:** LOD is clamped to the texture's real pyramid depth, and mip generation only runs for RGBA8 (the only format `C3D_TexGenerateMipmap` can downscale) — other formats keep mip filtering off rather than sampling uninitialised levels. |
+| `glGetTexParameteriv/fv` | ✅ Full | Returns tracked MIN/MAG filter, WRAP_S/T, GENERATE_MIPMAP, MAX_LEVEL. |
+| `glCompressedTexImage2D` | ⚠️ Partial | **ETC1** (`GL_ETC1_RGB8_OES`) fed straight to PICA (assumes 3DS-tiled block order, e.g. tex3ds output). **DXT1 / DXT3 / DXT5** (`GL_COMPRESSED_*_S3TC_DXT*_EXT`, i.e. BC1/2/3) are CPU-decompressed to RGBA8 and uploaded via the normal path — desktop ports' DXT atlases now render. PVRTC / ETC2 / BPTC have no decoder yet → empty placeholder + one-time warning. |
+| `glCompressedTexSubImage2D` | ⚠️ Partial | DXT1/3/5 sub-rects decompressed to RGBA8 → `glTexSubImage2D`. Other formats: `GL_INVALID_OPERATION`. |
 | `glCopyTexSubImage2D` | ⚠️ Partial | Reads from current render target, untiles, re-swizzles into the texture. Works but is slow (CPU per-pixel loop). |
 | `glCopyTexImage2D` | ⚠️ Partial | Same caveats. |
 | `glTexImage1D` / `glTexSubImage1D` | ❌ Stub | PICA has no 1D textures. |
@@ -149,7 +154,8 @@ These don't exist in stock GL. Use them.
 | `glActiveTexture` / `glClientActiveTexture` | ✅ Full | Up to 3 texture units (PICA limit). |
 | `glActiveTextureARB` / `glClientActiveTextureARB` | ✅ Full | ARB aliases, same implementation. |
 | `glMultiTexCoord4f` / `glMultiTexCoord2fARB` | ✅ Full | |
-| `glTexEnvi` / `glTexEnvf` / `glTexEnvfv` | ✅ Full | GL_TEXTURE_ENV_MODE: MODULATE, REPLACE, DECAL, BLEND, ADD. Full GL_COMBINE path: REPLACE, MODULATE, ADD, INTERPOLATE, SUBTRACT, plus the `GL_MULT_ADD_NOVA` extension that maps to PICA's GPU_MULTIPLY_ADD. |
+| `glTexEnvi` / `glTexEnvf` / `glTexEnvfv` / `glTexEnviv` | ✅ Full | GL_TEXTURE_ENV_MODE: MODULATE, REPLACE, DECAL, BLEND, ADD. Full GL_COMBINE path: REPLACE, MODULATE, ADD, INTERPOLATE, SUBTRACT, plus the `GL_MULT_ADD_NOVA` extension that maps to PICA's GPU_MULTIPLY_ADD. `GL_RGB_SCALE` / `GL_ALPHA_SCALE` (1/2/4) now applied via `C3D_TexEnvScale`. `glTexEnviv` handles the integer GL_TEXTURE_ENV_COLOR. |
+| `glGetTexEnviv/fv` | ✅ Full | Returns tracked tex-env mode, combine func/src/operand, RGB/ALPHA scale, and (fv) the GL_TEXTURE_ENV_COLOR for the active unit. |
 
 ---
 
@@ -175,6 +181,7 @@ These don't exist in stock GL. Use them.
 | Function | Status | Notes |
 |---|---|---|
 | `glGenBuffers` / `glDeleteBuffers` / `glBindBuffer` | ✅ Full | Up to 32768 VBO slots. Backed by linearAlloc for direct GPU access. |
+| `glIsBuffer(buffer)` | ✅ Full | True for a generated, not-yet-deleted buffer name. |
 | `glBufferData(target, size, data, usage)` | ✅ Full | ARRAY_BUFFER and ELEMENT_ARRAY_BUFFER. STATIC/DYNAMIC/STREAM_DRAW accepted (hint only, no behaviour difference). |
 | `glBufferSubData` | ✅ Full | |
 | `glMapBuffer(target, access)` | ✅ Full | Returns direct pointer to linearAlloc'd VBO memory. access mode accepted but all modes give a writable pointer. |
@@ -209,7 +216,7 @@ These don't exist in stock GL. Use them.
 |---|---|---|
 | `glMaterialf/fv/i/iv(face, pname, ...)` | ⚠️ Partial | State is fully stored. Uploaded to C3D_LightEnv when GL_LIGHTING is enabled. Works on real HW, Citra's emulation of the lighting unit is incomplete. |
 | `glGetMaterialfv/iv` | ✅ Full | Returns stored values. |
-| `glLightf/fv/i/iv(light, pname, ...)` | ⚠️ Partial | Same story. Position is passed as raw world-space — no eye-space transform. Spot cutoff/exponent and attenuation are stored but partially mapped to PICA's different attenuation model. |
+| `glLightf/fv/i/iv(light, pname, ...)` | ✅ Full | Diffuse, specular (per-light, separate from diffuse), ambient, position (raw world-space — no eye-space transform). **Spotlights**: `GL_SPOT_CUTOFF`/`GL_SPOT_DIRECTION` build a HW cone LUT (`C3D_LightSpotLut`); `GL_SPOT_EXPONENT` soft falloff is approximated as a hard cone. **Attenuation**: `GL_LINEAR`/`GL_QUADRATIC_ATTENUATION` build a HW distance-attenuation LUT (`C3D_LightDistAttn`) assuming `GL_CONSTANT_ATTENUATION ≈ 1`. Spot + attenuation apply to positional lights only (per spec). |
 | `glGetLightfv` | ✅ Full | |
 | `glLightModelf/fv/i/iv` | ⚠️ Partial | AMBIENT stored and applied as scene ambient. LOCAL_VIEWER and TWO_SIDE stored, not fully wired. |
 | `glShadeModel(mode)` | ✅ Full | FLAT / SMOOTH stored. PICA is always Gouraud so FLAT is best-effort. |
@@ -277,6 +284,18 @@ NovaGL doesn't need EGL on 3DS. These exist purely so engines that initialise vi
 | `gladLoadGLLoader` / `gladLoadGLES1Loader` / `gladLoadGLES2Loader` | ❌ Stub | Reports success (returns non-zero) so glad-based init code proceeds. NovaGL links its symbols directly. |
 | `glDebugMessageCallback` / `glDebugMessageCallbackKHR` | ❌ Stub | Stores the callback pointer, never calls it. PICA has no async debug stream. |
 | `glBlendEquationOES` / `glBlendEquationSeparateOES` | ✅ Full | OES extension aliases, identical to core. |
+| `glBlendFuncSeparate` | ✅ Full | Independent colour/alpha blend factors — real PICA path (`C3D_AlphaBlend` takes both). |
+| `glStencilFuncSeparate` / `glStencilOpSeparate` / `glStencilMaskSeparate` | ⚠️ Partial | PICA has one (front=back) stencil unit, so per-face state collapses to the unified path. |
+| `glMultiTexCoord2f/2fv/2i` | ✅ Full | Forward to `glMultiTexCoord4f` (r=0, q=1). |
+| `glRectf` / `glRecti` | ✅ Full | Emitted as an immediate-mode quad. |
+| `glMultiDrawArrays` | ✅ Full | Loops over `glDrawArrays`. |
+| `glIsFramebuffer` / `glIsBuffer` | ✅ Full | Object-name existence queries. |
+| `glGetBufferParameteriv` | ✅ Full | BUFFER_SIZE / USAGE / ACCESS / MAPPED for the bound buffer. |
+| Fixed-point `*x` variants | ✅ Full | `glClearColorx`, `glColor4x`, `glRotatex`, `glOrthox`, `glMaterialxv`, `glLightxv`, `glTexEnvxv`, `glFogxv`, … — convert 16.16 → float and forward. Enum-valued args (modes/funcs) pass through unscaled. |
+| `gluPerspective` / `gluLookAt` | ✅ Full | GLU camera/projection helpers built on `glFrustum` / `glMultMatrixf`. |
+| `gluBuild2DMipmaps` | ✅ Full | Sets `GL_GENERATE_MIPMAP` then uploads via `glTexImage2D`. |
+
+> **Proc-address coverage:** every implemented GL/GLU entry point (341 of them) is registered in `novaglGetProcAddress`'s table — `glXxx` / `gluXxx` / `eglXxx` lookups all resolve, with `ARB`/`EXT`/`OES` suffixes stripped automatically.
 
 ---
 

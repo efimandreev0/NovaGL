@@ -29,6 +29,8 @@ GPU_BLENDFACTOR gl_to_gpu_blendfactor(GLenum factor);
 
 GPU_BLENDEQUATION gl_to_gpu_blendeq(GLenum mode);
 
+GPU_LOGICOP gl_to_gpu_logicop(GLenum op);
+
 int gl_type_size(GLenum type);
 
 int calc_stride(GLsizei stride, GLint size, GLenum type);

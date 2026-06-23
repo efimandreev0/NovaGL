@@ -58,6 +58,10 @@ static int is_valid_blend_factor(GLenum f, int is_src) {
         case GL_SRC_ALPHA: case GL_ONE_MINUS_SRC_ALPHA:
         case GL_DST_ALPHA: case GL_ONE_MINUS_DST_ALPHA:
             return 1;
+        case GL_CONSTANT_COLOR: case GL_ONE_MINUS_CONSTANT_COLOR:
+        case GL_CONSTANT_ALPHA: case GL_ONE_MINUS_CONSTANT_ALPHA:
+            /* Constant-colour factors (glBlendColor); valid on both ends. */
+            return 1;
         case GL_SRC_ALPHA_SATURATE:
             /* ES 1.1: valid for src only. */
             return is_src;
@@ -89,6 +93,49 @@ void glBlendFunc(GLenum sfactor, GLenum dfactor) {
     }
     g.blend_src = sfactor;
     g.blend_dst = dfactor;
+    /* Non-separate: alpha factors mirror the colour factors. */
+    g.blend_src_alpha = sfactor;
+    g.blend_dst_alpha = dfactor;
+}
+
+/* glBlendFuncSeparate: independent colour/alpha blend factors. PICA supports
+ * this directly (C3D_AlphaBlend takes separate srcClr/dstClr and srcAlpha/
+ * dstAlpha), so it's a real path, not a degrade to glBlendFunc. */
+void glBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha) {
+    if (!is_valid_blend_factor(srcRGB, 1) || !is_valid_blend_factor(dstRGB, 0) ||
+        !is_valid_blend_factor(srcAlpha, 1) || !is_valid_blend_factor(dstAlpha, 0)) {
+        g.last_error = GL_INVALID_ENUM;
+        return;
+    }
+    g.blend_src = srcRGB;       g.blend_dst = dstRGB;
+    g.blend_src_alpha = srcAlpha; g.blend_dst_alpha = dstAlpha;
+}
+
+/* glBlendColor: the constant for GL_CONSTANT_COLOR/ALPHA factors. Stored as
+ * 0..1 floats (clamped per spec); apply_gpu_state packs to PICA 0xAABBGGRR and
+ * pushes via C3D_BlendingColor. */
+void glBlendColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha) {
+    g.blend_color[0] = clampf(red, 0.0f, 1.0f);
+    g.blend_color[1] = clampf(green, 0.0f, 1.0f);
+    g.blend_color[2] = clampf(blue, 0.0f, 1.0f);
+    g.blend_color[3] = clampf(alpha, 0.0f, 1.0f);
+}
+
+/* glLogicOp: records the colour logic opcode. Only takes effect while
+ * GL_COLOR_LOGIC_OP is enabled (see glEnable). Validated against the 16 GL
+ * opcodes; anything else is GL_INVALID_ENUM with no state change. */
+void glLogicOp(GLenum opcode) {
+    switch (opcode) {
+        case GL_CLEAR: case GL_AND: case GL_AND_REVERSE: case GL_COPY:
+        case GL_AND_INVERTED: case GL_NOOP: case GL_XOR: case GL_OR:
+        case GL_NOR: case GL_EQUIV: case GL_INVERT: case GL_OR_REVERSE:
+        case GL_COPY_INVERTED: case GL_OR_INVERTED: case GL_NAND: case GL_SET:
+            g.logic_op = opcode;
+            break;
+        default:
+            g.last_error = GL_INVALID_ENUM;
+            break;
+    }
 }
 
 static int is_valid_blend_equation(GLenum mode) {

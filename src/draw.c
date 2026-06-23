@@ -14,7 +14,7 @@
 // even the dedup compare on every glDraw* call is measurable on 268 MHz ARM11,
 // and the printf path through Citra's stdout is brutal.
 #ifndef NOVA_DIAG_DRAW_LIMIT
-#define NOVA_DIAG_DRAW_LIMIT 0
+#define NOVA_DIAG_DRAW_LIMIT 200
 #endif
 
 #if NOVA_DIAG_DRAW_LIMIT > 0

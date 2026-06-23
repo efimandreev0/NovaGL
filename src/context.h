@@ -104,6 +104,15 @@ typedef struct {
     int generate_mipmap;   // GL_GENERATE_MIPMAP was set
     int max_level;         // GL_TEXTURE_MAX_LEVEL, -1 = not set
     int has_mipmap;        // real C3D_Tex have mips or no
+
+    /* Cube-map support (GL_TEXTURE_CUBE_MAP). When is_cube is set, `tex` was
+     * created with C3D_TexInitCube and its 6 face buffers live in `cube`
+     * (embedded, not heap — so cube textures bypass the deferred orphan GC and
+     * are deleted immediately). face_loaded tracks which of the 6 faces have
+     * received data. */
+    int is_cube;
+    C3D_TexCube cube;
+    int face_loaded[6];
 } TexSlot;
 
 typedef struct {
@@ -249,6 +258,12 @@ extern struct NovaState {
     C3D_LightEnv  light_env;
     C3D_Light     c3d_lights[NOVA_MAX_LIGHTS];
     C3D_LightLut  light_lut_phong;
+    /* Per-light hardware LUTs for GL spotlight cone (GL_SPOT_CUTOFF/EXPONENT)
+     * and distance attenuation (GL_*_ATTENUATION). Rebuilt with the env in
+     * nova_apply_light_env; kept per-light because each source has its own
+     * cone angle / attenuation coefficients. */
+    C3D_LightLut   light_lut_spot[NOVA_MAX_LIGHTS];
+    C3D_LightLutDA light_lut_da[NOVA_MAX_LIGHTS];
     int           light_env_built;
     int           lighting_active;
     int           light_dirty;
@@ -341,9 +356,22 @@ extern struct NovaState {
     GLboolean depth_mask;
     int blend_enabled;
     GLenum blend_src, blend_dst;
+    /* Separate alpha-channel blend factors (glBlendFuncSeparate). glBlendFunc
+     * keeps these equal to the colour factors. PICA's C3D_AlphaBlend takes
+     * independent colour/alpha factors, so this is a real HW path. */
+    GLenum blend_src_alpha, blend_dst_alpha;
     /* Blend equation, per-channel (glBlendEquationSeparate). PICA's GPU_BLENDEQUATION
      * is real HW — GL_FUNC_ADD / SUBTRACT / REVERSE_SUBTRACT / MIN / MAX all map. */
     GLenum blend_eq_rgb, blend_eq_alpha;
+    /* glBlendColor — the constant fed to GL_CONSTANT_COLOR/ALPHA and their
+     * inverse blend factors. Pushed via C3D_BlendingColor when blending is on
+     * and a constant factor is in use. */
+    float blend_color[4];
+    /* glLogicOp / GL_COLOR_LOGIC_OP. On PICA the colour stage is EITHER blend
+     * OR logic op (selected by the same fragOpMode bit), so when this is on we
+     * emit C3D_ColorLogicOp instead of C3D_AlphaBlend. */
+    int color_logic_op_enabled;
+    GLenum logic_op;
     int alpha_test_enabled;
     GLenum alpha_func;
     float alpha_ref;
@@ -443,6 +471,13 @@ extern struct NovaState {
      * source is GL_CONSTANT. Stored as 0..1 floats (GL convention); converted
      * to packed 0xAABBGGRR for citro3d on the way through. */
     GLfloat tex_env_color[3][4];
+
+    /* GL_RGB_SCALE / GL_ALPHA_SCALE (glTexEnv): final per-stage multiplier
+     * applied AFTER the combine function. GL allows 1.0/2.0/4.0; PICA has the
+     * matching GPU_TEVSCALE_1/_2/_4. Pushed via C3D_TexEnvScale in the per-unit
+     * TEV build. Default 1 (no scale). */
+    GLint tex_env_rgb_scale[3];
+    GLint tex_env_alpha_scale[3];
 
     /* Explicit TEV stage programming (overrides the per-unit GL_COMBINE
      * path when active). See NovaGL.h::novaSetExplicitTevStages for the

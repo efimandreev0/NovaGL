@@ -142,6 +142,36 @@ typedef void *(*GLADloadproc)(const char *name);
 #define GL_INCR_WRAP                0x8507
 #define GL_DECR_WRAP                0x8508
 
+/* Colour logic-op opcodes (glLogicOp + glEnable(GL_COLOR_LOGIC_OP)). All 16 map
+ * 1:1 onto PICA's GPU_LOGICOP. GL_INVERT (0x150A) is already defined above for
+ * the stencil-op path; it doubles as a logic op. */
+#define GL_CLEAR                    0x1500
+#define GL_AND                      0x1501
+#define GL_AND_REVERSE              0x1502
+#define GL_COPY                     0x1503
+#define GL_AND_INVERTED             0x1504
+#define GL_NOOP                     0x1505
+#define GL_XOR                      0x1506
+#define GL_OR                       0x1507
+#define GL_NOR                      0x1508
+#define GL_EQUIV                    0x1509
+#define GL_OR_REVERSE               0x150B
+#define GL_COPY_INVERTED            0x150C
+#define GL_OR_INVERTED              0x150D
+#define GL_NAND                     0x150E
+#define GL_SET                      0x150F
+
+/* Cube-map texture target + faces (glBindTexture / glTexImage2D). Storage is
+ * backed by C3D_TexInitCube; see glTexImage2D notes on the texcoord caveat. */
+#define GL_TEXTURE_CUBE_MAP             0x8513
+#define GL_TEXTURE_BINDING_CUBE_MAP     0x8514
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_X  0x8515
+#define GL_TEXTURE_CUBE_MAP_NEGATIVE_X  0x8516
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_Y  0x8517
+#define GL_TEXTURE_CUBE_MAP_NEGATIVE_Y  0x8518
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_Z  0x8519
+#define GL_TEXTURE_CUBE_MAP_NEGATIVE_Z  0x851A
+
 #define GL_FOG_MODE                 0x0B65
 #define GL_FOG_DENSITY              0x0B62
 #define GL_FOG_START                0x0B63
@@ -174,6 +204,13 @@ typedef void *(*GLADloadproc)(const char *name);
 #define GL_DST_COLOR                0x0306
 #define GL_ONE_MINUS_DST_COLOR      0x0307
 #define GL_SRC_ALPHA_SATURATE       0x0308
+/* Constant-colour blend factors (glBlendColor). Map to PICA's
+ * GPU_CONSTANT_COLOR / GPU_CONSTANT_ALPHA and their inverses. */
+#define GL_CONSTANT_COLOR           0x8001
+#define GL_ONE_MINUS_CONSTANT_COLOR 0x8002
+#define GL_CONSTANT_ALPHA           0x8003
+#define GL_ONE_MINUS_CONSTANT_ALPHA 0x8004
+#define GL_BLEND_COLOR              0x8005
 
 /* Blend equation (glBlendEquation / glBlendEquationSeparate[OES]). PICA200 has
  * a real per-channel blend op (GPU_BLENDEQUATION), so these map straight to HW
@@ -349,6 +386,11 @@ typedef void *(*GLADloadproc)(const char *name);
 #define GL_STATIC_DRAW              0x88E4
 #define GL_DYNAMIC_DRAW             0x88E8
 #define GL_STREAM_DRAW              0x88E0
+/* Buffer object query params (glGetBufferParameteriv). */
+#define GL_BUFFER_SIZE              0x8764
+#define GL_BUFFER_USAGE             0x8765
+#define GL_BUFFER_ACCESS            0x88BB
+#define GL_BUFFER_MAPPED            0x88BC
 
 /* Buffer mapping access modes (glMapBuffer) */
 #define GL_READ_ONLY                0x88B8
@@ -656,6 +698,12 @@ void glDepthRange(GLclampd near_val, GLclampd far_val);
 
 void glBlendFunc(GLenum sfactor, GLenum dfactor);
 
+void glBlendColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha);
+
+void glBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha);
+
+void glLogicOp(GLenum opcode);
+
 void glBlendEquation(GLenum mode);
 
 void glBlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha);
@@ -842,6 +890,10 @@ void glTexParameteriv(GLenum target, GLenum pname, const GLint *params);
 
 void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height,
                             GLint border, GLsizei imageSize, const GLvoid *data);
+
+void glCompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                               GLsizei width, GLsizei height, GLenum format, GLsizei imageSize,
+                               const GLvoid *data);
 
 void glTexImage1D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLint border, GLenum format,
                   GLenum type, const GLvoid *pixels);
@@ -1104,6 +1156,14 @@ void glTexEnvf(GLenum target, GLenum pname, GLfloat param);
 
 void glTexEnvfv(GLenum target, GLenum pname, const GLfloat *params);
 
+void glTexEnviv(GLenum target, GLenum pname, const GLint *params);
+
+/* GLES 1.1 state queries (texture sampler params + tex-env). */
+void glGetTexParameteriv(GLenum target, GLenum pname, GLint *params);
+void glGetTexParameterfv(GLenum target, GLenum pname, GLfloat *params);
+void glGetTexEnviv(GLenum target, GLenum pname, GLint *params);
+void glGetTexEnvfv(GLenum target, GLenum pname, GLfloat *params);
+
 void glEnable(GLenum cap);
 
 void glDisable(GLenum cap);
@@ -1111,6 +1171,55 @@ void glDisable(GLenum cap);
 GLboolean glIsEnabled(GLenum cap);
 
 GLboolean glIsTexture(GLuint texture);
+
+GLboolean glIsBuffer(GLuint buffer);
+
+GLboolean glIsFramebuffer(GLuint framebuffer);
+
+GLboolean glIsList(GLuint list);
+
+void glClearColorx(GLfixed r, GLfixed g, GLfixed b, GLfixed a);
+void glClearDepthx(GLfixed depth);
+void glColor4x(GLfixed r, GLfixed g, GLfixed b, GLfixed a);
+void glDepthRangex(GLfixed n, GLfixed f);
+void glAlphaFuncx(GLenum func, GLfixed ref);
+void glLineWidthx(GLfixed width);
+void glPolygonOffsetx(GLfixed factor, GLfixed units);
+void glNormal3x(GLfixed nx, GLfixed ny, GLfixed nz);
+void glOrthox(GLfixed l, GLfixed r, GLfixed b, GLfixed t, GLfixed n, GLfixed f);
+void glRotatex(GLfixed angle, GLfixed x, GLfixed y, GLfixed z);
+void glScalex(GLfixed x, GLfixed y, GLfixed z);
+void glTranslatex(GLfixed x, GLfixed y, GLfixed z);
+void glLoadMatrixx(const GLfixed *m);
+void glMultMatrixx(const GLfixed *m);
+void glMaterialx(GLenum face, GLenum pname, GLfixed param);
+void glMaterialxv(GLenum face, GLenum pname, const GLfixed *params);
+void glLightxv(GLenum light, GLenum pname, const GLfixed *params);
+void glLightModelxv(GLenum pname, const GLfixed *params);
+void glTexParameterx(GLenum target, GLenum pname, GLfixed param);
+void glTexEnvx(GLenum target, GLenum pname, GLfixed param);
+void glTexEnvxv(GLenum target, GLenum pname, const GLfixed *params);
+void glFogxv(GLenum pname, const GLfixed *params);
+/* Separate stencil faces (collapse to PICA's single stencil unit). */
+void glStencilFuncSeparate(GLenum face, GLenum func, GLint ref, GLuint mask);
+void glStencilOpSeparate(GLenum face, GLenum sfail, GLenum dpfail, GLenum dppass);
+void glStencilMaskSeparate(GLenum face, GLuint mask);
+/* Multitexture coord convenience forms. */
+void glMultiTexCoord2f(GLenum target, GLfloat s, GLfloat t);
+void glMultiTexCoord2fv(GLenum target, const GLfloat *v);
+void glMultiTexCoord2i(GLenum target, GLint s, GLint t);
+/* Misc. */
+void glRectf(GLfloat x1, GLfloat y1, GLfloat x2, GLfloat y2);
+void glRecti(GLint x1, GLint y1, GLint x2, GLint y2);
+void glMultiDrawArrays(GLenum mode, const GLint *first, const GLsizei *count, GLsizei primcount);
+void glGetBufferParameteriv(GLenum target, GLenum pname, GLint *params);
+/* GLU helpers. */
+void gluPerspective(GLdouble fovy, GLdouble aspect, GLdouble zNear, GLdouble zFar);
+void gluLookAt(GLdouble eyeX, GLdouble eyeY, GLdouble eyeZ,
+               GLdouble centerX, GLdouble centerY, GLdouble centerZ,
+               GLdouble upX, GLdouble upY, GLdouble upZ);
+GLint gluBuild2DMipmaps(GLenum target, GLint internalFormat, GLsizei width, GLsizei height,
+                        GLenum format, GLenum type, const void *data);
 
 /* Attribute stack */
 void glPushAttrib(GLbitfield mask);

@@ -149,6 +149,14 @@ void glGenBuffers(GLsizei n, GLuint *buffers) {
     }
 }
 
+/* GLES 1.1: true only for a name returned by glGenBuffers and not since
+ * deleted. NovaGL marks a slot in_use at gen time, so a reserved-but-unbound
+ * name still counts as a buffer object. */
+GLboolean glIsBuffer(GLuint buffer) {
+    if (buffer > 0 && (int) buffer < NOVA_MAX_VBOS && g.vbos[buffer].in_use) return GL_TRUE;
+    return GL_FALSE;
+}
+
 void glDeleteBuffers(GLsizei n, const GLuint *buffers) {
     if (n < 0) {
         g.last_error = GL_INVALID_VALUE;

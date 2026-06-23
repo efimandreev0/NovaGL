@@ -32,8 +32,13 @@ static u8            s_last_alpha_ref8         = 0xFF;
 static int           s_last_blend_enabled      = -1;
 static GLenum        s_last_blend_src          = 0;
 static GLenum        s_last_blend_dst          = 0;
+static GLenum        s_last_blend_src_alpha    = 0;
+static GLenum        s_last_blend_dst_alpha    = 0;
 static GLenum        s_last_blend_eq_rgb       = 0;
 static GLenum        s_last_blend_eq_alpha     = 0;
+static int           s_last_logic_op_enabled   = -1;
+static GLenum        s_last_logic_op           = 0;
+static u32           s_last_blend_color        = 0xDEADBEEFu;
 static int           s_last_cull_enabled       = -1;
 static GLenum        s_last_cull_mode          = 0;
 static GLenum        s_last_front_face         = 0;
@@ -236,7 +241,37 @@ GPU_BLENDFACTOR gl_to_gpu_blendfactor(GLenum factor) {
         case GL_DST_ALPHA: return GPU_DST_ALPHA;
         case GL_ONE_MINUS_DST_ALPHA: return GPU_ONE_MINUS_DST_ALPHA;
         case GL_SRC_ALPHA_SATURATE: return GPU_SRC_ALPHA_SATURATE;
+        case GL_CONSTANT_COLOR: return GPU_CONSTANT_COLOR;
+        case GL_ONE_MINUS_CONSTANT_COLOR: return GPU_ONE_MINUS_CONSTANT_COLOR;
+        case GL_CONSTANT_ALPHA: return GPU_CONSTANT_ALPHA;
+        case GL_ONE_MINUS_CONSTANT_ALPHA: return GPU_ONE_MINUS_CONSTANT_ALPHA;
         default: return GPU_ONE;
+    }
+}
+
+/* GL colour logic opcode -> PICA GPU_LOGICOP. Both enumerate the same 16 ops;
+ * GL's values are 0x1500-0x150F in canonical order, so a table keyed off the
+ * low nibble would also work, but the explicit switch is clearer and matches
+ * the rest of the lookup file. */
+GPU_LOGICOP gl_to_gpu_logicop(GLenum op) {
+    switch (op) {
+        case GL_CLEAR:         return GPU_LOGICOP_CLEAR;
+        case GL_AND:           return GPU_LOGICOP_AND;
+        case GL_AND_REVERSE:   return GPU_LOGICOP_AND_REVERSE;
+        case GL_COPY:          return GPU_LOGICOP_COPY;
+        case GL_AND_INVERTED:  return GPU_LOGICOP_AND_INVERTED;
+        case GL_NOOP:          return GPU_LOGICOP_NOOP;
+        case GL_XOR:           return GPU_LOGICOP_XOR;
+        case GL_OR:            return GPU_LOGICOP_OR;
+        case GL_NOR:           return GPU_LOGICOP_NOR;
+        case GL_EQUIV:         return GPU_LOGICOP_EQUIV;
+        case GL_INVERT:        return GPU_LOGICOP_INVERT;
+        case GL_OR_REVERSE:    return GPU_LOGICOP_OR_REVERSE;
+        case GL_COPY_INVERTED: return GPU_LOGICOP_COPY_INVERTED;
+        case GL_OR_INVERTED:   return GPU_LOGICOP_OR_INVERTED;
+        case GL_NAND:          return GPU_LOGICOP_NAND;
+        case GL_SET:           return GPU_LOGICOP_SET;
+        default:               return GPU_LOGICOP_COPY;
     }
 }
 
@@ -665,6 +700,16 @@ static u32 pack_tev_color(const float c[4]) {
     return (a << 24) | (b << 16) | (g_ << 8) | r;
 }
 
+/* GL_RGB_SCALE / GL_ALPHA_SCALE value (1, 2 or 4) -> PICA GPU_TEVSCALE. Anything
+ * else falls back to 1x (GL only permits those three). */
+static inline GPU_TEVSCALE gl_to_gpu_tevscale(GLint scale) {
+    switch (scale) {
+        case 2:  return GPU_TEVSCALE_2;
+        case 4:  return GPU_TEVSCALE_4;
+        default: return GPU_TEVSCALE_1;
+    }
+}
+
 /* Translate a GL TEV source enum to PICA. Unlike get_tev_src() below (which
  * is for the per-unit GL_COMBINE path and resolves GL_TEXTURE to "this
  * unit's tex"), the explicit-stage path accepts named texture-unit sources
@@ -751,8 +796,15 @@ void nova_apply_light_env(void) {
             NovaLight *L = &g.lights[i];
             C3D_Light *cl = &g.c3d_lights[n];
             C3D_LightInit(cl, &g.light_env);
-            /* (r,g,b) — these setters swap to BGR for us. */
-            C3D_LightColor(cl, L->diffuse[0], L->diffuse[1], L->diffuse[2]);
+            /* Diffuse and specular are separate in GL (GL_DIFFUSE / GL_SPECULAR);
+             * the old code used C3D_LightColor which forces specular = diffuse.
+             * Set them independently so a coloured/!=diffuse GL_SPECULAR is
+             * honoured. specular1 (PICA's 2nd specular layer) has no GL analogue,
+             * so pin it to 0 to avoid a phantom second highlight. (All three
+             * setters take r,g,b and swap to BGR internally.) */
+            C3D_LightDiffuse(cl, L->diffuse[0], L->diffuse[1], L->diffuse[2]);
+            C3D_LightSpecular0(cl, L->specular[0], L->specular[1], L->specular[2]);
+            C3D_LightSpecular1(cl, 0.0f, 0.0f, 0.0f);
             C3D_LightAmbient(cl, L->ambient[0], L->ambient[1], L->ambient[2]);
             /* GL_POSITION: w==0 -> directional, else positional. C3D_LightPosition
              * reads w to pick the mode. NOTE: GL transforms POSITION by the
@@ -762,6 +814,43 @@ void nova_apply_light_env(void) {
             C3D_FVec pos = FVec4_New(L->position[0], L->position[1],
                                      L->position[2], L->position[3]);
             C3D_LightPosition(cl, &pos);
+
+            /* Spotlight + distance attenuation only affect POSITIONAL lights
+             * (GL ignores both for directional w==0 sources). */
+            int positional = (L->position[3] != 0.0f);
+
+            /* GL_SPOT_CUTOFF == 180 means "not a spotlight". A real cone is
+             * 0..90 deg. C3D_LightSpotLut builds a LUT keyed on the angle to the
+             * spot axis; we use citro3d's hard-edged spot_step helper, so
+             * GL_SPOT_EXPONENT (soft falloff) is approximated as a hard cone.
+             * C3D_LightSpotDir negates+normalises internally, so pass GL's
+             * outward-pointing GL_SPOT_DIRECTION as-is. */
+            if (positional && L->spot_cutoff >= 0.0f && L->spot_cutoff < 180.0f) {
+                float cutoff_rad = L->spot_cutoff * 0.017453292519943295f; /* deg->rad */
+                LightLut_Spotlight(&g.light_lut_spot[n], cutoff_rad);
+                C3D_LightSpotLut(cl, &g.light_lut_spot[n]);
+                C3D_LightSpotDir(cl, L->spot_direction[0], L->spot_direction[1], L->spot_direction[2]);
+                C3D_LightSpotEnable(cl, true);
+            }
+
+            /* GL attenuation: 1/(kc + kl*d + kq*d^2). citro3d's quadratic helper
+             * fixes kc at 1 (the GL default), so we feed kl/kq directly and
+             * assume kc ~= 1 (documented limitation). Build a LUT over a distance
+             * range out to where attenuation has decayed to ~1%. Only enable when
+             * there's a real distance term. */
+            if (positional && (L->atten_linear > 0.0f || L->atten_quadratic > 0.0f)) {
+                float d_far;
+                if (L->atten_quadratic > 0.0f)
+                    d_far = sqrtf(99.0f / L->atten_quadratic);
+                else
+                    d_far = 99.0f / L->atten_linear;
+                if (d_far < 16.0f)   d_far = 16.0f;
+                if (d_far > 8192.0f) d_far = 8192.0f;
+                LightLutDA_Quadratic(&g.light_lut_da[n], 0.0f, d_far,
+                                     L->atten_linear, L->atten_quadratic);
+                C3D_LightDistAttn(cl, &g.light_lut_da[n]);
+                C3D_LightDistAttnEnable(cl, true);
+            }
             n++;
         }
         g.light_env_built = 1;
@@ -1063,23 +1152,42 @@ void apply_gpu_state(void) {
         s_last_alpha_ref8 = alpha_ref8;
     }
 
+    /* Colour-stage selection: logic op OR blend (mutually exclusive on PICA,
+     * and per the GL spec GL_COLOR_LOGIC_OP overrides blending when enabled).
+     * C3D_ColorLogicOp / C3D_AlphaBlend each flip the fragOpMode select bit, so
+     * toggling between them re-pushes correctly. blend_color feeds the
+     * GL_CONSTANT_COLOR/ALPHA factors via C3D_BlendingColor. */
+    u32 blend_col_packed = pack_tev_color(g.blend_color);
     if (s_last_blend_enabled != g.blend_enabled ||
         s_last_blend_src != g.blend_src ||
         s_last_blend_dst != g.blend_dst ||
+        s_last_blend_src_alpha != g.blend_src_alpha ||
+        s_last_blend_dst_alpha != g.blend_dst_alpha ||
         s_last_blend_eq_rgb != g.blend_eq_rgb ||
-        s_last_blend_eq_alpha != g.blend_eq_alpha) {
-        if (g.blend_enabled) {
+        s_last_blend_eq_alpha != g.blend_eq_alpha ||
+        s_last_logic_op_enabled != g.color_logic_op_enabled ||
+        s_last_logic_op != g.logic_op ||
+        s_last_blend_color != blend_col_packed) {
+        if (g.color_logic_op_enabled) {
+            C3D_ColorLogicOp(gl_to_gpu_logicop(g.logic_op));
+        } else if (g.blend_enabled) {
+            C3D_BlendingColor(blend_col_packed);
             C3D_AlphaBlend(gl_to_gpu_blendeq(g.blend_eq_rgb), gl_to_gpu_blendeq(g.blend_eq_alpha),
                            gl_to_gpu_blendfactor(g.blend_src), gl_to_gpu_blendfactor(g.blend_dst),
-                           gl_to_gpu_blendfactor(g.blend_src), gl_to_gpu_blendfactor(g.blend_dst));
+                           gl_to_gpu_blendfactor(g.blend_src_alpha), gl_to_gpu_blendfactor(g.blend_dst_alpha));
         } else {
             C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
         }
         s_last_blend_enabled = g.blend_enabled;
         s_last_blend_src = g.blend_src;
         s_last_blend_dst = g.blend_dst;
+        s_last_blend_src_alpha = g.blend_src_alpha;
+        s_last_blend_dst_alpha = g.blend_dst_alpha;
         s_last_blend_eq_rgb = g.blend_eq_rgb;
         s_last_blend_eq_alpha = g.blend_eq_alpha;
+        s_last_logic_op_enabled = g.color_logic_op_enabled;
+        s_last_logic_op = g.logic_op;
+        s_last_blend_color = blend_col_packed;
     }
 
     if (s_last_cull_enabled != g.cull_face_enabled ||
@@ -1325,6 +1433,10 @@ void apply_gpu_state(void) {
                 C3D_TexEnvColor(env, pack_tev_color(g.tex_env_color[unit]));
             }
 
+            /* GL_RGB_SCALE / GL_ALPHA_SCALE: post-combine multiplier (1/2/4). */
+            C3D_TexEnvScale(env, C3D_RGB,   gl_to_gpu_tevscale(g.tex_env_rgb_scale[unit]));
+            C3D_TexEnvScale(env, C3D_Alpha, gl_to_gpu_tevscale(g.tex_env_alpha_scale[unit]));
+
             tev_stage++;
         }
 
@@ -1434,8 +1546,13 @@ void nova_invalidate_state_cache(void) {
     s_last_blend_enabled      = -1;
     s_last_blend_src          = 0;
     s_last_blend_dst          = 0;
+    s_last_blend_src_alpha    = 0;
+    s_last_blend_dst_alpha    = 0;
     s_last_blend_eq_rgb       = 0;
     s_last_blend_eq_alpha     = 0;
+    s_last_logic_op_enabled   = -1;
+    s_last_logic_op           = 0;
+    s_last_blend_color        = 0xDEADBEEFu;
     s_last_cull_enabled       = -1;
     s_last_cull_mode          = 0;
     s_last_front_face         = 0;

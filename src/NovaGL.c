@@ -342,8 +342,19 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.clear_stencil = 0;
     g.blend_src = GL_ONE;
     g.blend_dst = GL_ZERO;
+    g.blend_src_alpha = GL_ONE;
+    g.blend_dst_alpha = GL_ZERO;
     g.blend_eq_rgb = GL_FUNC_ADD;
     g.blend_eq_alpha = GL_FUNC_ADD;
+    /* glBlendColor default is transparent black; logic op default GL_COPY. */
+    g.blend_color[0] = g.blend_color[1] = g.blend_color[2] = g.blend_color[3] = 0.0f;
+    g.color_logic_op_enabled = 0;
+    g.logic_op = GL_COPY;
+    /* GL_RGB_SCALE / GL_ALPHA_SCALE default to 1 on every texture unit. */
+    for (int u = 0; u < 3; u++) {
+        g.tex_env_rgb_scale[u] = 1;
+        g.tex_env_alpha_scale[u] = 1;
+    }
     /* GL default material: ambient (0.2,0.2,0.2,1), diffuse (0.8,0.8,0.8,1),
      * specular/emission (0,0,0,1), shininess 0. */
     g.lighting_enabled = 0;

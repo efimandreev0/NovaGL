@@ -42,6 +42,7 @@ add_library(NovaGL STATIC
         utils.c
         NovaGL.c
         immediate.c
+        compat.c
         lookup.c
         egl.c
         splashscreen.c

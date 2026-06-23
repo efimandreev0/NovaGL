@@ -305,9 +305,17 @@ static void apply_slot_params_to_tex(C3D_Tex *tex, const TexSlot *slot) {
     C3D_TexSetFilter(tex, mag, min_f);
     C3D_TexSetFilterMipmap(tex, mip_f);
 
-    // Cap LOD so PICA never samples a non-existent level. When mips are
-    // present we still respect a Arx-supplied GL_TEXTURE_MAX_LEVEL cap.
-    int max_lod = slot->has_mipmap ? (slot->max_level >= 0 ? slot->max_level : 7) : 0;
+    // Cap LOD so PICA never samples a non-existent level. The hard ceiling is
+    // the texture's PHYSICAL pyramid depth — tex->maxLevel, which
+    // C3D_TexInitMipmap derived from the POT dimensions (0 for 8x8, 1 for
+    // 16x16, ... 7 for 1024). Telling PICA a larger maxLevel makes it sample
+    // uninitialised memory past the real pyramid => garbage at distance. On
+    // top of that physical ceiling we honour a tighter caller-supplied
+    // GL_TEXTURE_MAX_LEVEL, but never a looser one.
+    int real_max = slot->has_mipmap ? (int) tex->maxLevel : 0;
+    int max_lod = real_max;
+    if (slot->has_mipmap && slot->max_level >= 0 && slot->max_level < max_lod)
+        max_lod = slot->max_level;
     if (max_lod < 0) max_lod = 0;
     if (max_lod > 7) max_lod = 7;
     C3D_TexSetLodBias(tex, 0.0f);
@@ -361,7 +369,18 @@ void nova_tex_gc_push(C3D_Tex *tex) {
 
 static void free_texture_storage(TexSlot *slot) {
     if (slot->allocated) {
-        nova_tex_gc_push(&slot->tex);
+        if (slot->is_cube) {
+            /* Cube face buffers are referenced by slot->cube (embedded in the
+             * slot), so they can't go through the deferred orphan GC, which
+             * stores C3D_Tex by value and would dangle when the slot is reused.
+             * Cube maps are typically static (loaded once), so deleting now is
+             * fine. */
+            C3D_TexDelete(&slot->tex);
+            memset(&slot->tex, 0, sizeof(slot->tex));
+            memset(&slot->cube, 0, sizeof(slot->cube));
+        } else {
+            nova_tex_gc_push(&slot->tex);
+        }
         /* Storage re-created at the same id ⇒ data pointer changes; the
          * TexBind skip-cache must not treat the id as "already bound". */
         nova_invalidate_tex_bind((GLuint) (slot - g.textures));
@@ -373,6 +392,9 @@ static void free_texture_storage(TexSlot *slot) {
     slot->allocated = 0;
     slot->has_mipmap = 0;
     slot->is_solid_optimized = 0;
+    slot->is_cube = 0;
+    slot->face_loaded[0] = slot->face_loaded[1] = slot->face_loaded[2] = 0;
+    slot->face_loaded[3] = slot->face_loaded[4] = slot->face_loaded[5] = 0;
     slot->fmt = (GPU_TEXCOLOR) 0;
     slot->pot_w = 0;
     slot->pot_h = 0;
@@ -400,7 +422,7 @@ static int is_texture_solid(const void *pixels, int width, int height, GLenum fo
         bpp = 2;
     else if (format == GL_LUMINANCE_ALPHA && type == GL_UNSIGNED_BYTE) bpp = 2;
     else if (format == GL_LUMINANCE || format == GL_ALPHA || format == GL_LUMINANCE_ALPHA4_NOVA) bpp = 1;
-    else if (format == GL_RGB && type == GL_UNSIGNED_BYTE) bpp = 3;
+    else if ((format == GL_RGB || format == GL_BGR) && type == GL_UNSIGNED_BYTE) bpp = 3;
 
     int stride = row_stride_bytes(width, bpp, alignment);
 
@@ -458,6 +480,8 @@ static void upload_solid_texture(C3D_Tex *tex, GPU_TEXCOLOR fmt, const GLvoid *p
         uint32_t out_pixel = 0;
         if (format == GL_RGB) {
             out_pixel = ((uint32_t) px[0] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[2] << 8) | 0xFFu;
+        } else if (format == GL_BGR) {
+            out_pixel = ((uint32_t) px[2] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[0] << 8) | 0xFFu;
         } else if (format == GL_BGRA) {
             // BGRA byte order -> swap R/B into the GPU's RGBA8 packing
             out_pixel = ((uint32_t) px[2] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[0] << 8) | (uint32_t) px[3];
@@ -469,7 +493,12 @@ static void upload_solid_texture(C3D_Tex *tex, GPU_TEXCOLOR fmt, const GLvoid *p
         for (int i = 0; i < num_pixels; i++) dst[i] = out_pixel;
     } else if (gpu_texfmt_bpp(fmt) == 2) {
         uint16_t val;
-        memcpy(&val, px, sizeof(uint16_t));
+        if (fmt == GPU_LA8) {
+            /* [L,A] source bytes -> PICA (L<<8)|A (see upload_page_16bit). */
+            val = ((uint16_t) px[0] << 8) | px[1];
+        } else {
+            memcpy(&val, px, sizeof(uint16_t)); /* packed short, layouts match */
+        }
         uint16_t *dst = (uint16_t *) tex->data;
         for (int i = 0; i < num_pixels; i++) dst[i] = val;
     } else {
@@ -490,6 +519,10 @@ static void upload_page_rgba8(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t 
                 if (format == GL_RGB) {
                     const uint8_t *px = row + (src_x0 + x) * 3;
                     out_pixel = ((uint32_t) px[0] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[2] << 8) | 0xFFu;
+                } else if (format == GL_BGR) {
+                    /* 3 bytes B,G,R -> opaque RGBA8. */
+                    const uint8_t *px = row + (src_x0 + x) * 3;
+                    out_pixel = ((uint32_t) px[2] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[0] << 8) | 0xFFu;
                 } else if (format == GL_BGRA) {
                     const uint8_t *px = row + (src_x0 + x) * 4;
                     out_pixel = ((uint32_t) px[2] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[0] << 8) | (
@@ -507,14 +540,29 @@ static void upload_page_rgba8(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t 
 }
 
 static void upload_page_16bit(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t *pixels, int row_stride, int src_x0,
-                              int src_y0, int copy_w, int copy_h, GLenum type) {
+                              int src_y0, int copy_w, int copy_h, GPU_TEXCOLOR fmt) {
     uint16_t *dst = (uint16_t *) tex->data;
+    /* Two distinct kinds of 2-byte source land here:
+     *  - PACKED colour shorts (RGB565 / RGBA5551 / RGBA4): the GL packed-pixel
+     *    layout already matches PICA bit-for-bit (R in the MSBs — see the
+     *    glReadPixels packer in copyTexImage), so a straight 16-bit copy is
+     *    correct.
+     *  - GPU_LA8 from GL_LUMINANCE_ALPHA + UNSIGNED_BYTE: this is NOT a packed
+     *    short — the source is two independent bytes laid out [L, A]. PICA LA8
+     *    wants luminance in the high byte / alpha in the low byte (u16 =
+     *    (L<<8)|A), the same "first component in the MSBs" convention RGBA8
+     *    uses. A raw copy would swap L and A. Reorder explicitly. */
+    int is_la8 = (fmt == GPU_LA8);
     for (int y = 0; y < pot_h; y++) {
         for (int x = 0; x < pot_w; x++) {
             uint16_t val = 0;
             if (x < copy_w && y < copy_h) {
                 const uint8_t *row = pixels + (src_y0 + y) * row_stride;
-                memcpy(&val, row + (src_x0 + x) * 2, sizeof(uint16_t));
+                const uint8_t *p = row + (src_x0 + x) * 2;
+                if (is_la8)
+                    val = ((uint16_t) p[0] << 8) | p[1];   /* [L,A] -> (L<<8)|A */
+                else
+                    memcpy(&val, p, sizeof(uint16_t));      /* packed short, layouts match */
             }
             dst[morton_offset_local(x, y, pot_w, pot_h)] = val;
         }
@@ -578,6 +626,7 @@ static void upload_texture_pixels(C3D_Tex *tex, GPU_TEXCOLOR fmt, int pot_w, int
         C3D_TexFlush(tex);
         return;
     }
+    (void) type; /* only the opt-in HW-swizzle path below consults it */
     /* HW-accelerated path — OPT-IN ONLY (-DNOVAGL_ENABLE_HW_SWIZZLE=1).
      *
      * Disabled by default because Citra's emulation of GX DisplayTransfer
@@ -638,13 +687,13 @@ static void upload_texture_pixels(C3D_Tex *tex, GPU_TEXCOLOR fmt, int pot_w, int
     }
 #endif
     if (fmt == GPU_RGBA8) {
-        int row_stride = row_stride_bytes(width, format == GL_RGB ? 3 : 4, unpack_alignment);
+        int row_stride = row_stride_bytes(width, (format == GL_RGB || format == GL_BGR) ? 3 : 4, unpack_alignment);
         upload_page_rgba8(tex, pot_w, pot_h, (const uint8_t *) pixels, row_stride, src_x0, src_y0, copy_w, copy_h,
                           format);
     } else if (gpu_texfmt_bpp(fmt) == 2) {
         int row_stride = row_stride_bytes(width, 2, unpack_alignment);
         upload_page_16bit(tex, pot_w, pot_h, (const uint8_t *) pixels, row_stride, src_x0, src_y0, copy_w, copy_h,
-                          type);
+                          fmt);
     } else {
         int row_stride = row_stride_bytes(width, 1, unpack_alignment);
         upload_page_8bit(tex, pot_w, pot_h, (const uint8_t *) pixels, row_stride, src_x0, src_y0, copy_w, copy_h);
@@ -689,9 +738,12 @@ void glDeleteTextures(GLsizei n, const GLuint *textures) {
 }
 
 void glBindTexture(GLenum target, GLuint texture) {
-    /* Spec: only GL_TEXTURE_2D exists in ES 1.1; anything else is
+    /* ES 1.1 has only GL_TEXTURE_2D; we also accept GL_TEXTURE_CUBE_MAP for
+     * desktop-GL ports. NovaGL keeps a single binding slot per unit (a unit
+     * samples one texture), so both targets share g.bound_texture[unit] — the
+     * object's type is fixed by its first glTexImage2D. Anything else is
      * GL_INVALID_ENUM and must not change the binding. */
-    if (target != GL_TEXTURE_2D) {
+    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_CUBE_MAP) {
         g.last_error = GL_INVALID_ENUM;
         return;
     }
@@ -777,8 +829,87 @@ static void diag_dump_teximage(int idx, GLsizei w, GLsizei h, GLenum format, GLe
            idx, stride * (int)h, stride, path);
 }
 
+/* ── Cube-map texture objects (GL_TEXTURE_CUBE_MAP) ───────────────────────
+ * Backed by C3D_TexInitCube. Storage/upload/bind are complete; see api.md for
+ * the one caveat: NovaGL's vertex path emits 2-component texcoords, so cube
+ * sampling needs (s,t,r) — reflection/skybox texgen is a follow-up. */
+static int cube_face_index(GLenum target) {
+    switch (target) {
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_X: return 0;
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_X: return 1;
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_Y: return 2;
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y: return 3;
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_Z: return 4;
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z: return 5;
+        default: return -1;
+    }
+}
+
+static void tex_image_cube_face(GLenum target, GLint level, GLsizei width, GLsizei height,
+                                GLenum format, GLenum type, const GLvoid *pixels) {
+    int face = cube_face_index(target);
+    if (face < 0) return;
+    GLuint bound = active_bound_texture();
+    if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return;
+    TexSlot *slot = &g.textures[bound];
+
+    if (level != 0) return;                 /* cube mips not generated: level 0 only */
+    if (width <= 0 || height <= 0) { g.last_error = GL_INVALID_VALUE; return; }
+
+    GPU_TEXCOLOR gpu_fmt = gl_to_gpu_texfmt(format, type);
+    int pot_w = nova_next_pow2(width);
+    int pot_h = nova_next_pow2(height);
+    if (pot_w < 8) pot_w = 8;
+    if (pot_h < 8) pot_h = 8;
+    /* PICA cube faces are square and all six share size+format. */
+    if (pot_w != pot_h) { int m = pot_w > pot_h ? pot_w : pot_h; pot_w = pot_h = m; }
+
+    /* (Re)allocate the cube on first use or when geometry/format changed. */
+    if (slot->allocated && (!slot->is_cube || slot->pot_w != pot_w ||
+                            slot->pot_h != pot_h || slot->fmt != gpu_fmt)) {
+        free_texture_storage(slot);
+    }
+    if (!slot->allocated) {
+        memset(&slot->cube, 0, sizeof(slot->cube));
+        if (!C3D_TexInitCube(&slot->tex, &slot->cube, (u16) pot_w, (u16) pot_h, gpu_fmt)) {
+            g.last_error = GL_OUT_OF_MEMORY;
+            return;
+        }
+        slot->allocated = 1;
+        slot->is_cube = 1;
+        slot->fmt = gpu_fmt;
+        slot->pot_w = pot_w; slot->pot_h = pot_h;
+        slot->width = width; slot->height = height;
+        slot->orig_width = width; slot->orig_height = height;
+        slot->has_mipmap = 0;
+        slot->is_solid_optimized = 0;
+        for (int i = 0; i < 6; i++) slot->face_loaded[i] = 0;
+    }
+    apply_slot_params_to_tex(&slot->tex, slot);
+
+    if (pixels) {
+        /* Reuse the tested 2D Morton uploader against a throwaway view whose
+         * data pointer is this face's buffer — each cube face is laid out
+         * exactly like a same-size 2D tiled image. */
+        C3D_Tex faceview = slot->tex;
+        faceview.data = slot->cube.data[face];
+        int cw = width  < pot_w ? width  : pot_w;
+        int ch = height < pot_h ? height : pot_h;
+        upload_texture_pixels(&faceview, gpu_fmt, pot_w, pot_h, pixels, width, height,
+                              0, 0, cw, ch, format, type, g.unpack_alignment);
+        C3D_TexFlush(&faceview);
+        slot->face_loaded[face] = 1;
+    }
+}
+
 void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border,
                   GLenum format, GLenum type, const GLvoid *pixels) {
+    /* Cube-map face targets route to the dedicated cube path. */
+    if (cube_face_index(target) >= 0) {
+        (void) border; (void) internalformat;
+        tex_image_cube_face(target, level, width, height, format, type, pixels);
+        return;
+    }
     (void) target;
     (void) level;
     (void) border;
@@ -878,7 +1009,20 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     // GL_GENERATE_MIPMAP before glTexImage2D (OpenGL 1.4 semantics) when it
     // wants auto-generated mips, otherwise it pins GL_TEXTURE_MAX_LEVEL=0.
     // is_solid textures stay 8x8 — never worth mipping.
-    int want_mips = slot->generate_mipmap && !is_solid && pot_w >= 2 && pot_h >= 2;
+    // C3D_TexGenerateMipmap can only downscale GPU_RGBA8 / GPU_RGB8 — for every
+    // other PICA format its inner switch hits `default: break`, so the mip
+    // levels are left as uninitialised linearAlloc memory (garbage at distance)
+    // while we still burn CPU walking the empty downscale loop. gl_to_gpu_texfmt
+    // only ever yields RGBA8 of those two (GL_RGB+UB also maps to RGBA8), so in
+    // practice this gates on RGBA8. Mip pyramids for 16-/8-bit formats would
+    // need custom tiled (Morton) downscalers — TODO, see C3Di_DownscaleRGBA8.
+    //
+    // Also require min dimension >= 16: C3D_TexCalcMaxLevel returns 0 below
+    // that (8x8 -> level 0 only), so a sub-16 "mipmapped" texture has no real
+    // pyramid to generate and shouldn't claim has_mipmap.
+    int fmt_mipmappable = (gpu_fmt == GPU_RGBA8 || gpu_fmt == GPU_RGB8);
+    int want_mips = slot->generate_mipmap && fmt_mipmappable && !is_solid &&
+                    pot_w >= 16 && pot_h >= 16;
 
     /* (The old "mip-state changed → re-init" check is gone: re-definition
      * orphans unconditionally above, so the slot is never allocated here.) */
@@ -980,6 +1124,14 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
         g.last_error = GL_INVALID_OPERATION;
         return;
     }
+    /* Cube faces aren't sub-updatable through this 2D path — slot->tex.data is
+     * the C3D_TexCube pointer for a cube, so the 2D Morton writes below would
+     * corrupt the cube struct. Cube faces are upload-once via glTexImage2D.
+     * (A full cube sub-update path can be added later if a port needs it.) */
+    if (slot->is_cube || cube_face_index(target) >= 0) {
+        g.last_error = GL_INVALID_OPERATION;
+        return;
+    }
     if (!pixels) return;
 
     // If game wanna draw on full tex -> uncompressing it.
@@ -1047,7 +1199,7 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
     if (real_height < 1) real_height = 1;
 
     if (slot->fmt == GPU_RGBA8) {
-        int row_stride = row_stride_bytes(width, format == GL_RGB ? 3 : 4, g.unpack_alignment);
+        int row_stride = row_stride_bytes(width, (format == GL_RGB || format == GL_BGR) ? 3 : 4, g.unpack_alignment);
         uint32_t *tex_data = (uint32_t *) slot->tex.data;
 
         for (int y = 0; y < real_height; y++) {
@@ -1066,6 +1218,9 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
                 if (format == GL_RGB) {
                     const uint8_t *px = row + src_x * 3;
                     out_pixel = ((uint32_t) px[0] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[2] << 8) | 0xFFu;
+                } else if (format == GL_BGR) {
+                    const uint8_t *px = row + src_x * 3;
+                    out_pixel = ((uint32_t) px[2] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[0] << 8) | 0xFFu;
                 } else if (format == GL_BGRA) {
                     const uint8_t *px = row + src_x * 4;
                     out_pixel = ((uint32_t) px[2] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[0] << 8) | (
@@ -1094,7 +1249,11 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
                 if (dx < 0 || dy < 0 || dx >= slot->pot_w || dy >= slot->pot_h) continue;
 
                 uint16_t val;
-                memcpy(&val, row + src_x * 2, sizeof(uint16_t));
+                const uint8_t *sp = row + src_x * 2;
+                if (slot->fmt == GPU_LA8)
+                    val = ((uint16_t) sp[0] << 8) | sp[1];   /* [L,A] -> (L<<8)|A, see upload_page_16bit */
+                else
+                    memcpy(&val, sp, sizeof(uint16_t));       /* packed short, layouts match */
                 // И здесь убран переворот
                 tex_data[morton_offset_local(dx, dy, slot->pot_w, slot->pot_h)] = val;
             }
@@ -1151,7 +1310,7 @@ void glGetCompressedTexImage(GLenum target, GLint level, GLvoid *pixels) {
 }
 
 void glTexParameteri(GLenum target, GLenum pname, GLint param) {
-    if (target != GL_TEXTURE_2D) {
+    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_CUBE_MAP) {
         g.last_error = GL_INVALID_ENUM;
         return;
     }
@@ -1229,14 +1388,211 @@ void glTexParameteriv(GLenum target, GLenum pname, const GLint *params) {
     if (params) glTexParameteri(target, pname, params[0]);
 }
 
+/* ── Texture parameter / tex-env state queries (GLES 1.1) ─────────────────
+ * Engines query sampler/tex-env state they previously set; returning the
+ * tracked value keeps glGet round-trips honest. */
+static GLint get_tex_param(const TexSlot *slot, GLenum pname) {
+    switch (pname) {
+        case GL_TEXTURE_MIN_FILTER: return slot->min_filter;
+        case GL_TEXTURE_MAG_FILTER: return slot->mag_filter;
+        case GL_TEXTURE_WRAP_S:     return slot->wrap_s;
+        case GL_TEXTURE_WRAP_T:     return slot->wrap_t;
+        case GL_GENERATE_MIPMAP:    return slot->generate_mipmap;
+        case GL_TEXTURE_MAX_LEVEL:  return slot->max_level < 0 ? 0 : slot->max_level;
+        default:                    return 0;
+    }
+}
+
+void glGetTexParameteriv(GLenum target, GLenum pname, GLint *params) {
+    if ((target != GL_TEXTURE_2D && target != GL_TEXTURE_CUBE_MAP) || !params) {
+        if (!params) return;
+        g.last_error = GL_INVALID_ENUM; return;
+    }
+    GLuint bound = active_bound_texture();
+    if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return;
+    params[0] = get_tex_param(&g.textures[bound], pname);
+}
+
+void glGetTexParameterfv(GLenum target, GLenum pname, GLfloat *params) {
+    if (!params) return;
+    GLint v = 0;
+    glGetTexParameteriv(target, pname, &v);
+    params[0] = (GLfloat) v;
+}
+
+static GLint get_tex_env_param(int unit, GLenum pname) {
+    switch (pname) {
+        case GL_TEXTURE_ENV_MODE:  return g.tex_env_mode[unit];
+        case GL_COMBINE_RGB:       return g.tex_env_combine_rgb[unit];
+        case GL_COMBINE_ALPHA:     return g.tex_env_combine_alpha[unit];
+        case GL_SRC0_RGB:          return g.tex_env_src0_rgb[unit];
+        case GL_SRC1_RGB:          return g.tex_env_src1_rgb[unit];
+        case GL_SRC2_RGB:          return g.tex_env_src2_rgb[unit];
+        case GL_SRC0_ALPHA:        return g.tex_env_src0_alpha[unit];
+        case GL_SRC1_ALPHA:        return g.tex_env_src1_alpha[unit];
+        case GL_SRC2_ALPHA:        return g.tex_env_src2_alpha[unit];
+        case GL_OPERAND0_RGB:      return g.tex_env_operand0_rgb[unit];
+        case GL_OPERAND1_RGB:      return g.tex_env_operand1_rgb[unit];
+        case GL_OPERAND2_RGB:      return g.tex_env_operand2_rgb[unit];
+        case GL_OPERAND0_ALPHA:    return g.tex_env_operand0_alpha[unit];
+        case GL_OPERAND1_ALPHA:    return g.tex_env_operand1_alpha[unit];
+        case GL_OPERAND2_ALPHA:    return g.tex_env_operand2_alpha[unit];
+        case GL_RGB_SCALE:         return g.tex_env_rgb_scale[unit];
+        case GL_ALPHA_SCALE:       return g.tex_env_alpha_scale[unit];
+        default:                   return 0;
+    }
+}
+
+void glGetTexEnviv(GLenum target, GLenum pname, GLint *params) {
+    if (target != GL_TEXTURE_ENV || !params) return;
+    int unit = g.active_texture_unit;
+    if (unit < 0 || unit >= 3) return;
+    params[0] = get_tex_env_param(unit, pname);
+}
+
+void glGetTexEnvfv(GLenum target, GLenum pname, GLfloat *params) {
+    if (target != GL_TEXTURE_ENV || !params) return;
+    int unit = g.active_texture_unit;
+    if (unit < 0 || unit >= 3) return;
+    if (pname == GL_TEXTURE_ENV_COLOR) {
+        params[0] = g.tex_env_color[unit][0]; params[1] = g.tex_env_color[unit][1];
+        params[2] = g.tex_env_color[unit][2]; params[3] = g.tex_env_color[unit][3];
+        return;
+    }
+    params[0] = (GLfloat) get_tex_env_param(unit, pname);
+}
+
+/* Vector form of glTexEnvi. GL_TEXTURE_ENV_COLOR takes a 4-int colour
+ * (0..255 → 0..1); everything else is scalar and forwards to glTexEnvi. */
+void glTexEnviv(GLenum target, GLenum pname, const GLint *params) {
+    if (!params) return;
+    if (target == GL_TEXTURE_ENV && pname == GL_TEXTURE_ENV_COLOR) {
+        int unit = g.active_texture_unit;
+        if (unit < 0 || unit >= 3) return;
+        for (int i = 0; i < 4; i++) g.tex_env_color[unit][i] = (GLfloat) params[i] / 255.0f;
+        g.tev_dirty = 1;
+        return;
+    }
+    glTexEnvi(target, pname, params[0]);
+}
+
 // ETC1 enum, not in our header but it constant in the spec so define inline
 #ifndef GL_ETC1_RGB8_OES
 #define GL_ETC1_RGB8_OES 0x8D64
 #endif
 
+/* ── S3TC / DXT CPU decompression ─────────────────────────────────────────
+ * PICA can only sample ETC1, so DXT1/3/5 (BC1/2/3) are decompressed to RGBA8
+ * here and pushed through the normal glTexImage2D path (which Morton-swizzles,
+ * pads to POT and can build mips). Output is row-major [R,G,B,A] bytes, exactly
+ * what GL_RGBA + GL_UNSIGNED_BYTE expects. This is where DXT-shipping desktop
+ * ports (re3 et al.) get their textures back instead of the old transparent
+ * placeholder. */
+static void dxt_color_palette(const uint8_t *cb, int allow_3color, uint8_t pal[4][4]) {
+    uint16_t c0 = (uint16_t) (cb[0] | (cb[1] << 8));
+    uint16_t c1 = (uint16_t) (cb[2] | (cb[3] << 8));
+    uint8_t r0 = (uint8_t) ((c0 >> 11) & 0x1F), g0 = (uint8_t) ((c0 >> 5) & 0x3F), b0 = (uint8_t) (c0 & 0x1F);
+    uint8_t r1 = (uint8_t) ((c1 >> 11) & 0x1F), g1 = (uint8_t) ((c1 >> 5) & 0x3F), b1 = (uint8_t) (c1 & 0x1F);
+    pal[0][0] = (uint8_t) ((r0 << 3) | (r0 >> 2)); pal[0][1] = (uint8_t) ((g0 << 2) | (g0 >> 4));
+    pal[0][2] = (uint8_t) ((b0 << 3) | (b0 >> 2)); pal[0][3] = 255;
+    pal[1][0] = (uint8_t) ((r1 << 3) | (r1 >> 2)); pal[1][1] = (uint8_t) ((g1 << 2) | (g1 >> 4));
+    pal[1][2] = (uint8_t) ((b1 << 3) | (b1 >> 2)); pal[1][3] = 255;
+    /* c0 > c1 selects the 4-colour (opaque) interpolation; otherwise the
+     * 3-colour + transparent-black mode. DXT3/DXT5 carry alpha separately and
+     * are always 4-colour, so they pass allow_3color = 0. */
+    if (c0 > c1 || !allow_3color) {
+        for (int k = 0; k < 3; k++) {
+            pal[2][k] = (uint8_t) ((2 * pal[0][k] + pal[1][k]) / 3);
+            pal[3][k] = (uint8_t) ((pal[0][k] + 2 * pal[1][k]) / 3);
+        }
+        pal[2][3] = 255; pal[3][3] = 255;
+    } else {
+        for (int k = 0; k < 3; k++) pal[2][k] = (uint8_t) ((pal[0][k] + pal[1][k]) / 2);
+        pal[2][3] = 255;
+        pal[3][0] = pal[3][1] = pal[3][2] = 0; pal[3][3] = 0; /* transparent black */
+    }
+}
+
+/* kind: 1 = DXT1, 3 = DXT3, 5 = DXT5. force_opaque pins alpha to 255 (the
+ * GL_COMPRESSED_RGB_S3TC_DXT1 token, which ignores the 1-bit alpha). */
+static void decode_s3tc_image(const uint8_t *src, int w, int h, int kind, int force_opaque, uint8_t *out) {
+    int bw = (w + 3) / 4, bh = (h + 3) / 4;
+    int block_bytes = (kind == 1) ? 8 : 16;
+    for (int by = 0; by < bh; by++) {
+        for (int bx = 0; bx < bw; bx++) {
+            const uint8_t *blk = src + (size_t) (by * bw + bx) * block_bytes;
+            const uint8_t *cb = (kind == 1) ? blk : blk + 8;   /* colour half */
+            uint8_t pal[4][4];
+            dxt_color_palette(cb, kind == 1, pal);
+            uint32_t cidx = (uint32_t) cb[4] | ((uint32_t) cb[5] << 8) | ((uint32_t) cb[6] << 16) | ((uint32_t) cb[7] << 24);
+
+            uint8_t a8[16];
+            if (kind == 3) {
+                for (int i = 0; i < 16; i++) {
+                    uint8_t nib = (uint8_t) ((blk[i >> 1] >> ((i & 1) * 4)) & 0xF);
+                    a8[i] = (uint8_t) (nib * 17);              /* 0..15 -> 0..255 */
+                }
+            } else if (kind == 5) {
+                uint8_t a0 = blk[0], a1 = blk[1], ap[8];
+                ap[0] = a0; ap[1] = a1;
+                if (a0 > a1) {
+                    for (int k = 1; k <= 6; k++) ap[1 + k] = (uint8_t) (((7 - k) * a0 + k * a1) / 7);
+                } else {
+                    for (int k = 1; k <= 4; k++) ap[1 + k] = (uint8_t) (((5 - k) * a0 + k * a1) / 5);
+                    ap[6] = 0; ap[7] = 255;
+                }
+                uint64_t bits = 0;
+                for (int i = 0; i < 6; i++) bits |= (uint64_t) blk[2 + i] << (8 * i);
+                for (int i = 0; i < 16; i++) a8[i] = ap[(bits >> (3 * i)) & 7];
+            }
+
+            for (int py = 0; py < 4; py++) {
+                int y = by * 4 + py;
+                if (y >= h) continue;
+                for (int px = 0; px < 4; px++) {
+                    int x = bx * 4 + px;
+                    if (x >= w) continue;
+                    int i = py * 4 + px;
+                    int s = (cidx >> (2 * i)) & 3;
+                    uint8_t *o = out + ((size_t) y * w + x) * 4;
+                    o[0] = pal[s][0]; o[1] = pal[s][1]; o[2] = pal[s][2];
+                    if (force_opaque)      o[3] = 255;
+                    else if (kind == 1)    o[3] = pal[s][3];
+                    else                   o[3] = a8[i];
+                }
+            }
+        }
+    }
+}
+
+/* Maps an S3TC token to (kind, force_opaque, block_bytes); returns 0 if not S3TC. */
+static int s3tc_describe(GLenum internalformat, int *kind, int *force_opaque, int *block_bytes) {
+    switch (internalformat) {
+        case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:  *kind = 1; *force_opaque = 1; *block_bytes = 8;  return 1;
+        case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT: *kind = 1; *force_opaque = 0; *block_bytes = 8;  return 1;
+        case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT: *kind = 3; *force_opaque = 0; *block_bytes = 16; return 1;
+        case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT: *kind = 5; *force_opaque = 0; *block_bytes = 16; return 1;
+        default: return 0;
+    }
+}
+
 void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height,
                             GLint border, GLsizei imageSize, const GLvoid *data) {
     (void) target; (void) level; (void) border;
+
+    /* DXT1/3/5: decompress to RGBA8 and re-enter through the normal path. */
+    int kind, force_opaque, block_bytes;
+    if (s3tc_describe(internalformat, &kind, &force_opaque, &block_bytes)) {
+        if (width <= 0 || height <= 0) { g.last_error = GL_INVALID_VALUE; return; }
+        int need = ((width + 3) / 4) * ((height + 3) / 4) * block_bytes;
+        if (!data || imageSize < need) { g.last_error = GL_INVALID_VALUE; return; }
+        uint8_t *rgba = (uint8_t *) malloc((size_t) width * (size_t) height * 4);
+        if (!rgba) { g.last_error = GL_OUT_OF_MEMORY; return; }
+        decode_s3tc_image((const uint8_t *) data, width, height, kind, force_opaque, rgba);
+        glTexImage2D(target, level, GL_RGBA, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        free(rgba);
+        return;
+    }
 
     // ETC1 the PICA can sample by itself, just feed the bytes. 4 bpp vs 32 for
     // RGBA8 = 8x less vram, nice for GC/Wii port atlases.
@@ -1279,17 +1635,37 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, G
         return;
     }
 
-    // every other compressed format (PVRTC, DXT...) PICA cant read. we put an
-    // empty RGBA8 so binding stay valid, but warn one time becouse the texture
-    // will draw transparent/garbage and that is confusing as hell.
+    // Remaining compressed formats (PVRTC, ETC2/EAC, BPTC, ...) have no PICA
+    // path and no CPU decoder here yet. Bind a valid empty RGBA8 so draws don't
+    // crash, and warn once (the texture will look transparent/garbage).
     (void) data; (void) imageSize;
     static int warned = 0;
     if (!warned) {
-        printf("[Nova]: compressed format 0x%04X not supported, using empty placeholder\n",
+        printf("[Nova]: compressed format 0x%04X not supported (no decoder), using empty placeholder\n",
                (unsigned) internalformat);
         warned = 1;
     }
     glTexImage2D(target, level, GL_RGBA, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+}
+
+/* DXT sub-update: decompress the (4-aligned) sub-rect to RGBA8 and forward to
+ * glTexSubImage2D. ETC1/other formats can't be partially updated this way. */
+void glCompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                               GLsizei width, GLsizei height, GLenum format, GLsizei imageSize,
+                               const GLvoid *data) {
+    int kind, force_opaque, block_bytes;
+    if (!s3tc_describe(format, &kind, &force_opaque, &block_bytes)) {
+        g.last_error = GL_INVALID_OPERATION;
+        return;
+    }
+    if (width <= 0 || height <= 0) { g.last_error = GL_INVALID_VALUE; return; }
+    int need = ((width + 3) / 4) * ((height + 3) / 4) * block_bytes;
+    if (!data || imageSize < need) { g.last_error = GL_INVALID_VALUE; return; }
+    uint8_t *rgba = (uint8_t *) malloc((size_t) width * (size_t) height * 4);
+    if (!rgba) { g.last_error = GL_OUT_OF_MEMORY; return; }
+    decode_s3tc_image((const uint8_t *) data, width, height, kind, force_opaque, rgba);
+    glTexSubImage2D(target, level, xoffset, yoffset, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    free(rgba);
 }
 
 void glActiveTexture(GLenum texture) {
@@ -1336,6 +1712,15 @@ void glTexEnvi(GLenum target, GLenum pname, GLint param) {
         case GL_OPERAND1_ALPHA: g.tex_env_operand1_alpha[unit] = param;
             break;
         case GL_OPERAND2_ALPHA: g.tex_env_operand2_alpha[unit] = param;
+            break;
+        case GL_RGB_SCALE:
+            /* GL permits only 1, 2 or 4. glTexEnvf passes 2.0f/4.0f -> 2/4. */
+            if (param == 1 || param == 2 || param == 4) g.tex_env_rgb_scale[unit] = param;
+            else { g.last_error = GL_INVALID_VALUE; return; }
+            break;
+        case GL_ALPHA_SCALE:
+            if (param == 1 || param == 2 || param == 4) g.tex_env_alpha_scale[unit] = param;
+            else { g.last_error = GL_INVALID_VALUE; return; }
             break;
     }
     g.tev_dirty = 1;
@@ -1454,6 +1839,10 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
                     val = ((r >> 3) << 11) | ((g_c >> 2) << 5) | (b >> 3);
                 } else if (slot->fmt == GPU_RGBA5551) {
                     val = ((r >> 3) << 11) | ((g_c >> 3) << 6) | ((b >> 3) << 1) | (a >> 7);
+                } else if (slot->fmt == GPU_LA8) {
+                    /* Luminance = Rec.601 weighting of RGB; PICA LA8 = (L<<8)|A. */
+                    uint8_t l = (uint8_t) ((r * 77 + g_c * 150 + b * 29) >> 8);
+                    val = ((uint16_t) l << 8) | a;
                 } else {
                     val = ((r >> 3) << 11) | ((g_c >> 2) << 5) | (b >> 3); // Fallback
                 }
