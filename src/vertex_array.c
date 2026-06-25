@@ -11,7 +11,7 @@
 // becouse some desktop ports give it and draw path can eat it
 static int va_validate(GLint size, GLint min_size, GLint max_size, GLsizei stride) {
     if (size < min_size || size > max_size || stride < 0) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return 0;
     }
     return 1;
@@ -21,7 +21,7 @@ void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *poin
     if (!va_validate(size, 2, 4, stride)) return;
     if (type != GL_BYTE && type != GL_SHORT && type != GL_FIXED && type != GL_FLOAT &&
         type != GL_INT) { /* GL_INT: desktop-GL leniency */
-        g.last_error = GL_INVALID_ENUM;
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
     g.va_vertex.size = size;
@@ -35,7 +35,7 @@ void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *po
     if (!va_validate(size, 2, 4, stride)) return;
     if (type != GL_BYTE && type != GL_SHORT && type != GL_FIXED && type != GL_FLOAT &&
         type != GL_INT) {
-        g.last_error = GL_INVALID_ENUM;
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
     g.va_texcoord.size = size;
@@ -48,15 +48,19 @@ void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *po
 void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *pointer) {
     // spec want 4 but we also take 3 (draw path put alpha=255), other is error
     if (size != 3 && size != 4) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
     if (stride < 0) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
-    if (type != GL_UNSIGNED_BYTE && type != GL_FIXED && type != GL_FLOAT) {
-        g.last_error = GL_INVALID_ENUM;
+    /* All GL colour-array types are accepted; the draw path normalizes each per
+     * the GL fixed->float rules (signed -> [-1,1], unsigned -> [0,1]). */
+    if (type != GL_BYTE && type != GL_UNSIGNED_BYTE && type != GL_SHORT &&
+        type != GL_UNSIGNED_SHORT && type != GL_INT && type != GL_UNSIGNED_INT &&
+        type != GL_FIXED && type != GL_FLOAT) {
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
     g.va_color.size = size;
@@ -68,11 +72,11 @@ void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid *point
 
 void glNormalPointer(GLenum type, GLsizei stride, const GLvoid *pointer) {
     if (stride < 0) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
     if (type != GL_BYTE && type != GL_SHORT && type != GL_FIXED && type != GL_FLOAT) {
-        g.last_error = GL_INVALID_ENUM;
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
     g.va_normal.size = 3;
@@ -87,7 +91,7 @@ void glEnableClientState(GLenum cap) {
     else if (cap == GL_TEXTURE_COORD_ARRAY) g.va_texcoord.enabled = 1;
     else if (cap == GL_COLOR_ARRAY) g.va_color.enabled = 1;
     else if (cap == GL_NORMAL_ARRAY) g.va_normal.enabled = 1;
-    else g.last_error = GL_INVALID_ENUM;
+    else gl_set_error(GL_INVALID_ENUM);
 }
 
 void glDisableClientState(GLenum cap) {
@@ -95,7 +99,7 @@ void glDisableClientState(GLenum cap) {
     else if (cap == GL_TEXTURE_COORD_ARRAY) g.va_texcoord.enabled = 0;
     else if (cap == GL_COLOR_ARRAY) g.va_color.enabled = 0;
     else if (cap == GL_NORMAL_ARRAY) g.va_normal.enabled = 0;
-    else g.last_error = GL_INVALID_ENUM;
+    else gl_set_error(GL_INVALID_ENUM);
 }
 
 // ---- VAO ----
@@ -122,14 +126,14 @@ static void vao_load_live(const VAOSlot *slot) {
 
 void glGenVertexArrays(GLsizei n, GLuint *arrays) {
     if (n < 0 || !arrays) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = 1; // 0 is reserved for default VAO
         while (id < NOVA_MAX_VAOS && g.vaos[id].in_use) id++;
         if (id == NOVA_MAX_VAOS) {
-            g.last_error = GL_OUT_OF_MEMORY;
+            gl_set_error(GL_OUT_OF_MEMORY);
             arrays[i] = 0;
             break;
         }
@@ -140,8 +144,11 @@ void glGenVertexArrays(GLsizei n, GLuint *arrays) {
 }
 
 void glBindVertexArray(GLuint array) {
-    if (array >= NOVA_MAX_VAOS) {
-        g.last_error = GL_INVALID_OPERATION;
+    /* Spec: glBindVertexArray takes the default VAO (0) or a name returned by
+     * glGenVertexArrays and not since deleted; anything else (out of range OR a
+     * never-generated name) is GL_INVALID_OPERATION. */
+    if (array != 0 && (array >= NOVA_MAX_VAOS || !g.vaos[array].in_use)) {
+        gl_set_error(GL_INVALID_OPERATION);
         return;
     }
     if (array == g.bound_vao) return; // already there, dont thrash
@@ -153,7 +160,7 @@ void glBindVertexArray(GLuint array) {
 
 void glDeleteVertexArrays(GLsizei n, const GLuint *arrays) {
     if (n < 0 || !arrays) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
     for (GLsizei i = 0; i < n; i++) {

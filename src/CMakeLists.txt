@@ -111,4 +111,11 @@ target_link_libraries(NovaGL
 install(TARGETS NovaGL DESTINATION lib)
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../include/NovaGL.h" DESTINATION include)
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../include/nova_glfw.h" DESTINATION include)
+# GLFW / GLAD / GL drop-in shim headers (point a port's includes at NovaGL's
+# include dir and <GLFW/glfw3.h>, <glad/glad.h>, <GL/gl.h>, <GLES/gl.h> resolve).
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../include/GLFW"  DESTINATION include)
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../include/glad"  DESTINATION include)
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../include/GL"    DESTINATION include)
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../include/GLES"  DESTINATION include)
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../include/GLES2" DESTINATION include)
 

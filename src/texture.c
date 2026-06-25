@@ -183,7 +183,7 @@ int nova_texture_cache_load(uint32_t hash, int *out_orig_w, int *out_orig_h) {
     if (!slot->allocated) {
         if (!C3D_TexInit(&slot->tex, hdr.pot_w, hdr.pot_h, fmt)) {
             fclose(f);
-            g.last_error = GL_OUT_OF_MEMORY;
+            gl_set_error(GL_OUT_OF_MEMORY);
             return 0;
         }
         slot->allocated = 1;
@@ -392,6 +392,7 @@ static void free_texture_storage(TexSlot *slot) {
     slot->allocated = 0;
     slot->has_mipmap = 0;
     slot->is_solid_optimized = 0;
+    slot->is_vram = 0;
     slot->is_cube = 0;
     slot->face_loaded[0] = slot->face_loaded[1] = slot->face_loaded[2] = 0;
     slot->face_loaded[3] = slot->face_loaded[4] = slot->face_loaded[5] = 0;
@@ -404,6 +405,40 @@ static void free_texture_storage(TexSlot *slot) {
     slot->orig_height = 0;
 }
 
+// Re-home a texture slot's storage in VRAM so it can serve as a PICA render
+// target color buffer. Stock glTexImage2D allocates linear RAM, which
+// C3D_RenderTargetCreateFromTex accepts but the GPU then renders to the wrong
+// physical window (sampling reads back garbage — see the rationale on
+// novaCreateRenderTextureFBO in framebuffer.c). glFramebufferTexture2D calls
+// this the first time a texture is attached as a color buffer. A freshly
+// created render-target texture has no meaningful pixels yet (callers pass NULL
+// to glTexImage2D), so discarding the old linear storage and zeroing the new
+// VRAM buffer is safe. No-op once VRAM-backed.
+int nova_texture_make_vram_target(GLuint texture) {
+    if (texture == 0 || texture >= NOVA_MAX_TEXTURES) return 0;
+    TexSlot *slot = &g.textures[texture];
+    if (!slot->in_use || !slot->allocated) return 0;
+    if (slot->is_vram) return 1;
+    if (slot->pot_w <= 0 || slot->pot_h <= 0) return 0;
+
+    C3D_Tex newtex;
+    if (!C3D_TexInitVRAM(&newtex, (u16) slot->pot_w, (u16) slot->pot_h, slot->fmt)) {
+        gl_set_error(GL_OUT_OF_MEMORY);
+        return 0;
+    }
+    C3D_TexDelete(&slot->tex);
+    slot->tex = newtex;
+    slot->is_vram = 1;
+    slot->has_mipmap = 0; // VRAM render targets are single-level
+    apply_slot_params_to_tex(&slot->tex, slot);
+
+    if (slot->tex.data && slot->tex.size > 0) {
+        memset(slot->tex.data, 0, slot->tex.size);
+        GSPGPU_FlushDataCache(slot->tex.data, slot->tex.size);
+    }
+    return 1;
+}
+
 static void init_texture_defaults(TexSlot *slot) {
     slot->min_filter = GL_NEAREST_MIPMAP_LINEAR;
     slot->mag_filter = GL_LINEAR;
@@ -414,6 +449,9 @@ static void init_texture_defaults(TexSlot *slot) {
     slot->has_mipmap = 0;
 }
 
+/* Used only by the opt-in NOVAGL_SOLID_TEX_OPT path; tagged unused so the
+ * default (spec-correct) build doesn't warn. */
+__attribute__((unused))
 static int is_texture_solid(const void *pixels, int width, int height, GLenum format, GLenum type, int alignment) {
     if (!pixels || width <= 0 || height <= 0) return 0;
 
@@ -701,11 +739,13 @@ static void upload_texture_pixels(C3D_Tex *tex, GPU_TEXCOLOR fmt, int pot_w, int
 }
 
 void glGenTextures(GLsizei n, GLuint *textures) {
+    if (n < 0) { gl_set_error(GL_INVALID_VALUE); return; }
+    if (!textures) return;
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = 1;
         while (id < NOVA_MAX_TEXTURES && g.textures[id].in_use) id++;
         if (id == NOVA_MAX_TEXTURES) {
-            g.last_error = GL_OUT_OF_MEMORY;
+            gl_set_error(GL_OUT_OF_MEMORY);
             textures[i] = 0;
             break;
         }
@@ -717,6 +757,8 @@ void glGenTextures(GLsizei n, GLuint *textures) {
 }
 
 void glDeleteTextures(GLsizei n, const GLuint *textures) {
+    if (n < 0) { gl_set_error(GL_INVALID_VALUE); return; }
+    if (!textures) return;
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = textures[i];
         if (id > 0 && id < NOVA_MAX_TEXTURES && g.textures[id].in_use) {
@@ -744,12 +786,14 @@ void glBindTexture(GLenum target, GLuint texture) {
      * object's type is fixed by its first glTexImage2D. Anything else is
      * GL_INVALID_ENUM and must not change the binding. */
     if (target != GL_TEXTURE_2D && target != GL_TEXTURE_CUBE_MAP) {
-        g.last_error = GL_INVALID_ENUM;
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
     if (texture >= NOVA_MAX_TEXTURES) {
-        /* Out of our id space — can't represent it. Closest spec error. */
-        g.last_error = GL_OUT_OF_MEMORY;
+        /* Name outside NovaGL's fixed id space (NOVA_MAX_TEXTURES). Real GL would
+         * create the object; we can't represent it — GL_INVALID_VALUE is the
+         * closest spec error (a bad name value, not an allocation failure). */
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
 
@@ -763,6 +807,8 @@ void glBindTexture(GLenum target, GLuint texture) {
         g.textures[texture].in_use = 1;
         init_texture_defaults(&g.textures[texture]);
     }
+    /* A name becomes a real texture OBJECT (glIsTexture == TRUE) only once bound. */
+    if (texture != 0) g.textures[texture].bound_once = 1;
 
     g.bound_texture[g.active_texture_unit] = texture;
 }
@@ -854,7 +900,7 @@ static void tex_image_cube_face(GLenum target, GLint level, GLsizei width, GLsiz
     TexSlot *slot = &g.textures[bound];
 
     if (level != 0) return;                 /* cube mips not generated: level 0 only */
-    if (width <= 0 || height <= 0) { g.last_error = GL_INVALID_VALUE; return; }
+    if (width <= 0 || height <= 0) { gl_set_error(GL_INVALID_VALUE); return; }
 
     GPU_TEXCOLOR gpu_fmt = gl_to_gpu_texfmt(format, type);
     int pot_w = nova_next_pow2(width);
@@ -872,7 +918,7 @@ static void tex_image_cube_face(GLenum target, GLint level, GLsizei width, GLsiz
     if (!slot->allocated) {
         memset(&slot->cube, 0, sizeof(slot->cube));
         if (!C3D_TexInitCube(&slot->tex, &slot->cube, (u16) pot_w, (u16) pot_h, gpu_fmt)) {
-            g.last_error = GL_OUT_OF_MEMORY;
+            gl_set_error(GL_OUT_OF_MEMORY);
             return;
         }
         slot->allocated = 1;
@@ -902,6 +948,51 @@ static void tex_image_cube_face(GLenum target, GLint level, GLsizei width, GLsiz
     }
 }
 
+/* Pixel transfer format/type validation shared by glTexImage2D / glTexSubImage2D
+ * / the cube path. Returns 1 only for combinations NovaGL's upload path actually
+ * handles correctly, so the GPU_RGBA8 reader is never fed a mismatched buffer. */
+static int tex_format_known(GLenum f) {
+    switch (f) {
+        case GL_RGBA: case GL_RGBA8_OES: case GL_RGB: case GL_BGRA: case GL_BGR:
+        case GL_LUMINANCE: case GL_ALPHA: case GL_LUMINANCE_ALPHA:
+        case GL_LUMINANCE_ALPHA4_NOVA:
+            return 1;
+        default: return 0;
+    }
+}
+static int tex_type_known(GLenum t) {
+    switch (t) {
+        case GL_UNSIGNED_BYTE: case GL_UNSIGNED_SHORT_4_4_4_4:
+        case GL_UNSIGNED_SHORT_5_5_5_1: case GL_UNSIGNED_SHORT_5_6_5:
+            return 1;
+        default: return 0;
+    }
+}
+static int tex_format_type_supported(GLenum format, GLenum type) {
+    switch (format) {
+        case GL_RGBA: case GL_RGBA8_OES:
+            return type == GL_UNSIGNED_BYTE || type == GL_UNSIGNED_SHORT_4_4_4_4 ||
+                   type == GL_UNSIGNED_SHORT_5_5_5_1;
+        case GL_RGB:
+            return type == GL_UNSIGNED_BYTE || type == GL_UNSIGNED_SHORT_5_6_5;
+        case GL_BGRA: case GL_BGR:
+            return type == GL_UNSIGNED_BYTE;             /* R/B swapped at upload */
+        case GL_LUMINANCE: case GL_ALPHA:
+        case GL_LUMINANCE_ALPHA: case GL_LUMINANCE_ALPHA4_NOVA:
+            return type == GL_UNSIGNED_BYTE;
+        default: return 0;
+    }
+}
+/* Raise the spec-appropriate error for an unsupported (format,type): an
+ * unrecognized token is GL_INVALID_ENUM; a known-but-incompatible pair is
+ * GL_INVALID_OPERATION. Returns 1 if the pair is OK (no error). */
+static int tex_check_format_type(GLenum format, GLenum type) {
+    if (tex_format_type_supported(format, type)) return 1;
+    gl_set_error((tex_format_known(format) && tex_type_known(type))
+                 ? GL_INVALID_OPERATION : GL_INVALID_ENUM);
+    return 0;
+}
+
 void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border,
                   GLenum format, GLenum type, const GLvoid *pixels) {
     /* Cube-map face targets route to the dedicated cube path. */
@@ -921,11 +1012,11 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     /* Spec: border must be 0 in GL ES (and effectively in modern GL).
      * GL_INVALID_VALUE, no state change. */
     if (border != 0) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
     if (level < 0) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
     /* Manual mip uploads (level > 0): NovaGL stores only level 0 (mips are
@@ -943,11 +1034,25 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
      * working — but a *conflicting* combination (e.g. internal=GL_RGB with
      * format=GL_ALPHA) is genuinely a caller bug worth surfacing. */
 
-    GPU_TEXCOLOR gpu_fmt = gl_to_gpu_texfmt(format, type);
     if (width <= 0 || height <= 0) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
+    /* Reject unsupported / mismatched (format,type) BEFORE touching pixels or
+     * allocating — previously gl_to_gpu_texfmt silently aliased anything to
+     * RGBA8, which over-read mismatched buffers and created a bogus texture. */
+    if (!tex_check_format_type(format, type)) return;
+    /* width/height > GL_MAX_TEXTURE_SIZE (1024) is GL_INVALID_VALUE in a spec
+     * build. The auto-downscale (handy for oversized desktop atlases) is opt-in
+     * via -DNOVAGL_DOWNSCALE_OVERSIZE=1. */
+#ifndef NOVAGL_DOWNSCALE_OVERSIZE
+    if (width > 1024 || height > 1024) {
+        gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
+#endif
+
+    GPU_TEXCOLOR gpu_fmt = gl_to_gpu_texfmt(format, type);
 
     int diag_idx = -1;
     if (s_diag_tex_count < NOVA_DIAG_TEX_LIMIT) {
@@ -963,8 +1068,15 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     slot->orig_width = width;
     slot->orig_height = height;
 
-    // ПРОВЕРЯЕМ: Сплошная ли текстура?
+    /* Solid (single-colour) textures can be collapsed to an 8x8 stub to save
+     * VRAM — bit-exact for plain sampling, but it changes glTexSubImage2D /
+     * glCopyTexSubImage2D / readback behaviour, so it's a NONSTANDARD speedhack:
+     * opt-in via -DNOVAGL_SOLID_TEX_OPT=1. Default builds upload the real size. */
+#ifdef NOVAGL_SOLID_TEX_OPT
     int is_solid = is_texture_solid(pixels, width, height, format, type, g.unpack_alignment);
+#else
+    int is_solid = 0;
+#endif
 
     int target_w = width;
     int target_h = height;
@@ -1031,7 +1143,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
             ? C3D_TexInitMipmap(&slot->tex, pot_w, pot_h, gpu_fmt)
             : C3D_TexInit(&slot->tex, pot_w, pot_h, gpu_fmt);
         if (!ok) {
-            g.last_error = GL_OUT_OF_MEMORY;
+            gl_set_error(GL_OUT_OF_MEMORY);
             return;
         }
         slot->allocated = 1;
@@ -1112,7 +1224,7 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
     /* See glTexImage2D: only level 0 is stored; manual mip uploads are
      * accepted-and-ignored so they can't corrupt the base level. */
     if (level < 0 || width < 0 || height < 0 || xoffset < 0 || yoffset < 0) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
     if (level > 0) return;
@@ -1121,7 +1233,7 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
     TexSlot *slot = &g.textures[bound];
     if (!slot->allocated) {
         /* Spec: texture has no defined image to update. */
-        g.last_error = GL_INVALID_OPERATION;
+        gl_set_error(GL_INVALID_OPERATION);
         return;
     }
     /* Cube faces aren't sub-updatable through this 2D path — slot->tex.data is
@@ -1129,9 +1241,17 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
      * corrupt the cube struct. Cube faces are upload-once via glTexImage2D.
      * (A full cube sub-update path can be added later if a port needs it.) */
     if (slot->is_cube || cube_face_index(target) >= 0) {
-        g.last_error = GL_INVALID_OPERATION;
+        gl_set_error(GL_INVALID_OPERATION);
         return;
     }
+    /* Spec: the sub-rectangle must lie within the texture's defined dimensions
+     * (the original glTexImage2D width/height); otherwise GL_INVALID_VALUE. */
+    if ((GLint)(xoffset + width) > slot->orig_width ||
+        (GLint)(yoffset + height) > slot->orig_height) {
+        gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    if (!tex_check_format_type(format, type)) return;
     if (!pixels) return;
 
     // If game wanna draw on full tex -> uncompressing it.
@@ -1300,11 +1420,26 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, G
  * glTexImage2D time when GL_GENERATE_MIPMAP is enabled, so here we only need to
  * validate the target. (Full on-demand regeneration could be added later.) */
 void glGenerateMipmap(GLenum target) {
-    if (target != GL_TEXTURE_2D) {
-        g.last_error = GL_INVALID_ENUM;
+    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_CUBE_MAP) {
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
-    /* no-op: mips, if any, were generated on upload */
+    GLuint bound = active_bound_texture();
+    if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return;
+    TexSlot *slot = &g.textures[bound];
+    if (!slot->allocated) return;
+    /* If the texture already owns a mip pyramid (allocated via C3D_TexInitMipmap)
+     * and the format is HW-downscalable, regenerate levels 1..N from the current
+     * level 0 — this is the real on-demand path (e.g. after glTexSubImage2D
+     * changed the base level). Without an existing pyramid there is nothing to
+     * write into (and PICA texture memory isn't cheaply readable to re-init), so
+     * just arm GL_GENERATE_MIPMAP for the next upload as a best effort. */
+    if (slot->has_mipmap && (slot->fmt == GPU_RGBA8 || slot->fmt == GPU_RGB8) && !slot->is_cube) {
+        C3D_TexGenerateMipmap(&slot->tex, GPU_TEXFACE_2D);
+        apply_slot_params_to_tex(&slot->tex, slot);
+    } else {
+        slot->generate_mipmap = 1;
+    }
 }
 
 /* Desktop-GL texture readback. PICA200 texture memory is Morton-tiled in VRAM
@@ -1320,7 +1455,7 @@ void glGetCompressedTexImage(GLenum target, GLint level, GLvoid *pixels) {
 
 void glTexParameteri(GLenum target, GLenum pname, GLint param) {
     if (target != GL_TEXTURE_2D && target != GL_TEXTURE_CUBE_MAP) {
-        g.last_error = GL_INVALID_ENUM;
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
     GLuint bound = active_bound_texture();
@@ -1343,7 +1478,7 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) {
                 case GL_LINEAR_MIPMAP_NEAREST: case GL_LINEAR_MIPMAP_LINEAR:
                     if (slot->min_filter == param) return;
                     slot->min_filter = param; break;
-                default: g.last_error = GL_INVALID_ENUM; return;
+                default: gl_set_error(GL_INVALID_ENUM); return;
             }
             break;
         case GL_TEXTURE_MAG_FILTER:
@@ -1351,7 +1486,7 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) {
                 if (slot->mag_filter == param) return;
                 slot->mag_filter = param;
             }
-            else { g.last_error = GL_INVALID_ENUM; return; }
+            else { gl_set_error(GL_INVALID_ENUM); return; }
             break;
         case GL_TEXTURE_WRAP_S:
             if (param == GL_REPEAT || param == GL_CLAMP_TO_EDGE ||
@@ -1360,7 +1495,7 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) {
                 if (slot->wrap_s == param) return;
                 slot->wrap_s = param;
             }
-            else { g.last_error = GL_INVALID_ENUM; return; }
+            else { gl_set_error(GL_INVALID_ENUM); return; }
             break;
         case GL_TEXTURE_WRAP_T:
             if (param == GL_REPEAT || param == GL_CLAMP_TO_EDGE ||
@@ -1369,17 +1504,17 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) {
                 if (slot->wrap_t == param) return;
                 slot->wrap_t = param;
             }
-            else { g.last_error = GL_INVALID_ENUM; return; }
+            else { gl_set_error(GL_INVALID_ENUM); return; }
             break;
         case GL_GENERATE_MIPMAP:
             slot->generate_mipmap = (param != 0);
             break;
         case GL_TEXTURE_MAX_LEVEL:
-            if (param < -1) { g.last_error = GL_INVALID_VALUE; return; }
+            if (param < -1) { gl_set_error(GL_INVALID_VALUE); return; }
             slot->max_level = param;
             break;
         default:
-            g.last_error = GL_INVALID_ENUM;
+            gl_set_error(GL_INVALID_ENUM);
             return;
     }
 
@@ -1415,7 +1550,7 @@ static GLint get_tex_param(const TexSlot *slot, GLenum pname) {
 void glGetTexParameteriv(GLenum target, GLenum pname, GLint *params) {
     if ((target != GL_TEXTURE_2D && target != GL_TEXTURE_CUBE_MAP) || !params) {
         if (!params) return;
-        g.last_error = GL_INVALID_ENUM; return;
+        gl_set_error(GL_INVALID_ENUM); return;
     }
     GLuint bound = active_bound_texture();
     if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return;
@@ -1592,20 +1727,24 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, G
     /* DXT1/3/5: decompress to RGBA8 and re-enter through the normal path. */
     int kind, force_opaque, block_bytes;
     if (s3tc_describe(internalformat, &kind, &force_opaque, &block_bytes)) {
-        if (width <= 0 || height <= 0) { g.last_error = GL_INVALID_VALUE; return; }
+        if (width <= 0 || height <= 0) { gl_set_error(GL_INVALID_VALUE); return; }
         int need = ((width + 3) / 4) * ((height + 3) / 4) * block_bytes;
-        if (!data || imageSize < need) { g.last_error = GL_INVALID_VALUE; return; }
+        if (!data || imageSize < need) { gl_set_error(GL_INVALID_VALUE); return; }
         uint8_t *rgba = (uint8_t *) malloc((size_t) width * (size_t) height * 4);
-        if (!rgba) { g.last_error = GL_OUT_OF_MEMORY; return; }
+        if (!rgba) { gl_set_error(GL_OUT_OF_MEMORY); return; }
         decode_s3tc_image((const uint8_t *) data, width, height, kind, force_opaque, rgba);
         glTexImage2D(target, level, GL_RGBA, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
         free(rgba);
         return;
     }
 
-    // ETC1 the PICA can sample by itself, just feed the bytes. 4 bpp vs 32 for
-    // RGBA8 = 8x less vram, nice for GC/Wii port atlases.
-    if (internalformat == GL_ETC1_RGB8_OES) {
+    // ETC1 (4 bpp, no alpha) and ETC1A4 (8 bpp, RGB + 4-bit alpha) the PICA can
+    // sample by itself, just feed the tiled bytes. vs RGBA8 that's 8x / 4x less
+    // vram — exactly what the repacked 3DS sprite atlases use.
+    if (internalformat == GL_ETC1_RGB8_OES || internalformat == GL_ETC1_RGB8A4_NOVA) {
+        int a4 = (internalformat == GL_ETC1_RGB8A4_NOVA);
+        GPU_TEXCOLOR gpuFmt = a4 ? GPU_ETC1A4 : GPU_ETC1;
+
         GLuint bound = active_bound_texture();
         if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return;
         TexSlot *slot = &g.textures[bound];
@@ -1621,13 +1760,13 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, G
             free_texture_storage(slot);
         }
         if (!slot->allocated) {
-            if (!C3D_TexInit(&slot->tex, pot_w, pot_h, GPU_ETC1)) {
-                g.last_error = GL_OUT_OF_MEMORY;
+            if (!C3D_TexInit(&slot->tex, pot_w, pot_h, gpuFmt)) {
+                gl_set_error(GL_OUT_OF_MEMORY);
                 return;
             }
             slot->allocated = 1;
         }
-        slot->fmt = GPU_ETC1;
+        slot->fmt = gpuFmt;
         slot->pot_w = pot_w; slot->pot_h = pot_h;
         slot->width = width; slot->height = height;
         slot->orig_width = width; slot->orig_height = height;
@@ -1635,7 +1774,7 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, G
         slot->has_mipmap = 0;
 
         if (data && imageSize > 0) {
-            int expected = (pot_w * pot_h) / 2; /* ETC1 = 4 bpp */
+            int expected = a4 ? (pot_w * pot_h) : (pot_w * pot_h) / 2; /* 8 / 4 bpp */
             int copy = imageSize < expected ? imageSize : expected;
             memcpy(slot->tex.data, data, copy);
             C3D_TexFlush(&slot->tex);
@@ -1645,16 +1784,18 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, G
     }
 
     // Remaining compressed formats (PVRTC, ETC2/EAC, BPTC, ...) have no PICA
-    // path and no CPU decoder here yet. Bind a valid empty RGBA8 so draws don't
-    // crash, and warn once (the texture will look transparent/garbage).
-    (void) data; (void) imageSize;
+    // path and no CPU decoder here. Per spec an unsupported compressed
+    // internalformat is GL_INVALID_ENUM — surface that instead of silently
+    // binding an empty placeholder (which read back as transparent garbage and
+    // looked like a successful upload).
+    (void) data; (void) imageSize; (void) width; (void) height; (void) border;
     static int warned = 0;
     if (!warned) {
-        printf("[Nova]: compressed format 0x%04X not supported (no decoder), using empty placeholder\n",
+        printf("[Nova]: compressed format 0x%04X not supported (no decoder)\n",
                (unsigned) internalformat);
         warned = 1;
     }
-    glTexImage2D(target, level, GL_RGBA, width, height, border, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    gl_set_error(GL_INVALID_ENUM);
 }
 
 /* DXT sub-update: decompress the (4-aligned) sub-rect to RGBA8 and forward to
@@ -1664,14 +1805,14 @@ void glCompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint 
                                const GLvoid *data) {
     int kind, force_opaque, block_bytes;
     if (!s3tc_describe(format, &kind, &force_opaque, &block_bytes)) {
-        g.last_error = GL_INVALID_OPERATION;
+        gl_set_error(GL_INVALID_OPERATION);
         return;
     }
-    if (width <= 0 || height <= 0) { g.last_error = GL_INVALID_VALUE; return; }
+    if (width <= 0 || height <= 0) { gl_set_error(GL_INVALID_VALUE); return; }
     int need = ((width + 3) / 4) * ((height + 3) / 4) * block_bytes;
-    if (!data || imageSize < need) { g.last_error = GL_INVALID_VALUE; return; }
+    if (!data || imageSize < need) { gl_set_error(GL_INVALID_VALUE); return; }
     uint8_t *rgba = (uint8_t *) malloc((size_t) width * (size_t) height * 4);
-    if (!rgba) { g.last_error = GL_OUT_OF_MEMORY; return; }
+    if (!rgba) { gl_set_error(GL_OUT_OF_MEMORY); return; }
     decode_s3tc_image((const uint8_t *) data, width, height, kind, force_opaque, rgba);
     glTexSubImage2D(target, level, xoffset, yoffset, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     free(rgba);
@@ -1679,16 +1820,24 @@ void glCompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint 
 
 void glActiveTexture(GLenum texture) {
     int unit = (int) (texture - GL_TEXTURE0);
-    if (unit >= 0 && unit < 3) g.active_texture_unit = unit;
+    if (unit >= 0 && unit < NOVA_MAX_TEXTURE_UNITS) g.active_texture_unit = unit;
+    else gl_set_error(GL_INVALID_ENUM); /* spec: unit out of range, unchanged */
 }
 
 void glClientActiveTexture(GLenum texture) {
     int unit = (int) (texture - GL_TEXTURE0);
-    if (unit >= 0 && unit < 3) g.client_active_texture_unit = unit;
+    if (unit >= 0 && unit < NOVA_MAX_TEXTURE_UNITS) g.client_active_texture_unit = unit;
+    else gl_set_error(GL_INVALID_ENUM);
 }
 
 void glTexEnvi(GLenum target, GLenum pname, GLint param) {
-    if (target != GL_TEXTURE_ENV) return;
+    /* GL_POINT_SPRITE / GL_TEXTURE_FILTER_CONTROL are valid glTexEnv targets we
+     * don't implement — accept silently; anything else is GL_INVALID_ENUM. */
+    if (target != GL_TEXTURE_ENV) {
+        if (target == 0x8861 /*GL_POINT_SPRITE*/ || target == GL_TEXTURE_FILTER_CONTROL) return;
+        gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
     int unit = g.active_texture_unit;
 
     switch (pname) {
@@ -1725,12 +1874,15 @@ void glTexEnvi(GLenum target, GLenum pname, GLint param) {
         case GL_RGB_SCALE:
             /* GL permits only 1, 2 or 4. glTexEnvf passes 2.0f/4.0f -> 2/4. */
             if (param == 1 || param == 2 || param == 4) g.tex_env_rgb_scale[unit] = param;
-            else { g.last_error = GL_INVALID_VALUE; return; }
+            else { gl_set_error(GL_INVALID_VALUE); return; }
             break;
         case GL_ALPHA_SCALE:
             if (param == 1 || param == 2 || param == 4) g.tex_env_alpha_scale[unit] = param;
-            else { g.last_error = GL_INVALID_VALUE; return; }
+            else { gl_set_error(GL_INVALID_VALUE); return; }
             break;
+        default:
+            gl_set_error(GL_INVALID_ENUM);
+            return;
     }
     g.tev_dirty = 1;
 }
@@ -1757,7 +1909,10 @@ void glTexEnvfv(GLenum target, GLenum pname, const GLfloat *params) {
 }
 
 GLboolean glIsTexture(GLuint texture) {
-    if (texture > 0 && texture < NOVA_MAX_TEXTURES && g.textures[texture].in_use) return GL_TRUE;
+    /* Spec: TRUE only for a name that has been BOUND at least once (a reserved-
+     * but-never-bound glGenTextures name is not yet a texture object). */
+    if (texture > 0 && texture < NOVA_MAX_TEXTURES &&
+        g.textures[texture].in_use && g.textures[texture].bound_once) return GL_TRUE;
     return GL_FALSE;
 }
 
@@ -1780,12 +1935,26 @@ void glTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width, G
 void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width,
                          GLsizei height) {
     (void) level;
-    if (target != GL_TEXTURE_2D) return;
+    if (target != GL_TEXTURE_2D) { gl_set_error(GL_INVALID_ENUM); return; }
+    if (width < 0 || height < 0 || xoffset < 0 || yoffset < 0) {
+        gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
 
     GLuint bound = active_bound_texture();
     if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return;
     TexSlot *slot = &g.textures[bound];
-    if (!slot->allocated || !g.current_target) return;
+    if (!slot->allocated) { gl_set_error(GL_INVALID_OPERATION); return; }
+    if (!g.current_target) return;
+    /* A solid-optimized destination (opt-in NOVAGL_SOLID_TEX_OPT) is an 8x8 stub;
+     * copying framebuffer pixels into it would clip to 8x8. Promote it to its
+     * real size first so the copy lands correctly (matches glTexSubImage2D). */
+    if (slot->is_solid_optimized && (width > slot->pot_w || height > slot->pot_h)) {
+        /* NULL pixels => allocate real-size storage without a solid re-check or
+         * any source read; the framebuffer copy below fills it. */
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, slot->orig_width, slot->orig_height, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    }
 
     C3D_FrameBuf *fb = &g.current_target->frameBuf;
     uint32_t *fb_data = (uint32_t *) fb->colorBuf;
@@ -1904,10 +2073,10 @@ static void texgen_ensure_defaults(void) {
 void glTexGeni(GLenum coord, GLenum pname, GLint param) {
     texgen_ensure_defaults();
     int c = texgen_coord_index(coord);
-    if (c < 0) { g.last_error = GL_INVALID_ENUM; return; }
-    if (pname != GL_TEXTURE_GEN_MODE) { g.last_error = GL_INVALID_ENUM; return; }
+    if (c < 0) { gl_set_error(GL_INVALID_ENUM); return; }
+    if (pname != GL_TEXTURE_GEN_MODE) { gl_set_error(GL_INVALID_ENUM); return; }
     if (param != GL_OBJECT_LINEAR && param != GL_EYE_LINEAR && param != GL_SPHERE_MAP) {
-        g.last_error = GL_INVALID_ENUM;
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
     int u = g.active_texture_unit;
@@ -1928,7 +2097,7 @@ void glTexGenfv(GLenum coord, GLenum pname, const GLfloat *params) {
     texgen_ensure_defaults();
     if (!params) return;
     int c = texgen_coord_index(coord);
-    if (c < 0) { g.last_error = GL_INVALID_ENUM; return; }
+    if (c < 0) { gl_set_error(GL_INVALID_ENUM); return; }
     int u = g.active_texture_unit;
     if (u < 0 || u >= NOVA_MAX_TEXTURE_UNITS) u = 0;
     NovaTexGenCoord *tg = &g_texgen[u][c];
@@ -1949,7 +2118,7 @@ void glTexGenfv(GLenum coord, GLenum pname, const GLfloat *params) {
             memcpy(tg->eye_plane, params, sizeof(GLfloat) * 4);
             break;
         default:
-            g.last_error = GL_INVALID_ENUM;
+            gl_set_error(GL_INVALID_ENUM);
             break;
     }
 }

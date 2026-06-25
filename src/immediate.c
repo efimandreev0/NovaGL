@@ -22,7 +22,22 @@ static struct {
 } imm;
 
 void glBegin(GLenum mode) {
-    if (imm.in_begin) return;
+    /* Validate against the full GL primitive set (points/lines stay legal even
+     * though PICA degrades them — see README). */
+    switch (mode) {
+        case GL_POINTS: case GL_LINES: case GL_LINE_LOOP: case GL_LINE_STRIP:
+        case GL_TRIANGLES: case GL_TRIANGLE_STRIP: case GL_TRIANGLE_FAN:
+        case GL_QUADS:
+            break;
+        default:
+            gl_set_error(GL_INVALID_ENUM);
+            return;
+    }
+    if (imm.in_begin) {
+        /* Nested glBegin is GL_INVALID_OPERATION. */
+        gl_set_error(GL_INVALID_OPERATION);
+        return;
+    }
     imm.mode = mode;
     imm.in_begin = 1;
     imm.vertex_count = 0;
@@ -95,7 +110,11 @@ static void imm_draw_packed_run(GLenum mode, GPU_Primitive_t prim, uint8_t *base
 }
 
 void glEnd(void) {
-    if (!imm.in_begin) return;
+    if (!imm.in_begin) {
+        /* glEnd without a matching glBegin is GL_INVALID_OPERATION. */
+        gl_set_error(GL_INVALID_OPERATION);
+        return;
+    }
     imm.in_begin = 0;
 
     if (imm.vertex_count == 0) return;
@@ -128,11 +147,12 @@ static inline void add_vertex(GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
     out_f[4] = imm.current_texcoord[1]; // t
 
     // Read color from global state directly so glColor* calls between vertices
-    // take effect within the current glBegin/glEnd block.
-    out_c[0] = (uint8_t) (g.cur_color[0] * 255.0f);
-    out_c[1] = (uint8_t) (g.cur_color[1] * 255.0f);
-    out_c[2] = (uint8_t) (g.cur_color[2] * 255.0f);
-    out_c[3] = (uint8_t) (g.cur_color[3] * 255.0f);
+    // take effect within the current glBegin/glEnd block. Clamp+round to match
+    // the vertex-array draw path (out-of-[0,1] colours no longer wrap/garble).
+    out_c[0] = (uint8_t) (clampf(g.cur_color[0], 0.0f, 1.0f) * 255.0f + 0.5f);
+    out_c[1] = (uint8_t) (clampf(g.cur_color[1], 0.0f, 1.0f) * 255.0f + 0.5f);
+    out_c[2] = (uint8_t) (clampf(g.cur_color[2], 0.0f, 1.0f) * 255.0f + 0.5f);
+    out_c[3] = (uint8_t) (clampf(g.cur_color[3], 0.0f, 1.0f) * 255.0f + 0.5f);
 
     imm.vertex_count++;
 }

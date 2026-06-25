@@ -181,6 +181,7 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
             memset(s, 0, sizeof(*s));
             s->tex = g.app_tex;          /* alias: same VRAM .data */
             s->allocated = 1;
+            s->is_vram = 1;              /* already VRAM-resident; never re-home it */
             s->in_use = 1;
             s->fmt = GPU_RGBA8;
             s->width = g.app_logical_w;  s->height = g.app_logical_h;
@@ -343,8 +344,12 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.cur_normal[1] = 0.0f;
     g.cur_normal[2] = 1.0f;
 
-    g.depth_test_enabled = 1;
-    g.depth_func = GL_LEQUAL;
+    /* GL spec defaults: depth test DISABLED, depth func GL_LESS. (Previously
+     * NovaGL shipped enabled+LEQUAL, which is non-conformant — a correct port
+     * always sets its own depth state, and code relying on the spec "off"
+     * default was getting unexpected z-rejection.) */
+    g.depth_test_enabled = 0;
+    g.depth_func = GL_LESS;
     g.depth_mask = GL_TRUE;
     g.clear_depth = 1.0f;
 
@@ -788,11 +793,11 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
         case GL_QUADS: /* desktop-GL leniency for ports */
             break;
         default:
-            g.last_error = GL_INVALID_ENUM;
+            gl_set_error(GL_INVALID_ENUM);
             return;
     }
     if (count < 0 || first < 0) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
     if (count == 0) return;
@@ -812,10 +817,19 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
     }
 #if !(defined(NOVAGL_NO_DEBUG) && NOVAGL_NO_DEBUG)
     if (is_elements && type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_BYTE && type != GL_UNSIGNED_INT) {
-        g.last_error = GL_INVALID_ENUM;
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
 #endif
+
+    /* Drawing into a bound-but-incomplete FBO (no colour attachment) is
+     * GL_INVALID_FRAMEBUFFER_OPERATION with no draw — otherwise the geometry
+     * would silently land on whatever target the GPU last drew to. */
+    if (g.bound_fbo != 0 &&
+        (g.bound_fbo >= NOVA_MAX_FBOS || !g.fbos[g.bound_fbo].in_use || !g.fbos[g.bound_fbo].target)) {
+        gl_set_error(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
 
     if (g.va_vertex.enabled && g.va_vertex.vbo_id > 0 && g.va_vertex.vbo_id < NOVA_MAX_VBOS) {
         if (!g.vbos[g.va_vertex.vbo_id].allocated || g.vbos[g.va_vertex.vbo_id].data == NULL) return;
@@ -856,7 +870,7 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
 
         if (vbo_is_packed_ptc(vbo)) {
             if (req_size > g.client_array_buf_size) {
-                g.last_error = GL_OUT_OF_MEMORY;
+                gl_set_error(GL_OUT_OF_MEMORY);
                 return;
             }
             uint8_t *dst_start = (uint8_t *) linear_alloc_ring(g.client_array_buf, &g.client_array_buf_offset, req_size,
@@ -945,7 +959,7 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
 
     int req_size = count * internal_stride;
     if (req_size > g.client_array_buf_size) {
-        g.last_error = GL_OUT_OF_MEMORY;
+        gl_set_error(GL_OUT_OF_MEMORY);
         return;
     }
 
@@ -1068,10 +1082,26 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
                     dst[col_offset + ch] = (uint8_t) (clampf(v, 0.0f, 1.0f) * 255.0f);
                 }
             } else {
-                /* Unknown/unsupported color type — treat bytes verbatim as the
-                 * historical fallback rather than reading out of bounds. */
-                memcpy(dst + col_offset, c_ptr, g.va_color.size == 3 ? 3 : 4);
-                if (g.va_color.size == 3) dst[col_offset + 3] = 255;
+                /* BYTE/SHORT/INT (signed-normalized) and UNSIGNED_SHORT/INT
+                 * (unsigned-normalized) colour arrays — normalize per the GL
+                 * fixed->float rules, then pack to 0..255. Rare types, kept off
+                 * the UB/FLOAT fast paths above. */
+                for (int ch = 0; ch < 4; ch++) {
+                    float v;
+                    if (ch < g.va_color.size) {
+                        switch (g.va_color.type) {
+                            case GL_BYTE:  v = (2.0f*(float)((const int8_t  *)c_ptr)[ch] + 1.0f) / 255.0f; break;
+                            case GL_SHORT: v = (2.0f*(float)((const int16_t *)c_ptr)[ch] + 1.0f) / 65535.0f; break;
+                            case GL_INT:   v = (2.0f*(float)((const int32_t *)c_ptr)[ch] + 1.0f) / 4294967295.0f; break;
+                            case GL_UNSIGNED_SHORT: v = (float)((const uint16_t *)c_ptr)[ch] / 65535.0f; break;
+                            case GL_UNSIGNED_INT:   v = (float)((const uint32_t *)c_ptr)[ch] / 4294967295.0f; break;
+                            default: v = 0.0f; break;
+                        }
+                    } else {
+                        v = 1.0f; /* missing alpha defaults to 1 */
+                    }
+                    dst[col_offset + ch] = (uint8_t) (clampf(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+                }
             }
         } else {
             memcpy(dst + col_offset, def_col, 4);
@@ -1155,7 +1185,7 @@ void novaDrawClipspaceTris(const void *verts, int vertex_count) {
 
     const int bytes = vertex_count * 28;
     if (bytes > g.client_array_buf_size) {
-        g.last_error = GL_OUT_OF_MEMORY;
+        gl_set_error(GL_OUT_OF_MEMORY);
         return;
     }
     uint8_t *dst = (uint8_t *) linear_alloc_ring(g.client_array_buf, &g.client_array_buf_offset,

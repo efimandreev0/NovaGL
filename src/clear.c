@@ -9,7 +9,7 @@ void glClear(GLbitfield mask) {
     /* Spec: any bit outside the three valid ones is GL_INVALID_VALUE and the
      * clear must not happen. (GL_ACCUM_BUFFER_BIT doesn't exist in ES.) */
     if (mask & ~(GLbitfield)(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
 
@@ -17,7 +17,8 @@ void glClear(GLbitfield mask) {
     u32 color = 0;
     u32 depth = 0;
 
-    if (mask & GL_COLOR_BUFFER_BIT) {
+    int color_writable = g.color_mask_r || g.color_mask_g || g.color_mask_b || g.color_mask_a;
+    if ((mask & GL_COLOR_BUFFER_BIT) && color_writable) {
         bits |= C3D_CLEAR_COLOR;
         // Use +0.5f for proper rounding before casting to integer
         color = ((u32) (g.clear_r * 255.0f + 0.5f) << 24) |
@@ -42,9 +43,11 @@ void glClear(GLbitfield mask) {
      *
      * PICA depth is stored inverted vs GL (see apply_depth_map): GL's
      * glClearDepth(1.0) = far plane = PICA value 0. */
-    if (mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) {
+    int want_depth   = (mask & GL_DEPTH_BUFFER_BIT)   && g.depth_mask;
+    int want_stencil = (mask & GL_STENCIL_BUFFER_BIT) && (g.stencil_write_mask != 0);
+    if (want_depth || want_stencil) {
         bits |= C3D_CLEAR_DEPTH;
-        u32 dval = (u32) ((1.0f - g.clear_depth) * 0xFFFFFF);
+        u32 dval = (u32) ((1.0f - g.clear_depth) * 0xFFFFFF + 0.5f);
         depth = dval | (((u32) g.clear_stencil & 0xFF) << 24);
     }
 

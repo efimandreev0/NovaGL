@@ -29,11 +29,46 @@ Drop-in replacement for `<GLES/gl.h>` that maps fixed-function GL calls to Citro
 
 - GLSL shaders (PICA is fixed-function, period)
 - `glClipPlane` (no user clip planes on PICA)
-- `glPolygonMode` (no wireframe)
+- `glPolygonMode` (no wireframe — enum-validated no-op)
 - `glLineWidth` (always 1px)
-- `glBlitFramebuffer` (use `novaBlitTargetToFBO` instead)
+- **`GL_LINES` / `GL_LINE_STRIP` / `GL_LINE_LOOP` / `GL_POINTS`** — PICA has no line/point primitive, so these currently rasterize as filled triangles. Accepted (and enum-validated) but visually wrong; treat like the other fixed-function gaps.
+- Display lists record only `glTranslatef` / `glColor3f` / `glColor4f` (enough for bitmap-font rendering); other commands between `glNewList(GL_COMPILE)`/`glEndList` execute immediately rather than being deferred.
+- `glBlitFramebuffer` ignores the src/dst rects, mask and filter (full-surface colour copy; use `novaBlitTargetToFBO`)
+- Manual mip levels (`glTexImage2D` with `level > 0`) are accepted-and-ignored; use `GL_GENERATE_MIPMAP` / `glGenerateMipmap` for auto-mips (RGBA8/RGB8)
 - TexGen
 - EGL (stubs only — not needed on 3DS)
+
+### Standards compliance
+
+The default build aims to behave exactly like desktop/ES OpenGL — including error reporting (`glGetError` keeps the **first** error per spec, and the entry points raise `GL_INVALID_ENUM`/`GL_INVALID_VALUE`/`GL_INVALID_OPERATION` for bad arguments), default state, and `glBindFramebuffer` read/draw separation. The non-standard speed/VRAM optimizations are now opt-in flags (see *Compliance opt-outs* below). **One behaviour change to note:** the depth test now defaults to **disabled** with `glDepthFunc(GL_LESS)` (the GL spec default) instead of the old enabled/`GL_LEQUAL`. A correct port always sets its own depth state; if yours relied on the old default, add `glEnable(GL_DEPTH_TEST)`.
+
+## GLFW + GLAD drop-in
+
+A desktop game that uses **GLFW** for window/context/input and **GLAD** for GL loading can build and run on 3DS by pointing its include path at NovaGL's `include/` — `<GLFW/glfw3.h>`, `<glad/glad.h>` (and `<GL/gl.h>` / `<GLES/gl.h>`) resolve to the shims. The usual lifecycle works unchanged:
+
+```c
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+
+int main(void) {
+    glfwInit();                                   // -> gfxInitDefault()
+    GLFWwindow *win = glfwCreateWindow(1280, 720, "Game", NULL, NULL); // -> nova_init()
+    glfwMakeContextCurrent(win);
+    gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);   // succeeds (symbols are linked)
+
+    while (!glfwWindowShouldClose(win)) {         // drives aptMainLoop()
+        glfwPollEvents();                         // hidScanInput() + callback dispatch
+        if (glfwGetKey(win, GLFW_KEY_ESCAPE) == GLFW_PRESS) break;
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        /* ... your GL drawing ... */
+        glfwSwapBuffers(win);                      // -> novaSwapBuffers()
+    }
+    glfwTerminate();                               // -> nova_fini() + gfxExit()
+    return 0;
+}
+```
+
+3DS caveats (documented, not bugs): single window/context; `glfwGetFramebufferSize` reports the top screen (400×240) regardless of the size you request (build your projection from it); `glfwGetKey` maps a useful subset of keys to 3DS buttons (Esc→START, arrows/WASD→D-pad, Enter/Space→A, …); the "mouse" is the bottom touchscreen (via `glfwGetCursorPos`/`glfwGetMouseButton`); `glfwGetTime` is `svcGetSystemTick`-based. Remove the generated `glad.c` from your build — NovaGL links the GL symbols directly. Joystick/gamepad (`glfwGetGamepadState`) maps to the pad + C-stick + ZL/ZR.
 
 ## Building
 
@@ -58,6 +93,17 @@ Useful compile flags:
 | `-DNOVAGL_DISABLE_STENCIL=1` | Turn stencil back into a no-op if you hit citro3d asserts. |
 | `-DNOVAGL_GL2_RETURN_DUMMY=1` | glCreateShader/glCreateProgram return fake non-zero ids. For ports that don't check and call glUseProgram regardless. |
 | `-DNOVAGL_ENABLE_GLREADPIXELS_HW=1` | Use DisplayTransfer for full-screen glReadPixels. Faster but output is transposed relative to GL convention. |
+
+### Compliance opt-outs (default build is spec-correct)
+
+These restore older, non-standard-but-convenient behaviours. The default build now matches OpenGL; turn one on only if a port depended on the lenient behaviour.
+
+| Flag | Effect |
+|---|---|
+| `-DNOVAGL_SOLID_TEX_OPT=1` | Collapse single-colour textures to an 8×8 VRAM stub (big VRAM saving; bit-exact for plain sampling, but `glTexSubImage2D`/`glCopyTexSubImage2D`/readback then see the stub). Off → real-size upload. |
+| `-DNOVAGL_DOWNSCALE_OVERSIZE=1` | Auto-downscale textures larger than 1024 instead of raising `GL_INVALID_VALUE` (handy for oversized desktop atlases). |
+| `-DNOVAGL_LENIENT_BUFFERSUBDATA=1` | Auto-grow the buffer on an out-of-range `glBufferSubData` instead of `GL_INVALID_VALUE`. |
+| `-DNOVAGL_FBO_RESET_SCISSOR=1` | Reset the scissor box to the full surface when binding an FBO (fast3d menu-blur workaround). Spec leaves the scissor untouched on a framebuffer bind. |
 
 ### Performance hacks
 

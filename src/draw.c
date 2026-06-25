@@ -205,7 +205,15 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
 void glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type,
                          const GLvoid *indices) {
     /* start/end are an optimization hint about which vertices the indices reference.
-     * NovaGL's draw path doesn't pre-transform vertices, so the hint isn't actionable. */
+     * NovaGL's draw path doesn't pre-transform vertices, so the hint isn't actionable —
+     * but end < start is still GL_INVALID_VALUE (spec). count<0 / bad mode|type are
+     * validated inside nova_draw_internal. */
+#if !(defined(NOVAGL_NO_DEBUG) && NOVAGL_NO_DEBUG)
+    if (end < start) {
+        gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
+#endif
     (void) start;
     (void) end;
     nova_draw_internal(mode, 0, count, 1, type, indices);

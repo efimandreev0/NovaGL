@@ -9,6 +9,11 @@
 
 unsigned int nova_next_pow2(unsigned int v);
 
+/* Re-home an existing texture slot's storage in VRAM so it can be wrapped as a
+ * PICA render target by glFramebufferTexture2D. No-op if already VRAM-backed.
+ * Returns 1 on success, 0 on failure. Defined in texture.c. */
+int nova_texture_make_vram_target(GLuint texture);
+
 void *linear_alloc_ring(void *base, int *offset, int size, int capacity);
 
 float clampf(float x, float lo, float hi);
@@ -16,6 +21,8 @@ float clampf(float x, float lo, float hi);
 void dl_record_translate(float x, float y, float z);
 
 void dl_record_color3f(float r, float g_, float b);
+
+void dl_record_color4f(float r, float g_, float b, float a);
 
 void dl_execute(GLuint list);
 

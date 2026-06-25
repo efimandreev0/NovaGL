@@ -112,7 +112,7 @@ void vbo_convert_slot_to_raw(VBOSlot *slot) {
 
     void *decoded = linearAlloc((size_t) slot->size);
     if (!decoded) {
-        g.last_error = GL_OUT_OF_MEMORY;
+        gl_set_error(GL_OUT_OF_MEMORY);
         return;
     }
 
@@ -128,7 +128,7 @@ void vbo_convert_slot_to_raw(VBOSlot *slot) {
 
 void glGenBuffers(GLsizei n, GLuint *buffers) {
     if (n < 0) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
     if (!buffers) return;
@@ -138,7 +138,7 @@ void glGenBuffers(GLsizei n, GLuint *buffers) {
             id++;
         }
         if (id == NOVA_MAX_VBOS) {
-            g.last_error = GL_OUT_OF_MEMORY;
+            gl_set_error(GL_OUT_OF_MEMORY);
             buffers[i] = 0;
             break;
         }
@@ -159,7 +159,7 @@ GLboolean glIsBuffer(GLuint buffer) {
 
 void glDeleteBuffers(GLsizei n, const GLuint *buffers) {
     if (n < 0) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
     if (!buffers) return;
@@ -178,9 +178,19 @@ void glDeleteBuffers(GLsizei n, const GLuint *buffers) {
 
 
 void glBindBuffer(GLenum target, GLuint buffer) {
+    if (target != GL_ARRAY_BUFFER && target != GL_ELEMENT_ARRAY_BUFFER) {
+        gl_set_error(GL_INVALID_ENUM); /* spec: binding unchanged */
+        return;
+    }
+    /* GLES 1.1 / compat: binding an unused non-zero name CREATES the buffer
+     * object (so glGenBuffers, glIsBuffer and glBufferData all agree, and
+     * glGenBuffers can no longer hand out a name already in use here). */
+    if (buffer != 0 && buffer < NOVA_MAX_VBOS && !g.vbos[buffer].in_use) {
+        memset(&g.vbos[buffer], 0, sizeof(g.vbos[buffer]));
+        g.vbos[buffer].in_use = 1;
+    }
     if (target == GL_ARRAY_BUFFER) g.bound_array_buffer = buffer;
-    else if (target == GL_ELEMENT_ARRAY_BUFFER) g.bound_element_array_buffer = buffer;
-    else g.last_error = GL_INVALID_ENUM; /* spec: binding unchanged */
+    else g.bound_element_array_buffer = buffer;
 }
 
 void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usage) {
@@ -188,22 +198,44 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
     if (target == GL_ARRAY_BUFFER) id = g.bound_array_buffer;
     else if (target == GL_ELEMENT_ARRAY_BUFFER) id = g.bound_element_array_buffer;
     else {
-        g.last_error = GL_INVALID_ENUM;
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
 
     if (size < 0) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
+    }
+    /* Spec: usage must be one of the nine STREAM/STATIC/DYNAMIC _DRAW/_READ/_COPY
+     * tokens; an unknown value is GL_INVALID_ENUM. NovaGL only distinguishes
+     * stream vs static, but it must still reject garbage. */
+    switch (usage) {
+        case GL_STREAM_DRAW: case GL_STATIC_DRAW: case GL_DYNAMIC_DRAW:
+        case 0x88E1 /*STREAM_READ*/: case 0x88E2 /*STREAM_COPY*/:
+        case 0x88E5 /*STATIC_READ*/: case 0x88E6 /*STATIC_COPY*/:
+        case 0x88E9 /*DYNAMIC_READ*/: case 0x88EA /*DYNAMIC_COPY*/:
+            break;
+        default:
+            gl_set_error(GL_INVALID_ENUM);
+            return;
     }
     if (id == 0) {
         /* Spec: no buffer object bound to target. */
-        g.last_error = GL_INVALID_OPERATION;
+        gl_set_error(GL_INVALID_OPERATION);
         return;
     }
-    if (id >= NOVA_MAX_VBOS) return;
+    if (id >= NOVA_MAX_VBOS) {
+        /* Id outside NovaGL's table capacity — closest spec error. */
+        gl_set_error(GL_OUT_OF_MEMORY);
+        return;
+    }
 
     VBOSlot *slot = &g.vbos[id];
+    /* Spec: it is GL_INVALID_OPERATION to (re)specify data for a mapped buffer. */
+    if (slot->mapped) {
+        gl_set_error(GL_INVALID_OPERATION);
+        return;
+    }
     int pack_ptc = (target == GL_ARRAY_BUFFER) && can_pack_ptc_vbo(size, data, usage);
     int desired_kind = pack_ptc ? NOVA_VBO_STORAGE_PACKED_PTC : NOVA_VBO_STORAGE_RAW;
     int desired_stride = pack_ptc ? NOVA_VBO_PTC_PACKED_STRIDE : 0;
@@ -255,7 +287,7 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
         if (!new_buf) {
             printf("[NOVA] glBufferData: linearAlloc(%d) FAILED (linearSpaceFree=%u). VBO id=%u left empty.\n",
                    new_capacity, (unsigned) linearSpaceFree(), (unsigned) id);
-            g.last_error = GL_OUT_OF_MEMORY;
+            gl_set_error(GL_OUT_OF_MEMORY);
             return;
         }
 
@@ -266,6 +298,7 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
 
     slot->size = size;
     slot->is_stream = is_stream;
+    slot->usage = usage;
     slot->storage_kind = desired_kind;
     slot->storage_stride = (uint8_t) desired_stride;
 
@@ -282,29 +315,34 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
     if (target == GL_ARRAY_BUFFER) id = g.bound_array_buffer;
     else if (target == GL_ELEMENT_ARRAY_BUFFER) id = g.bound_element_array_buffer;
     else {
-        g.last_error = GL_INVALID_ENUM;
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
 
     if (offset < 0 || size < 0) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
     if (id == 0) {
-        g.last_error = GL_INVALID_OPERATION;
+        gl_set_error(GL_INVALID_OPERATION);
         return;
     }
     if (id >= NOVA_MAX_VBOS) return;
     if (size == 0 || !data) return;
 
     VBOSlot *slot = &g.vbos[id];
+    /* Spec: GL_INVALID_OPERATION to update a currently-mapped buffer. */
+    if (slot->mapped) {
+        gl_set_error(GL_INVALID_OPERATION);
+        return;
+    }
 
-#ifdef NOVAGL_STRICT_BUFFERSUBDATA
-    /* Spec behaviour: writing past the buffer's data store is
-     * GL_INVALID_VALUE with no effect. Default build keeps the lenient
-     * auto-grow below because several ports rely on it. */
-    if (!slot->allocated || offset + size > slot->size) {
-        g.last_error = GL_INVALID_VALUE;
+#ifndef NOVAGL_LENIENT_BUFFERSUBDATA
+    /* Spec behaviour (default): writing past the buffer's data store is
+     * GL_INVALID_VALUE with no effect. Define NOVAGL_LENIENT_BUFFERSUBDATA to
+     * restore the old auto-grow leniency for ports that relied on it. */
+    if (!slot->allocated || (GLsizeiptr)(offset + size) > slot->size) {
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
 #endif
@@ -326,7 +364,7 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
 
         void *new_buf = linearAlloc((size_t) new_capacity);
         if (!new_buf) {
-            g.last_error = GL_OUT_OF_MEMORY;
+            gl_set_error(GL_OUT_OF_MEMORY);
             return;
         }
 
@@ -370,42 +408,59 @@ void glReadBuffer(GLenum mode) {
 // GPU read VBO past the cpu cache, so on unmap we must flush the range or GPU
 // see old garbage. packed-PTC cant be mapped (wrong layout) so convert to raw first.
 
-static VBOSlot *map_resolve_slot(GLenum target) {
+/* Resolve target -> bound id, distinguishing "bad target" from "nothing bound"
+ * so the map entry points can raise the correct GL error. Returns the slot or
+ * NULL, writing *err with the error to raise (GL_NO_ERROR if the slot is fine). */
+static VBOSlot *map_resolve_slot_err(GLenum target, GLenum *err) {
+    *err = GL_NO_ERROR;
     GLuint id = 0;
     if (target == GL_ARRAY_BUFFER) id = g.bound_array_buffer;
     else if (target == GL_ELEMENT_ARRAY_BUFFER) id = g.bound_element_array_buffer;
-    if (id == 0 || id >= NOVA_MAX_VBOS) return NULL;
+    else { *err = GL_INVALID_ENUM; return NULL; }
+    if (id == 0 || id >= NOVA_MAX_VBOS) { *err = GL_INVALID_OPERATION; return NULL; }
     VBOSlot *slot = &g.vbos[id];
-    if (!slot->in_use || !slot->allocated || !slot->data) return NULL;
+    if (!slot->in_use || !slot->allocated || !slot->data) { *err = GL_INVALID_OPERATION; return NULL; }
     return slot;
 }
 
 void *glMapBuffer(GLenum target, GLenum access) {
-    (void) access; // we always expose a writable pointer regardless of mode
-    VBOSlot *slot = map_resolve_slot(target);
-    if (!slot) return NULL;
+    if (access != GL_READ_ONLY && access != GL_WRITE_ONLY && access != GL_READ_WRITE) {
+        gl_set_error(GL_INVALID_ENUM);
+        return NULL;
+    }
+    GLenum err; VBOSlot *slot = map_resolve_slot_err(target, &err);
+    if (!slot) { gl_set_error(err); return NULL; }
+    if (slot->mapped) { gl_set_error(GL_INVALID_OPERATION); return NULL; } /* already mapped */
     if (slot->storage_kind != NOVA_VBO_STORAGE_RAW) {
         vbo_convert_slot_to_raw(slot);
     }
+    slot->mapped = 1;
     return slot->data;
 }
 
 void *glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access) {
-    (void) length;
     (void) access; // INVALIDATE_/UNSYNCHRONIZED_ we just ignore, no discard buffer.
-                   // app overwrite whole thing before draw anyway
-    VBOSlot *slot = map_resolve_slot(target);
-    if (!slot) return NULL;
-    if (offset < 0 || offset > slot->capacity) return NULL;
+    GLenum err; VBOSlot *slot = map_resolve_slot_err(target, &err);
+    if (!slot) { gl_set_error(err); return NULL; }
+    if (slot->mapped) { gl_set_error(GL_INVALID_OPERATION); return NULL; }
+    /* Spec: offset>=0, length>=0, offset+length must lie within the buffer
+     * (unless INVALIDATE_BUFFER grows it — we don't, so be strict). */
+    if (offset < 0 || length < 0 || offset + length > slot->size) {
+        gl_set_error(GL_INVALID_VALUE);
+        return NULL;
+    }
     if (slot->storage_kind != NOVA_VBO_STORAGE_RAW) {
         vbo_convert_slot_to_raw(slot);
     }
+    slot->mapped = 1;
     return (uint8_t *) slot->data + offset;
 }
 
 GLboolean glUnmapBuffer(GLenum target) {
-    VBOSlot *slot = map_resolve_slot(target);
-    if (!slot) return GL_FALSE;
+    GLenum err; VBOSlot *slot = map_resolve_slot_err(target, &err);
+    if (!slot) { gl_set_error(err); return GL_FALSE; }
+    if (!slot->mapped) { gl_set_error(GL_INVALID_OPERATION); return GL_FALSE; } /* not mapped */
+    slot->mapped = 0;
     // just flush the whole buffer, we dont track the mapped range. cheap enough.
     GSPGPU_FlushDataCache(slot->data, (u32) slot->size);
     return GL_TRUE;

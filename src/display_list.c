@@ -25,12 +25,12 @@ GLuint glGenLists(GLsizei range) {
     /* Spec: range < 0 → GL_INVALID_VALUE, return 0. range == 0 → return 0,
      * no error. */
     if (range < 0) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return 0;
     }
     if (range == 0) return 0;
     if (!ensure_dl_store()) {
-        g.last_error = GL_OUT_OF_MEMORY;
+        gl_set_error(GL_OUT_OF_MEMORY);
         return 0;
     }
 
@@ -61,19 +61,19 @@ void glNewList(GLuint list, GLenum mode) {
     /* Spec: list == 0 → GL_INVALID_VALUE; bad mode → GL_INVALID_ENUM;
      * nested glNewList → GL_INVALID_OPERATION. */
     if (list == 0) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
     if (mode != GL_COMPILE && mode != GL_COMPILE_AND_EXECUTE) {
-        g.last_error = GL_INVALID_ENUM;
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
     if (g.dl_recording >= 0) {
-        g.last_error = GL_INVALID_OPERATION;
+        gl_set_error(GL_INVALID_OPERATION);
         return;
     }
     if (!ensure_dl_store()) {
-        g.last_error = GL_OUT_OF_MEMORY;
+        gl_set_error(GL_OUT_OF_MEMORY);
         return;
     }
     if (list < NOVA_DISPLAY_LISTS) {
@@ -86,7 +86,7 @@ void glNewList(GLuint list, GLenum mode) {
 void glEndList(void) {
     if (g.dl_recording < 0) {
         /* Spec: glEndList without a matching glNewList. */
-        g.last_error = GL_INVALID_OPERATION;
+        gl_set_error(GL_INVALID_OPERATION);
         return;
     }
     g.dl_recording = -1;
@@ -96,7 +96,7 @@ void glCallList(GLuint list) { dl_execute(list); }
 
 void glCallLists(GLsizei n, GLenum type, const GLvoid *lists) {
     if (n < 0) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
     if (!lists) return;
@@ -106,7 +106,7 @@ void glCallLists(GLsizei n, GLenum type, const GLvoid *lists) {
         else if (type == GL_UNSIGNED_BYTE) id = ((const GLubyte *) lists)[i];
         else if (type == GL_UNSIGNED_SHORT) id = ((const GLushort *) lists)[i];
         else {
-            g.last_error = GL_INVALID_ENUM;
+            gl_set_error(GL_INVALID_ENUM);
             return;
         }
         dl_execute(id);
@@ -115,7 +115,7 @@ void glCallLists(GLsizei n, GLenum type, const GLvoid *lists) {
 
 void glDeleteLists(GLuint list, GLsizei range) {
     if (range < 0) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
     if (!g.dl_store) return;

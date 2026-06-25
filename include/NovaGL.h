@@ -85,6 +85,7 @@ typedef void *(*GLADloadproc)(const char *name);
 #define GL_STACK_OVERFLOW           0x0503
 #define GL_STACK_UNDERFLOW          0x0504
 #define GL_OUT_OF_MEMORY            0x0505
+#define GL_INVALID_FRAMEBUFFER_OPERATION 0x0506
 
 #define GL_BYTE                     0x1400
 #define GL_UNSIGNED_BYTE            0x1401
@@ -366,6 +367,12 @@ typedef void *(*GLADloadproc)(const char *name);
  * (high nibble = alpha, low nibble = luminance) — maps directly to GPU_LA4. */
 #define GL_LUMINANCE_ALPHA4_NOVA    0x6B34
 #define GL_RGBA8_OES                0x8058
+/* ETC1 (RGB, 4bpp) and ETC1A4 (RGB + 4-bit alpha, 8bpp) — both native PICA200
+ * sampleable formats. ETC1A4 is a NovaGL extension token (no standard GL enum);
+ * pass it to glCompressedTexImage2D with PICA-tiled data (alpha block then
+ * colour block per 4x4). */
+#define GL_ETC1_RGB8_OES            0x8D64
+#define GL_ETC1_RGB8A4_NOVA         0x6E01
 #define GL_COMPRESSED_RGBA_PVRTC_4BPPV1_IMG  0x8C02
 #define GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG   0x8C00
 /* S3TC / DXT format tokens. PICA200 cannot sample S3TC (only ETC1), so these
@@ -558,6 +565,11 @@ typedef void *(*GLADloadproc)(const char *name);
 #define GL_READ_FRAMEBUFFER               0x8CA8
 #define GL_DRAW_FRAMEBUFFER               0x8CA9
 #define GL_FRAMEBUFFER_COMPLETE           0x8CD5
+/* Currently-bound framebuffer queries (glGetIntegerv). Per the GL spec
+ * GL_FRAMEBUFFER_BINDING and GL_DRAW_FRAMEBUFFER_BINDING are the same enum. */
+#define GL_FRAMEBUFFER_BINDING            0x8CA6
+#define GL_DRAW_FRAMEBUFFER_BINDING       0x8CA6
+#define GL_READ_FRAMEBUFFER_BINDING       0x8CAA
 #define GL_TEXTURE_2D_TARGET              0x0DE1
 
 #define GL_COMBINE_ARB                    GL_COMBINE_RGB

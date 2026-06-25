@@ -12,6 +12,10 @@ void glFogf(GLenum pname, GLfloat param) {
         case GL_FOG_MODE: {
             // cast to enum first then compare, so we dont dirty fog every frame
             GLenum new_mode = (GLenum) param;
+            if (new_mode != GL_LINEAR && new_mode != GL_EXP && new_mode != GL_EXP2) {
+                gl_set_error(GL_INVALID_ENUM); /* spec: invalid mode value, unchanged */
+                break;
+            }
             if (g.fog_mode != new_mode) {
                 g.fog_mode = new_mode;
                 g.fog_dirty = 1;
@@ -30,7 +34,7 @@ void glFogf(GLenum pname, GLfloat param) {
         case GL_FOG_DENSITY:
             /* Spec: negative density is GL_INVALID_VALUE, state unchanged. */
             if (param < 0.0f) {
-                g.last_error = GL_INVALID_VALUE;
+                gl_set_error(GL_INVALID_VALUE);
                 break;
             }
             if (g.fog_density != param) {
@@ -38,16 +42,17 @@ void glFogf(GLenum pname, GLfloat param) {
                 g.fog_dirty = 1;
             }
             break;
-        default: break;
+        default: gl_set_error(GL_INVALID_ENUM); break;
     }
 }
 
 void glFogfv(GLenum pname, const GLfloat *params) {
     if (pname == GL_FOG_COLOR && params) {
-        g.fog_color[0] = params[0];
-        g.fog_color[1] = params[1];
-        g.fog_color[2] = params[2];
-        g.fog_color[3] = params[3];
+        /* Spec: fog colour is clamped to [0,1] at specification time. */
+        g.fog_color[0] = clampf(params[0], 0.0f, 1.0f);
+        g.fog_color[1] = clampf(params[1], 0.0f, 1.0f);
+        g.fog_color[2] = clampf(params[2], 0.0f, 1.0f);
+        g.fog_color[3] = clampf(params[3], 0.0f, 1.0f);
         g.fog_dirty = 1;
     } else if (params) { glFogf(pname, params[0]); }
 }
@@ -56,6 +61,10 @@ void glFogi(GLenum pname, GLint param) {
     switch (pname) {
         case GL_FOG_MODE: {
             GLenum new_mode = (GLenum) param;
+            if (new_mode != GL_LINEAR && new_mode != GL_EXP && new_mode != GL_EXP2) {
+                gl_set_error(GL_INVALID_ENUM);
+                break;
+            }
             if (g.fog_mode != new_mode) {
                 g.fog_mode = new_mode;
                 g.fog_dirty = 1;
@@ -73,7 +82,7 @@ void glFogi(GLenum pname, GLint param) {
             break;
         case GL_FOG_DENSITY:
             if (param < 0) {
-                g.last_error = GL_INVALID_VALUE;
+                gl_set_error(GL_INVALID_VALUE);
                 break;
             }
             if (g.fog_density != (GLfloat) param) {
@@ -81,16 +90,17 @@ void glFogi(GLenum pname, GLint param) {
                 g.fog_dirty = 1;
             }
             break;
-        default: break;
+        default: gl_set_error(GL_INVALID_ENUM); break;
     }
 }
 
 void glFogiv(GLenum pname, const GLint *params) {
     if (pname == GL_FOG_COLOR && params) {
-        g.fog_color[0] = params[0] / 2147483647.0f;
-        g.fog_color[1] = params[1] / 2147483647.0f;
-        g.fog_color[2] = params[2] / 2147483647.0f;
-        g.fog_color[3] = params[3] / 2147483647.0f;
+        /* int colour components map to [-1,1] then clamp to [0,1] at spec time. */
+        g.fog_color[0] = clampf(params[0] / 2147483647.0f, 0.0f, 1.0f);
+        g.fog_color[1] = clampf(params[1] / 2147483647.0f, 0.0f, 1.0f);
+        g.fog_color[2] = clampf(params[2] / 2147483647.0f, 0.0f, 1.0f);
+        g.fog_color[3] = clampf(params[3] / 2147483647.0f, 0.0f, 1.0f);
         g.fog_dirty = 1;
     } else if (params) {
         glFogi(pname, params[0]);

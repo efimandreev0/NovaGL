@@ -15,6 +15,10 @@ static inline GLfloat norm_us(GLushort c){ return (float)c / 65535.0f; }
 static inline GLfloat norm_ui(GLuint c)  { return (float)c / 4294967295.0f; }
 
 void glColor4f(GLfloat r, GLfloat g_, GLfloat b, GLfloat a) {
+    if (g.dl_recording >= 0) {
+        dl_record_color4f(r, g_, b, a);
+        return;
+    }
     g.cur_color[0] = r;
     g.cur_color[1] = g_;
     g.cur_color[2] = b;
@@ -33,6 +37,10 @@ void glColor3f(GLfloat r, GLfloat g_, GLfloat b) {
 }
 
 void glColor4ub(GLubyte r, GLubyte g_, GLubyte b, GLubyte a) {
+    if (g.dl_recording >= 0) {
+        dl_record_color4f(r / 255.0f, g_ / 255.0f, b / 255.0f, a / 255.0f);
+        return;
+    }
     g.cur_color[0] = r / 255.0f;
     g.cur_color[1] = g_ / 255.0f;
     g.cur_color[2] = b / 255.0f;
@@ -40,6 +48,10 @@ void glColor4ub(GLubyte r, GLubyte g_, GLubyte b, GLubyte a) {
 }
 
 void glColor3ub(GLubyte r, GLubyte g_, GLubyte b) {
+    if (g.dl_recording >= 0) {
+        dl_record_color3f(r / 255.0f, g_ / 255.0f, b / 255.0f);
+        return;
+    }
     g.cur_color[0] = r / 255.0f;
     g.cur_color[1] = g_ / 255.0f;
     g.cur_color[2] = b / 255.0f;
@@ -206,7 +218,10 @@ void glColorMaterial(GLenum face, GLenum mode) {
  * for GL_FRONT / GL_BACK / GL_FRONT_AND_BACK. These fully record the material;
  * the lighting maths that consumes them is the GPU light path (not built yet). */
 void glMaterialfv(GLenum face, GLenum pname, const GLfloat *params) {
-    (void) face;
+    if (face != GL_FRONT && face != GL_BACK && face != GL_FRONT_AND_BACK) {
+        gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
     if (!params) return;
     switch (pname) {
         case GL_AMBIENT:
@@ -235,17 +250,23 @@ void glMaterialfv(GLenum face, GLenum pname, const GLfloat *params) {
             g.mat_shininess = params[0];
             break;
         default:
-            break;
+            gl_set_error(GL_INVALID_ENUM);
+            return;
     }
     g.light_dirty = 1;
 }
 
 void glMaterialf(GLenum face, GLenum pname, GLfloat param) {
-    // only GL_SHININESS is a scalar; spec says other names are an error here
+    if (face != GL_FRONT && face != GL_BACK && face != GL_FRONT_AND_BACK) {
+        gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    // only GL_SHININESS is a scalar; the colour names are an error in glMaterialf.
     if (pname == GL_SHININESS) {
-        (void) face;
         g.mat_shininess = param;
         g.light_dirty = 1;
+    } else {
+        gl_set_error(GL_INVALID_ENUM);
     }
 }
 
@@ -311,7 +332,7 @@ void glGetMaterialiv(GLenum face, GLenum pname, GLint *params) {
 static NovaLight *nova_light(GLenum light) {
     int idx = (int) light - GL_LIGHT0;
     if (idx < 0 || idx >= NOVA_MAX_LIGHTS) {
-        g.last_error = GL_INVALID_ENUM;
+        gl_set_error(GL_INVALID_ENUM);
         return 0;
     }
     return &g.lights[idx];
@@ -333,23 +354,34 @@ void glLightfv(GLenum light, GLenum pname, const GLfloat *params) {
             L->specular[0] = params[0]; L->specular[1] = params[1];
             L->specular[2] = params[2]; L->specular[3] = params[3];
             break;
-        case GL_POSITION:
-            // NOTE: GL transforms POSITION by the current modelview at call time.
-            // NovaGL stores it raw (eye-space contract is the caller's); the GPU
-            // light path will decide the space when it lands.
-            L->position[0] = params[0]; L->position[1] = params[1];
-            L->position[2] = params[2]; L->position[3] = params[3];
+        case GL_POSITION: {
+            /* Spec: GL_POSITION is transformed by the current MODELVIEW matrix at
+             * call time and stored in eye space (which is what the HW light env
+             * consumes). A directional light (w==0) drops the translation column
+             * automatically via the w term. */
+            const C3D_Mtx *mv = &g.mv_stack[g.mv_sp];
+            for (int i = 0; i < 4; i++) {
+                L->position[i] = mv->r[i].x * params[0] + mv->r[i].y * params[1] +
+                                 mv->r[i].z * params[2] + mv->r[i].w * params[3];
+            }
             break;
-        case GL_SPOT_DIRECTION:
-            L->spot_direction[0] = params[0]; L->spot_direction[1] = params[1];
-            L->spot_direction[2] = params[2];
+        }
+        case GL_SPOT_DIRECTION: {
+            /* Transformed by the modelview's upper-left 3x3 (direction, no
+             * translation). */
+            const C3D_Mtx *mv = &g.mv_stack[g.mv_sp];
+            for (int i = 0; i < 3; i++) {
+                L->spot_direction[i] = mv->r[i].x * params[0] + mv->r[i].y * params[1] +
+                                       mv->r[i].z * params[2];
+            }
             break;
+        }
         case GL_SPOT_EXPONENT:   L->spot_exponent   = params[0]; break;
         case GL_SPOT_CUTOFF:     L->spot_cutoff     = params[0]; break;
         case GL_CONSTANT_ATTENUATION:  L->atten_constant  = params[0]; break;
         case GL_LINEAR_ATTENUATION:    L->atten_linear    = params[0]; break;
         case GL_QUADRATIC_ATTENUATION: L->atten_quadratic = params[0]; break;
-        default: g.last_error = GL_INVALID_ENUM; break;
+        default: gl_set_error(GL_INVALID_ENUM); break;
     }
     g.light_dirty = 1;
 }
@@ -390,7 +422,7 @@ void glGetLightfv(GLenum light, GLenum pname, GLfloat *params) {
         case GL_CONSTANT_ATTENUATION:  params[0] = L->atten_constant;  break;
         case GL_LINEAR_ATTENUATION:    params[0] = L->atten_linear;    break;
         case GL_QUADRATIC_ATTENUATION: params[0] = L->atten_quadratic; break;
-        default: g.last_error = GL_INVALID_ENUM; break;
+        default: gl_set_error(GL_INVALID_ENUM); break;
     }
 }
 

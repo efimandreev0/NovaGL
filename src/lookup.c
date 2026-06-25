@@ -446,7 +446,11 @@ void *novaglGetProcAddress(const char *name) {
     const int len = strlen(name);
     char tmpname[len + 1];
     memcpy(tmpname, name, len + 1);
-    if (!strcmp(tmpname + len - 3, "EXT") || !strcmp(tmpname + len - 3, "ARB") || !strcmp(tmpname + len - 3, "OES")) {
+    /* Only strip a 3-char EXT/ARB/OES suffix when a real base name remains
+     * (len > 3) — guards the `tmpname + len - 3` underflow for short names like
+     * "gl" (len == 2). */
+    if (len > 3 && (!strcmp(tmpname + len - 3, "EXT") || !strcmp(tmpname + len - 3, "ARB") ||
+                    !strcmp(tmpname + len - 3, "OES"))) {
         tmpname[len - 3] = 0;
     }
 

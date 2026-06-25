@@ -175,6 +175,20 @@ void dl_record_color3f(float r, float g_, float b) {
     }
 }
 
+void dl_record_color4f(float r, float g_, float b, float a) {
+    if (g.dl_store && g.dl_recording >= 0 && g.dl_recording < NOVA_DISPLAY_LISTS) {
+        DisplayList *dl = &g.dl_store[g.dl_recording];
+        if (dl->count < NOVA_DL_MAX_OPS) {
+            DLOp *op = &dl->ops[dl->count++];
+            op->type = DL_OP_COLOR4F;
+            op->args[0] = r;
+            op->args[1] = g_;
+            op->args[2] = b;
+            op->args[3] = a;
+        }
+    }
+}
+
 void dl_execute(GLuint list) {
     if (!g.dl_store || list >= NOVA_DISPLAY_LISTS) return;
     DisplayList *dl = &g.dl_store[list];
@@ -183,6 +197,7 @@ void dl_execute(GLuint list) {
         DLOp *op = &dl->ops[i];
         if (op->type == DL_OP_TRANSLATE) glTranslatef(op->args[0], op->args[1], op->args[2]);
         else if (op->type == DL_OP_COLOR3F) glColor3f(op->args[0], op->args[1], op->args[2]);
+        else if (op->type == DL_OP_COLOR4F) glColor4f(op->args[0], op->args[1], op->args[2], op->args[3]);
     }
 }
 
@@ -1619,15 +1634,24 @@ void draw_emulated_quads(int count) {
 
     if (!g.static_quad_indices) return;
 
-    int quads_drawn = 0;
-    while (quads_drawn < num_quads) {
-        int quads_to_draw = num_quads - quads_drawn;
-        if (quads_to_draw > g.static_quad_count) quads_to_draw = g.static_quad_count;
-
-        C3D_DrawElements(GPU_TRIANGLES, quads_to_draw * 6, C3D_UNSIGNED_SHORT, g.static_quad_indices);
-
-        quads_drawn += quads_to_draw;
+    /* The shared static_quad_indices buffer is 0-based (it indexes vertices
+     * 0..static_quad_count*4-1). Re-running it for a second batch would draw the
+     * FIRST N quads again, not the next N (there's no base-vertex offset on
+     * PICA). So a single draw can cover at most static_quad_count quads; clamp
+     * and warn once rather than silently emitting duplicated geometry. A caller
+     * needing more should split the GL_QUADS draw into <= static_quad_count*4
+     * vertex chunks. */
+    if (num_quads > g.static_quad_count) {
+        static int warned = 0;
+        if (!warned) {
+            printf("[Nova]: GL_QUADS batch of %d quads exceeds the %d-quad index buffer; "
+                   "drawing the first %d (split the draw to render the rest).\n",
+                   num_quads, g.static_quad_count, g.static_quad_count);
+            warned = 1;
+        }
+        num_quads = g.static_quad_count;
     }
+    C3D_DrawElements(GPU_TRIANGLES, num_quads * 6, C3D_UNSIGNED_SHORT, g.static_quad_indices);
 }
 
 void nova_hardware_swizzle(C3D_Tex *tex, const void *linear_pixels, int width, int height, GPU_TEXCOLOR format) {

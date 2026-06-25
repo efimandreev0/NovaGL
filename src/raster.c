@@ -13,7 +13,7 @@
 
 void glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
     if (width < 0 || height < 0) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
     g.vp_x = x;
@@ -30,7 +30,7 @@ void glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
 
 void glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
     if (width < 0 || height < 0) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
     g.scissor_x = x;
@@ -72,7 +72,7 @@ static int is_valid_blend_factor(GLenum f, int is_src) {
 
 void glDepthFunc(GLenum func) {
     if (!is_valid_cmp_func(func)) {
-        g.last_error = GL_INVALID_ENUM;
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
     g.depth_func = func;
@@ -88,7 +88,7 @@ void glDepthRangef(GLclampf near_val, GLclampf far_val) {
 
 void glBlendFunc(GLenum sfactor, GLenum dfactor) {
     if (!is_valid_blend_factor(sfactor, 1) || !is_valid_blend_factor(dfactor, 0)) {
-        g.last_error = GL_INVALID_ENUM;
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
     g.blend_src = sfactor;
@@ -104,7 +104,7 @@ void glBlendFunc(GLenum sfactor, GLenum dfactor) {
 void glBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha) {
     if (!is_valid_blend_factor(srcRGB, 1) || !is_valid_blend_factor(dstRGB, 0) ||
         !is_valid_blend_factor(srcAlpha, 1) || !is_valid_blend_factor(dstAlpha, 0)) {
-        g.last_error = GL_INVALID_ENUM;
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
     g.blend_src = srcRGB;       g.blend_dst = dstRGB;
@@ -133,7 +133,7 @@ void glLogicOp(GLenum opcode) {
             g.logic_op = opcode;
             break;
         default:
-            g.last_error = GL_INVALID_ENUM;
+            gl_set_error(GL_INVALID_ENUM);
             break;
     }
 }
@@ -153,7 +153,7 @@ static int is_valid_blend_equation(GLenum mode) {
 
 void glBlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha) {
     if (!is_valid_blend_equation(modeRGB) || !is_valid_blend_equation(modeAlpha)) {
-        g.last_error = GL_INVALID_ENUM;
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
     g.blend_eq_rgb = modeRGB;
@@ -175,7 +175,7 @@ void glBlendEquationSeparateOES(GLenum modeRGB, GLenum modeAlpha) {
 
 void glAlphaFunc(GLenum func, GLclampf ref) {
     if (!is_valid_cmp_func(func)) {
-        g.last_error = GL_INVALID_ENUM;
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
     g.alpha_func = func;
@@ -185,7 +185,7 @@ void glAlphaFunc(GLenum func, GLclampf ref) {
 
 void glCullFace(GLenum mode) {
     if (mode != GL_FRONT && mode != GL_BACK && mode != GL_FRONT_AND_BACK) {
-        g.last_error = GL_INVALID_ENUM;
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
     g.cull_face_mode = mode;
@@ -193,7 +193,7 @@ void glCullFace(GLenum mode) {
 
 void glFrontFace(GLenum mode) {
     if (mode != GL_CW && mode != GL_CCW) {
-        g.last_error = GL_INVALID_ENUM;
+        gl_set_error(GL_INVALID_ENUM);
         return;
     }
     g.front_face = mode;
@@ -209,6 +209,8 @@ void glColorMask(GLboolean r, GLboolean g_, GLboolean b, GLboolean a) {
 void glShadeModel(GLenum mode) {
     if (mode == GL_FLAT || mode == GL_SMOOTH)
         g.shade_model = mode;
+    else
+        gl_set_error(GL_INVALID_ENUM);
 }
 
 void glPolygonOffset(GLfloat factor, GLfloat units) {
@@ -217,11 +219,22 @@ void glPolygonOffset(GLfloat factor, GLfloat units) {
     apply_depth_map();
 }
 
-void glLineWidth(GLfloat width) { (void) width; }
+void glLineWidth(GLfloat width) {
+    /* PICA has no programmable line width (always 1px), but a non-positive
+     * width is still GL_INVALID_VALUE. */
+    if (width <= 0.0f) gl_set_error(GL_INVALID_VALUE);
+}
 
 void glPolygonMode(GLenum face, GLenum mode) {
-    (void) face;
-    (void) mode;
+    /* No wireframe/point fill on PICA (no-op), but enums must be validated. */
+    if (face != GL_FRONT && face != GL_BACK && face != GL_FRONT_AND_BACK) {
+        gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    if (mode != GL_FILL && mode != GL_LINE && mode != GL_POINT) {
+        gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
 }
 
 
@@ -250,16 +263,26 @@ GPU_TESTFUNC stencil_func_to_gpu(GLenum f) {
     }
 }
 
+static int is_valid_stencil_op(GLenum op) {
+    switch (op) {
+        case GL_KEEP: case GL_ZERO: case GL_REPLACE: case GL_INCR:
+        case GL_DECR: case GL_INVERT: case GL_INCR_WRAP: case GL_DECR_WRAP:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 static GPU_STENCILOP stencil_op_to_gpu(GLenum op) {
     switch (op) {
         case GL_ZERO:      return GPU_STENCIL_ZERO;
         case GL_REPLACE:   return GPU_STENCIL_REPLACE;
-        case GL_INCR:      return GPU_STENCIL_INCR;
-        case GL_DECR:      return GPU_STENCIL_DECR;
-        /* PICA has no saturating-vs-wrapping distinction exposed here; the
-         * wrap variants behave like plain INCR/DECR. Good enough for re3. */
-        case GL_INCR_WRAP: return GPU_STENCIL_INCR;
-        case GL_DECR_WRAP: return GPU_STENCIL_DECR;
+        case GL_INCR:      return GPU_STENCIL_INCR;      /* saturating */
+        case GL_DECR:      return GPU_STENCIL_DECR;      /* saturating */
+        /* PICA HAS distinct wrapping ops — use them so GL_*_WRAP semantics are
+         * exact (wrap at 0/255 instead of saturating). */
+        case GL_INCR_WRAP: return GPU_STENCIL_INCR_WRAP;
+        case GL_DECR_WRAP: return GPU_STENCIL_DECR_WRAP;
         case GL_INVERT:    return GPU_STENCIL_INVERT;
         case GL_KEEP:
         default:           return GPU_STENCIL_KEEP;
@@ -273,14 +296,20 @@ static GPU_STENCILOP stencil_op_to_gpu(GLenum op) {
  * sits unused — same behaviour as before the patch. */
 #ifdef NOVAGL_DISABLE_STENCIL
 void glStencilFunc(GLenum func, GLint ref, GLuint mask) {
+    if (!is_valid_cmp_func(func)) { gl_set_error(GL_INVALID_ENUM); return; }
     g.stencil_func = func; g.stencil_ref = ref; g.stencil_mask = mask;
 }
 void glStencilMask(GLuint mask) { g.stencil_write_mask = mask; }
 void glStencilOp(GLenum fail, GLenum zfail, GLenum zpass) {
+    if (!is_valid_stencil_op(fail) || !is_valid_stencil_op(zfail) || !is_valid_stencil_op(zpass)) {
+        gl_set_error(GL_INVALID_ENUM); return;
+    }
     g.stencil_op_fail = fail; g.stencil_op_zfail = zfail; g.stencil_op_zpass = zpass;
 }
 #else
 void glStencilFunc(GLenum func, GLint ref, GLuint mask) {
+    /* Spec: bad func is GL_INVALID_ENUM with no state change / no GPU write. */
+    if (!is_valid_cmp_func(func)) { gl_set_error(GL_INVALID_ENUM); return; }
     g.stencil_func = func;
     g.stencil_ref  = ref;
     g.stencil_mask = mask;
@@ -295,6 +324,9 @@ void glStencilMask(GLuint mask) {
 }
 
 void glStencilOp(GLenum fail, GLenum zfail, GLenum zpass) {
+    if (!is_valid_stencil_op(fail) || !is_valid_stencil_op(zfail) || !is_valid_stencil_op(zpass)) {
+        gl_set_error(GL_INVALID_ENUM); return;
+    }
     g.stencil_op_fail  = fail;
     g.stencil_op_zfail = zfail;
     g.stencil_op_zpass = zpass;

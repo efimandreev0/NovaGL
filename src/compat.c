@@ -136,9 +136,10 @@ void glRecti(GLint x1, GLint y1, GLint x2, GLint y2) {
 
 /* ── glMultiDrawArrays — just a loop over glDrawArrays ────────────────────*/
 void glMultiDrawArrays(GLenum mode, const GLint *first, const GLsizei *count, GLsizei primcount) {
+    if (primcount < 0) { gl_set_error(GL_INVALID_VALUE); return; }
     if (!first || !count) return;
     for (GLsizei i = 0; i < primcount; i++) {
-        if (count[i] > 0) glDrawArrays(mode, first[i], count[i]);
+        glDrawArrays(mode, first[i], count[i]);
     }
 }
 
@@ -151,15 +152,31 @@ GLboolean glIsFramebuffer(GLuint framebuffer) {
 /* ── Buffer object parameter query ────────────────────────────────────────*/
 void glGetBufferParameteriv(GLenum target, GLenum pname, GLint *params) {
     if (!params) return;
+    if (target != GL_ARRAY_BUFFER && target != GL_ELEMENT_ARRAY_BUFFER) {
+        gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    switch (pname) {
+        case GL_BUFFER_SIZE: case GL_BUFFER_USAGE:
+        case GL_BUFFER_ACCESS: case GL_BUFFER_MAPPED:
+            break;
+        default:
+            gl_set_error(GL_INVALID_ENUM);
+            return;
+    }
     GLuint id = (target == GL_ELEMENT_ARRAY_BUFFER) ? g.bound_element_array_buffer : g.bound_array_buffer;
-    if (id == 0 || id >= NOVA_MAX_VBOS || !g.vbos[id].in_use) { params[0] = 0; return; }
+    if (id == 0 || id >= NOVA_MAX_VBOS || !g.vbos[id].in_use) {
+        /* Spec: querying with no buffer bound to target is GL_INVALID_OPERATION. */
+        gl_set_error(GL_INVALID_OPERATION);
+        return;
+    }
     VBOSlot *slot = &g.vbos[id];
     switch (pname) {
         case GL_BUFFER_SIZE:   params[0] = slot->size; break;
-        case GL_BUFFER_USAGE:  params[0] = slot->is_stream ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW; break;
+
+        case GL_BUFFER_USAGE:  params[0] = (GLint) (slot->usage ? slot->usage : GL_STATIC_DRAW); break;
         case GL_BUFFER_ACCESS: params[0] = GL_READ_WRITE; break;
-        case GL_BUFFER_MAPPED: params[0] = GL_FALSE; break;
-        default:               params[0] = 0; break;
+        case GL_BUFFER_MAPPED: params[0] = slot->mapped ? GL_TRUE : GL_FALSE; break;
     }
 }
 

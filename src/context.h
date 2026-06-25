@@ -84,6 +84,7 @@
 typedef struct {
     C3D_Tex tex;
     int allocated;
+    int bound_once; // set on first glBindTexture; glIsTexture tests this, not in_use
 
     int width, height;
     int pot_w, pot_h;
@@ -98,6 +99,11 @@ typedef struct {
     int in_use;
 
     int is_solid_optimized; // texture with 1 color -> we make 1x1 to save vram
+
+    // Set once the slot's storage has been re-homed in VRAM so it can serve as
+    // a PICA render-target color buffer (see nova_texture_make_vram_target).
+    // Stock glTexImage2D allocates linear RAM, which the GPU can't render into.
+    int is_vram;
 
     // mipmap flags. if max_level unset PICA read garbage for missing mips and
     // you get ugly tiled repeat on screen, so we track it
@@ -126,6 +132,8 @@ typedef struct {
     int is_stream;
     uint8_t storage_kind;
     uint8_t storage_stride;
+    GLenum usage;
+    uint8_t mapped;
 } VBOSlot;
 
 #define NOVA_MAX_FBOS 64
@@ -139,6 +147,7 @@ typedef struct {
 typedef enum {
     DL_OP_TRANSLATE,
     DL_OP_COLOR3F,
+    DL_OP_COLOR4F,
     DL_OP_NONE,
 } DLOpType;
 
@@ -496,14 +505,8 @@ extern struct NovaState {
      * glGenFramebuffers hands out IDs into this pool; glBindFramebuffer swaps
      * g.current_target between the screen targets and an FBO's C3D target. */
     FBOSlot fbos[NOVA_MAX_FBOS];
-    GLuint bound_fbo; // 0 = screen
-
-    /* State revision: bumped on any state mutation that affects what
-     * apply_gpu_state would push to the GPU. apply_gpu_state stores the
-     * last-applied revision and early-outs when nothing's changed since.
-     * vitaGL uses a similar dirty-tracking pattern. */
-    uint32_t state_rev;
-    uint32_t state_rev_applied;
+    GLuint bound_fbo; // 0 = screen (GL_FRAMEBUFFER / GL_DRAW_FRAMEBUFFER target)
+    GLuint bound_read_fbo; // GL_READ_FRAMEBUFFER target (0 = screen); blit source
 
     /* novaDrawObjects fast-path: pre-validated pointers for a PTC layout
      * (position 3f@0, texcoord 2f@12, color 4ub@20, stride 24).
@@ -513,6 +516,14 @@ extern struct NovaState {
     GLuint fast_idx_vbo_id;
     GLenum fast_idx_type;
 } g;
+
+/* GL error semantics: glGetError must report the FIRST error generated since the
+ * last query and hold it until queried (GL spec §2.5 / GLES 1.1 §2.5). Funnel every
+ * error site through this so a later error never overwrites an earlier unread one.
+ * The clear back to GL_NO_ERROR happens only in glGetError. */
+static inline void gl_set_error(GLenum e) {
+    if (g.last_error == GL_NO_ERROR) g.last_error = e;
+}
 
 void nova_fbo_gc_collect(void);
 

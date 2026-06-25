@@ -39,6 +39,8 @@ static inline int fb_morton_offset(int x, int y, int pot_w, int pot_h) {
 }
 
 void glGenFramebuffers(GLsizei n, GLuint *ids) {
+    if (n < 0) { gl_set_error(GL_INVALID_VALUE); return; }
+    if (!ids) return;
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = 0;
         for (int slot = 1; slot < NOVA_MAX_FBOS; slot++) {
@@ -51,17 +53,21 @@ void glGenFramebuffers(GLsizei n, GLuint *ids) {
             }
         }
         if (!id) {
-            g.last_error = GL_OUT_OF_MEMORY;
+            gl_set_error(GL_OUT_OF_MEMORY);
         }
         ids[i] = id;
     }
 }
 
 void glDeleteFramebuffers(GLsizei n, const GLuint *ids) {
+    if (n < 0) { gl_set_error(GL_INVALID_VALUE); return; }
+    if (!ids) return;
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = ids[i];
         if (id == 0 || id >= NOVA_MAX_FBOS) continue;
         if (!g.fbos[id].in_use) continue;
+        /* A deleted name that was bound for reading reverts to fb 0 (spec). */
+        if (g.bound_read_fbo == id) g.bound_read_fbo = 0;
         if (g.bound_fbo == id) {
             /* Deleting the bound FBO reverts to the logical screen = app
              * surface (or the LCD if no app surface). */
@@ -80,7 +86,14 @@ void glDeleteFramebuffers(GLsizei n, const GLuint *ids) {
 }
 
 void glBindFramebuffer(GLenum target, GLuint framebuffer) {
-    (void) target;
+    /* Spec: target must be one of these three; otherwise GL_INVALID_ENUM and
+     * the binding is unchanged. */
+    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER &&
+        target != GL_READ_FRAMEBUFFER) {
+        gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
+
     C3D_RenderTarget *new_target;
     GLuint new_bound;
     if (framebuffer == 0) {
@@ -90,14 +103,30 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
         new_bound = 0;
     } else {
         if (framebuffer >= NOVA_MAX_FBOS || !g.fbos[framebuffer].in_use) {
-            g.last_error = GL_INVALID_OPERATION;
+            gl_set_error(GL_INVALID_OPERATION);
             return;
         }
         new_target = g.fbos[framebuffer].target;
         new_bound = framebuffer;
     }
 
+    /* GL_READ_FRAMEBUFFER binds ONLY the read source (glReadPixels /
+     * glBlitFramebuffer source). It must NOT touch the draw target, the screen
+     * tilt, viewport, scissor or depth state. (The old code only ever updated
+     * g.bound_read_fbo for an incomplete FBO, so read/draw separation was
+     * effectively broken for any complete FBO.) */
+    if (target == GL_READ_FRAMEBUFFER) {
+        g.bound_read_fbo = new_bound;
+        return;
+    }
+    /* GL_FRAMEBUFFER updates BOTH bindings; GL_DRAW_FRAMEBUFFER only the draw one. */
+    if (target == GL_FRAMEBUFFER) g.bound_read_fbo = new_bound;
+
     if (framebuffer != 0 && !new_target) {
+        /* FBO with no colour attachment yet: record the draw binding so a later
+         * glFramebufferTexture2D wires up the real C3D target, and mark matrices
+         * dirty. Drawing into it before completion is GL_INVALID_FRAMEBUFFER_-
+         * OPERATION, enforced at draw time (nova_draw_internal). */
         g.bound_fbo = new_bound;
         g.matrices_dirty = 1;
         g.proj_dirty = g.mv_dirty = g.tex_mtx_dirty = 1;
@@ -122,17 +151,16 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
         C3D_SetViewport(g.vp_x, g.vp_y, g.vp_w, g.vp_h);
     }
 
-    /* Reset the scissor to the FULL FBO when binding an offscreen target.
+    /* OPT-IN WORKAROUND (-DNOVAGL_FBO_RESET_SCISSOR=1, default OFF): reset the
+     * scissor to the FULL FBO when binding an offscreen target.
      *
-     * fast3d's 2D blits (gSPImageRectangleEXT, used by the menu-blur and other
-     * FB-EXT effects) force a full default VIEWPORT but DO NOT reset the
-     * scissor — so a render INTO an FBO inherits whatever scissor the previous
-     * SCREEN pass left set (e.g. the menu panel region, in screen
-     * coordinates). Applied to the FBO that wrongly clips the blit, leaving
-     * most of the FBO at its cleared (black) value — the "dark menu blur" /
-     * empty post-process result. The caller will set its own scissor if it
-     * needs one; until then, don't clip the FBO. (Switching back to fb 0
-     * re-applies the screen scissor via fast3d's viewport_or_scissor_changed.) */
+     * Per the GL spec the scissor box is GLOBAL context state and is NOT changed
+     * by a framebuffer bind, so the default build leaves it untouched (the app's
+     * scissor survives the bind, exactly like desktop GL). fast3d-style backends
+     * that force a full VIEWPORT for their 2D blits but DON'T reset the scissor
+     * (so an FBO render wrongly inherits the previous screen pass's scissor —
+     * the "dark menu blur" symptom) can opt back into the auto-reset. */
+#ifdef NOVAGL_FBO_RESET_SCISSOR
     if (g.bound_fbo != 0) {
         GLuint ctex = g.fbos[framebuffer].color_tex_id;
         int lw = (ctex > 0 && ctex < NOVA_MAX_TEXTURES && g.textures[ctex].allocated)
@@ -143,10 +171,8 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
         g.scissor_y = 0;
         g.scissor_w = lw;
         g.scissor_h = lh;
-        /* apply_gpu_state re-applies the scissor from g.scissor_* before the
-         * next draw; with the full-FBO box it covers everything. fast3d
-         * re-sets its own scissor on the next screen pass. */
     }
+#endif
 
     // Форсируем обновление матриц, чтобы снялась/оделась матрица 'tilt'
     g.matrices_dirty = 1;
@@ -154,16 +180,45 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
 
 GLuint novaGetScreenTextureId(void) { return g.app_screen_tex_id; }
 
-void glGenRenderbuffers(GLsizei n, GLuint *ids) { for (GLsizei i = 0; i < n; i++) ids[i] = i + 1; }
+/* Renderbuffers carry no real state on NovaGL — FBO color attachments are
+ * textures and the depth/stencil is created with the render target. But the
+ * names must still be UNIQUE across calls (the old `ids[i] = i+1` handed out
+ * 1..n every call, guaranteeing collisions). A tiny file-static in-use pool
+ * gives spec-correct unique allocation without bloating the GL context. */
+#define NOVA_MAX_RBOS 256
+static uint8_t s_rbo_in_use[NOVA_MAX_RBOS];
+static GLuint  s_bound_rbo = 0;
+
+void glGenRenderbuffers(GLsizei n, GLuint *ids) {
+    if (n < 0) { gl_set_error(GL_INVALID_VALUE); return; }
+    if (!ids) return;
+    for (GLsizei i = 0; i < n; i++) {
+        GLuint id = 0;
+        for (int slot = 1; slot < NOVA_MAX_RBOS; slot++) {
+            if (!s_rbo_in_use[slot]) { s_rbo_in_use[slot] = 1; id = (GLuint) slot; break; }
+        }
+        if (!id) gl_set_error(GL_OUT_OF_MEMORY);
+        ids[i] = id;
+    }
+}
 
 void glDeleteRenderbuffers(GLsizei n, const GLuint *ids) {
-    (void) n;
-    (void) ids;
+    if (n < 0) { gl_set_error(GL_INVALID_VALUE); return; }
+    if (!ids) return;
+    for (GLsizei i = 0; i < n; i++) {
+        GLuint id = ids[i];
+        if (id > 0 && id < NOVA_MAX_RBOS && s_rbo_in_use[id]) {
+            s_rbo_in_use[id] = 0;
+            if (s_bound_rbo == id) s_bound_rbo = 0;
+        }
+    }
 }
 
 void glBindRenderbuffer(GLenum target, GLuint renderbuffer) {
-    (void) target;
-    (void) renderbuffer;
+    if (target != GL_RENDERBUFFER) { gl_set_error(GL_INVALID_ENUM); return; }
+    /* Binding an unused non-zero name creates it (GL semantics). */
+    if (renderbuffer != 0 && renderbuffer < NOVA_MAX_RBOS) s_rbo_in_use[renderbuffer] = 1;
+    s_bound_rbo = renderbuffer;
 }
 
 void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height) {
@@ -181,11 +236,28 @@ void glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbu
 }
 
 void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *pixels) {
-    (void) type;
-    if (!pixels || width <= 0 || height <= 0) return;
+    /* Spec: negative dims are GL_INVALID_VALUE; only GL_UNSIGNED_BYTE is the
+     * mandated/implemented type here (PICA colour buffer is RGBA8). */
+    if (width < 0 || height < 0) { gl_set_error(GL_INVALID_VALUE); return; }
+    if (type != GL_UNSIGNED_BYTE) { gl_set_error(GL_INVALID_ENUM); return; }
 
-    int bpp = (format == GL_RGB) ? 3 : 4;
-    size_t total = (size_t) width * (size_t) height * (size_t) bpp;
+    /* Number of output channels by GL format. */
+    int bpp;
+    switch (format) {
+        case GL_RGBA: case GL_BGRA: bpp = 4; break;
+        case GL_RGB:  case GL_BGR:  bpp = 3; break;
+        case GL_LUMINANCE_ALPHA:    bpp = 2; break;
+        case GL_LUMINANCE: case GL_ALPHA:
+        case GL_RED: case GL_GREEN: case GL_BLUE: bpp = 1; break;
+        default: gl_set_error(GL_INVALID_ENUM); return;
+    }
+    if (!pixels || width == 0 || height == 0) return;
+
+    /* Output rows are padded to GL_PACK_ALIGNMENT (default 4). */
+    int pack = g.pack_alignment > 0 ? g.pack_alignment : 1;
+    int row_bytes = width * bpp;
+    int dst_stride = (row_bytes + pack - 1) & ~(pack - 1);
+    size_t total = (size_t) dst_stride * (size_t) height;
 
     if (!g.current_target) {
         memset(pixels, 0, total);
@@ -220,7 +292,8 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
      * relative to the soft path, so it stays off by default. */
 #ifdef NOVAGL_ENABLE_GLREADPIXELS_HW
     if (g.bound_fbo == 0 && x == 0 && y == 0 &&
-        width == fb_h && height == fb_w && bpp == 4) {
+        width == fb_h && height == fb_w && format == GL_RGBA &&
+        dst_stride == width * 4) {
         u32 transfer_flags = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) |
                              GX_TRANSFER_RAW_COPY(0) |
                              GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
@@ -266,35 +339,77 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
             uint8_t b = (uint8_t) ((pixel >> 8) & 0xFF);
             uint8_t a = (uint8_t) (pixel & 0xFF);
 
-            uint8_t *out = dst + ((size_t) row * (size_t) width + (size_t) col) * (size_t) bpp;
-            out[0] = r;
-            out[1] = g_;
-            out[2] = b;
-            if (bpp == 4) out[3] = a;
+            uint8_t *out = dst + (size_t) row * (size_t) dst_stride + (size_t) col * (size_t) bpp;
+            switch (format) {
+                case GL_RGBA: out[0]=r; out[1]=g_; out[2]=b; out[3]=a; break;
+                case GL_RGB:  out[0]=r; out[1]=g_; out[2]=b;          break;
+                case GL_BGRA: out[0]=b; out[1]=g_; out[2]=r; out[3]=a; break;
+                case GL_BGR:  out[0]=b; out[1]=g_; out[2]=r;          break;
+                case GL_LUMINANCE_ALPHA:
+                    out[0] = (uint8_t)((r*77 + g_*150 + b*29) >> 8); out[1] = a; break;
+                case GL_LUMINANCE:
+                    out[0] = (uint8_t)((r*77 + g_*150 + b*29) >> 8); break;
+                case GL_ALPHA: out[0] = a;  break;
+                case GL_RED:   out[0] = r;  break;
+                case GL_GREEN: out[0] = g_; break;
+                case GL_BLUE:  out[0] = b;  break;
+                default: break;
+            }
         }
     }
 }
 
 void glPixelStorei(GLenum pname, GLint param) {
+    /* Validate pname first so an unknown pname is GL_INVALID_ENUM regardless of
+     * the param value (spec ordering). */
+    if (pname != GL_UNPACK_ALIGNMENT && pname != GL_PACK_ALIGNMENT) {
+        gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
     if (param != 1 && param != 2 && param != 4 && param != 8) {
-        g.last_error = GL_INVALID_VALUE;
+        gl_set_error(GL_INVALID_VALUE);
         return;
     }
     if (pname == GL_UNPACK_ALIGNMENT) g.unpack_alignment = param;
-    else if (pname == GL_PACK_ALIGNMENT) g.pack_alignment = param;
+    else g.pack_alignment = param;
 }
 
 void glPixelStoref(GLenum pname, GLfloat param) { glPixelStorei(pname, (GLint) param); }
 void glDrawBuffer(GLenum mode) { (void) mode; }
 
+#ifndef GL_STENCIL_ATTACHMENT
+#define GL_STENCIL_ATTACHMENT 0x8D20
+#endif
 void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
-    (void) target;
-    (void) attachment;
-    (void) textarget;
-    (void) level;
+    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
+        gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    /* NovaGL only wires a colour texture; depth/stencil come from the render
+     * target itself, so DEPTH/STENCIL attachments are accepted as a no-op. Any
+     * other attachment enum is invalid. */
+    if (attachment == GL_DEPTH_ATTACHMENT || attachment == GL_STENCIL_ATTACHMENT ||
+        attachment == GL_DEPTH_STENCIL_ATTACHMENT) {
+        return;
+    }
+    if (attachment != GL_COLOR_ATTACHMENT0) {
+        gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    /* textarget must be a 2D image (2D or a cube face); level 0 only (NovaGL
+     * renders into the base level). */
+    if (textarget != GL_TEXTURE_2D &&
+        !(textarget >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && textarget <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z)) {
+        gl_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    if (level != 0) {
+        gl_set_error(GL_INVALID_VALUE);
+        return;
+    }
 
     if (g.bound_fbo == 0 || g.bound_fbo >= NOVA_MAX_FBOS || !g.fbos[g.bound_fbo].in_use) {
-        g.last_error = GL_INVALID_OPERATION;
+        gl_set_error(GL_INVALID_OPERATION);
         return;
     }
     FBOSlot *fbo = &g.fbos[g.bound_fbo];
@@ -309,20 +424,32 @@ void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, 
     }
 
     if (texture >= NOVA_MAX_TEXTURES || !g.textures[texture].in_use || !g.textures[texture].allocated) {
-        g.last_error = GL_INVALID_OPERATION;
+        gl_set_error(GL_INVALID_OPERATION);
         return;
     }
     TexSlot *slot = &g.textures[texture];
+
+    // PICA render targets must be VRAM-resident. A texture created through the
+    // stock glTexImage2D path lives in linear RAM; re-home it in VRAM before
+    // wrapping it as a color attachment, otherwise the GPU renders to the wrong
+    // physical window and later samples come back as garbage.
+    if (!nova_texture_make_vram_target(texture)) {
+        gl_set_error(GL_INVALID_OPERATION);
+        return;
+    }
 
     if (fbo->target) {
         nova_queue_render_target_delete(fbo->target);
         fbo->target = NULL;
     }
-    fbo->target = C3D_RenderTargetCreateFromTex(&slot->tex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH16);
+    /* D24S8 (not D16) so FBO depth precision + stencil match the main screen and
+     * the glClear / inverted-depth packing (which produces 24-bit depth + 8-bit
+     * stencil); a 16-bit FBO depth buffer silently lost stencil and z-fought. */
+    fbo->target = C3D_RenderTargetCreateFromTex(&slot->tex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH24_STENCIL8);
     fbo->color_tex_id = texture;
 
     if (!fbo->target) {
-        g.last_error = GL_OUT_OF_MEMORY;
+        gl_set_error(GL_OUT_OF_MEMORY);
         return;
     }
 
@@ -333,20 +460,34 @@ void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, 
 }
 
 GLenum glCheckFramebufferStatus(GLenum target) {
-    (void) target;
-    return GL_FRAMEBUFFER_COMPLETE;
+#ifndef GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT
+#define GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT 0x8CD6
+#endif
+    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
+        gl_set_error(GL_INVALID_ENUM);
+        return 0;
+    }
+    /* The default framebuffer (fb 0) is always complete. An app FBO is complete
+     * only once it has a colour attachment (a live C3D render target). */
+    if (g.bound_fbo == 0) return GL_FRAMEBUFFER_COMPLETE;
+    if (g.bound_fbo < NOVA_MAX_FBOS && g.fbos[g.bound_fbo].in_use && g.fbos[g.bound_fbo].target)
+        return GL_FRAMEBUFFER_COMPLETE;
+    return GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
 }
 
 void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1,
                        GLint dstY1, GLbitfield mask, GLenum filter) {
-    // PICA have no rect->rect blit with scaling, so we cheat with the fullscreen
-    // quad from novaBlitTargetToFBO. src/dst rects ignored, always full->full,
-    // always color, always linear. covers basicaly every engine case (resolve,
-    // snapshot, motion blur), the rest nobody hit yet.
+    // PICA has no rect->rect blit with scaling, so we cheat with the fullscreen
+    // quad from novaBlitTargetToFBO. src/dst rects are ignored (always
+    // full->full, color only, linear), but we DO honour the separate read/draw
+    // bindings: the GL_READ_FRAMEBUFFER is the source and the GL_DRAW_FRAMEBUFFER
+    // (g.bound_fbo) is the destination. Covers the engine cases that matter —
+    // Butterscotch's letterbox present (surface->screen) and surface->surface
+    // copies — plus the resolve/snapshot/motion-blur uses.
     (void) srcX0; (void) srcY0; (void) srcX1; (void) srcY1;
     (void) dstX0; (void) dstY0; (void) dstX1; (void) dstY1;
     (void) mask;  (void) filter;
-    novaBlitTargetToFBO(g.bound_fbo, /*dst*/ 0); /* common case: blit FBO→screen */
+    novaBlitTargetToFBO(g.bound_read_fbo, g.bound_fbo);
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +525,7 @@ int novaCreateRenderTextureFBO(int width, int height, int has_depth,
     GLuint tex_id = 1;
     while (tex_id < NOVA_MAX_TEXTURES && g.textures[tex_id].in_use) tex_id++;
     if (tex_id == NOVA_MAX_TEXTURES) {
-        g.last_error = GL_OUT_OF_MEMORY;
+        gl_set_error(GL_OUT_OF_MEMORY);
         *out_tex_id = 0;
         *out_fbo_id = 0;
         return 0;
@@ -395,12 +536,13 @@ int novaCreateRenderTextureFBO(int width, int height, int has_depth,
 
     if (!C3D_TexInitVRAM(&slot->tex, (u16) pot_w, (u16) pot_h, GPU_RGBA8)) {
         slot->in_use = 0;
-        g.last_error = GL_OUT_OF_MEMORY;
+        gl_set_error(GL_OUT_OF_MEMORY);
         *out_tex_id = 0;
         *out_fbo_id = 0;
         return 0;
     }
     slot->allocated = 1;
+    slot->is_vram = 1;
     slot->width = width;
     slot->height = height;
     slot->orig_width = width;
@@ -432,7 +574,7 @@ int novaCreateRenderTextureFBO(int width, int height, int has_depth,
         memset(&slot->tex, 0, sizeof(slot->tex));
         slot->allocated = 0;
         slot->in_use = 0;
-        g.last_error = GL_OUT_OF_MEMORY;
+        gl_set_error(GL_OUT_OF_MEMORY);
         *out_tex_id = 0;
         *out_fbo_id = 0;
         return 0;
@@ -442,11 +584,13 @@ int novaCreateRenderTextureFBO(int width, int height, int has_depth,
     memset(fbo, 0, sizeof(*fbo));
     fbo->in_use = 1;
 
-    /* C3D_DEPTHTYPE is a transparent union — passing GPU_RB_DEPTH16 picks
+    /* C3D_DEPTHTYPE is a transparent union — passing GPU_RB_DEPTH24_STENCIL8 picks
      * the enum branch, passing -1 (int) picks the "no depth" sentinel. */
     if (has_depth) {
+        /* D24S8 to match the screen + glClear/stencil packing (see
+         * glFramebufferTexture2D). */
         fbo->target = C3D_RenderTargetCreateFromTex(&slot->tex, GPU_TEXFACE_2D, 0,
-                                                    GPU_RB_DEPTH16);
+                                                    GPU_RB_DEPTH24_STENCIL8);
     } else {
         fbo->target = C3D_RenderTargetCreateFromTex(&slot->tex, GPU_TEXFACE_2D, 0, -1);
     }
@@ -456,7 +600,7 @@ int novaCreateRenderTextureFBO(int width, int height, int has_depth,
         memset(&slot->tex, 0, sizeof(slot->tex));
         slot->allocated = 0;
         slot->in_use = 0;
-        g.last_error = GL_OUT_OF_MEMORY;
+        gl_set_error(GL_OUT_OF_MEMORY);
         *out_tex_id = 0;
         *out_fbo_id = 0;
         return 0;
@@ -533,11 +677,26 @@ int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
      * logical region, leaving POT padding untouched. */
     C3D_RenderTarget *dst_tgt;
     int dst_logical_w, dst_logical_h;
+    /* dst == "fb 0" is the logical screen. The source FBO is stored LANDSCAPE
+     * (FBOs never get the per-draw tilt — see utils.c), but the screen is stored
+     * SIDEWAYS, so a present into it must rotate 90°. We flag that here and apply
+     * the tilt to the blit quad's projection below. */
+    int dst_is_screen = (dst_fbo_id == 0);
     if (dst_fbo_id == 0) {
-        if (!g.app_target) return 0;
-        dst_tgt = g.app_target;
-        dst_logical_w = g.app_logical_w;
-        dst_logical_h = g.app_logical_h;
+        /* Prefer the POT app surface (presented later by novaSwapBuffers); if the
+         * app surface is disabled (NOVAGL_APP_SURFACE=0, the default) blit
+         * straight onto the physical top LCD render target instead. */
+        if (g.app_target) {
+            dst_tgt = g.app_target;
+            dst_logical_w = g.app_logical_w;
+            dst_logical_h = g.app_logical_h;
+        } else if (g.render_target_top) {
+            dst_tgt = g.render_target_top;
+            dst_logical_w = (int) g.render_target_top->frameBuf.width;
+            dst_logical_h = (int) g.render_target_top->frameBuf.height;
+        } else {
+            return 0;
+        }
     } else {
         if (dst_fbo_id >= NOVA_MAX_FBOS || !g.fbos[dst_fbo_id].in_use ||
             !g.fbos[dst_fbo_id].target) {
@@ -645,13 +804,30 @@ int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
     if (g.shader_clipspace_dvlb) {
         C3D_BindProgram(&g.shader_clipspace_program);
         g.active_shader = NOVA_SHADER_CLIPSPACE;
-        /* Upload identity projection — the quad is already in clip space.
-         * Skip the screen tilt: we're rendering to an FBO that the engine
-         * will sample with its own UV conventions, no rotation needed. */
-        C3D_Mtx identity;
-        Mtx_Identity(&identity);
+        /* The quad is already in clip space. For an FBO->FBO copy upload identity
+         * (landscape->landscape, no rotation). For a present onto the logical
+         * screen, upload the SAME 90° tilt the normal per-draw path uses (see
+         * utils.c) so the landscape source lands upright on the sideways screen.
+         * Keep NOVAGL_TILT_VARIANT in sync with utils.c. */
+        C3D_Mtx clip_proj;
+        Mtx_Identity(&clip_proj);
+        if (dst_is_screen) {
+            #ifndef NOVAGL_TILT_VARIANT
+            #define NOVAGL_TILT_VARIANT 1
+            #endif
+            #if NOVAGL_TILT_VARIANT == 1
+            clip_proj.r[0].x = 0.0f; clip_proj.r[0].y =  1.0f;
+            clip_proj.r[1].x = -1.0f; clip_proj.r[1].y = 0.0f;
+            #elif NOVAGL_TILT_VARIANT == 2
+            clip_proj.r[0].x = 0.0f; clip_proj.r[0].y = -1.0f;
+            clip_proj.r[1].x = 1.0f;  clip_proj.r[1].y = 0.0f;
+            #elif NOVAGL_TILT_VARIANT == 3
+            clip_proj.r[0].x = -1.0f; clip_proj.r[0].y = 0.0f;
+            clip_proj.r[1].x = 0.0f;  clip_proj.r[1].y = -1.0f;
+            #endif
+        }
         if (g.uLoc_projection_clipspace >= 0) {
-            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection_clipspace, &identity);
+            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection_clipspace, &clip_proj);
         }
     }
 
