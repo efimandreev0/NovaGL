@@ -1540,6 +1540,19 @@ int novaCreateRenderTextureFBO(int width, int height, int has_depth,
  * and don't bother saving them register-by-register. */
 int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id);
 
+/* Copy the app surface into the previous-frame snapshot. Call once at the
+ * top of every frame (before its clear/draws): while frame F is being built
+ * the snapshot then holds the fully-presented frame F-1 — i.e. the N64/PC
+ * "front buffer". No-op when the app surface or the snapshot is absent. */
+void novaSnapshotAppSurface(void);
+
+/* Blit the previous-frame snapshot (front buffer) into dst FBO. Falls back
+ * to the live app surface when the snapshot isn't allocated. Use for
+ * PD-style "capture what the player currently SEES" effects (menu blur,
+ * damage blur); novaBlitTargetToFBO(0, dst) stays the mid-frame back-buffer
+ * capture. */
+int novaBlitSnapshotToFBO(GLuint dst_fbo_id);
+
 /* ------------------------------------------------------------------------
  * Explicit TEV stage programming (multi-stage CC support)
  * ------------------------------------------------------------------------

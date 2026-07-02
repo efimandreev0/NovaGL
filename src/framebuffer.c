@@ -823,7 +823,9 @@ int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
         }
     }
     if (!dst_tgt || !bind_tex) return 0;
-    if (src_fbo_id == dst_fbo_id) return 0; /* self-copy is a no-op */
+    /* Self-copy is a no-op — except with the snapshot override, where "src 0"
+     * is really the previous-frame texture, not the live target. */
+    if (src_fbo_id == dst_fbo_id && !s_blit_src_override) return 0;
 
     /* --- Commit any pending draws so source is in VRAM ------------------ */
     C3D_FrameSplit(0);
