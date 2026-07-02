@@ -635,6 +635,34 @@ void nova_invalidate_state_cache(void);
 
 void novaSwapBuffers(void);
 
+/* ------------------------------------------------------------------------
+ * Frame buffering depth (single / double / triple)
+ * ------------------------------------------------------------------------
+ * Selects how many frames the CPU may run ahead of the GPU:
+ *   1 = single  — SYNCDRAW: the CPU waits for the GPU each frame. Lowest
+ *                 latency + lowest memory; no CPU/GPU overlap. (Default.)
+ *   2 = double  — the CPU builds frame N+1 while the GPU renders frame N
+ *                 (~20–40% more FPS on GPU-bound scenes).
+ *   3 = triple  — the CPU may run up to two frames ahead (smoother under
+ *                 uneven frame times, highest memory + latency).
+ *
+ * With 2/3, NovaGL keeps that many copies of the vertex/index ring buffers
+ * and defers texture/render-target deletion by the same number of frames, so
+ * the GPU never reads a buffer the CPU has overwritten or freed — async is
+ * SAFE (no black/swapping textures). The cost is N× the ring memory
+ * (per-slot = the sizes passed to nova_init_ex; default ~2.5MB each).
+ *
+ * Call this BEFORE nova_init() / nova_init_ex(); the buffers are allocated at
+ * init. After init it has no effect. Out-of-range values are clamped to 1..3.
+ * If a slot allocation runs out of linear RAM, NovaGL falls back to fewer
+ * buffers automatically. The compile-time default is NOVAGL_FRAME_BUFFERS
+ * (1, or 2 if the legacy -DNOVAGL_ASYNC_FRAME is set). */
+void novaSetFrameBuffers(int count);
+
+/* Returns the active frame-buffer count (1/2/3) after init, or 0 if not yet
+ * initialized (or if a fallback reduced it). */
+int novaGetFrameBuffers(void);
+
 int novaGetEyeCount(void);
 
 void novaBeginEye(int eye);

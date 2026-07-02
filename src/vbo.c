@@ -337,10 +337,12 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
         return;
     }
 
-#ifndef NOVAGL_LENIENT_BUFFERSUBDATA
-    /* Spec behaviour (default): writing past the buffer's data store is
-     * GL_INVALID_VALUE with no effect. Define NOVAGL_LENIENT_BUFFERSUBDATA to
-     * restore the old auto-grow leniency for ports that relied on it. */
+#ifdef NOVAGL_STRICT_BUFFERSUBDATA
+    /* Strict spec behaviour (opt-in): writing past the buffer's data store is
+     * GL_INVALID_VALUE with no effect. The DEFAULT keeps the lenient auto-grow
+     * below — several ports issue a glBufferSubData slightly past the current
+     * size and rely on it extending the store rather than failing (a failed
+     * sub-update would leave stale geometry). */
     if (!slot->allocated || (GLsizeiptr)(offset + size) > slot->size) {
         gl_set_error(GL_INVALID_VALUE);
         return;
@@ -443,9 +445,11 @@ void *glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitf
     GLenum err; VBOSlot *slot = map_resolve_slot_err(target, &err);
     if (!slot) { gl_set_error(err); return NULL; }
     if (slot->mapped) { gl_set_error(GL_INVALID_OPERATION); return NULL; }
-    /* Spec: offset>=0, length>=0, offset+length must lie within the buffer
-     * (unless INVALIDATE_BUFFER grows it — we don't, so be strict). */
-    if (offset < 0 || length < 0 || offset + length > slot->size) {
+    /* offset>=0, length>=0, and the range must fit the allocated store. Check
+     * against CAPACITY (not the logical size) so ports that map a region beyond
+     * the last glBufferData size — common with streaming ring buffers — still
+     * get a valid pointer rather than a spurious GL_INVALID_VALUE. */
+    if (offset < 0 || length < 0 || offset + length > slot->capacity) {
         gl_set_error(GL_INVALID_VALUE);
         return NULL;
     }

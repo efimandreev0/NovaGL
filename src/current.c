@@ -355,18 +355,26 @@ void glLightfv(GLenum light, GLenum pname, const GLfloat *params) {
             L->specular[2] = params[2]; L->specular[3] = params[3];
             break;
         case GL_POSITION: {
-            /* Spec: GL_POSITION is transformed by the current MODELVIEW matrix at
-             * call time and stored in eye space (which is what the HW light env
-             * consumes). A directional light (w==0) drops the translation column
-             * automatically via the w term. */
+            /* Spec says GL_POSITION is transformed by the current MODELVIEW into
+             * eye space at call time. NovaGL stores it RAW by default (the
+             * historical behaviour the HW light env was tuned against — see
+             * [[novagl-hw-lighting]]); the spec-correct modelview transform is
+             * opt-in via -DNOVAGL_GL_LIGHT_EYE_SPACE=1, since flipping it can
+             * shift where existing ports' lights land. */
+#ifdef NOVAGL_GL_LIGHT_EYE_SPACE
             const C3D_Mtx *mv = &g.mv_stack[g.mv_sp];
             for (int i = 0; i < 4; i++) {
                 L->position[i] = mv->r[i].x * params[0] + mv->r[i].y * params[1] +
                                  mv->r[i].z * params[2] + mv->r[i].w * params[3];
             }
+#else
+            L->position[0] = params[0]; L->position[1] = params[1];
+            L->position[2] = params[2]; L->position[3] = params[3];
+#endif
             break;
         }
         case GL_SPOT_DIRECTION: {
+#ifdef NOVAGL_GL_LIGHT_EYE_SPACE
             /* Transformed by the modelview's upper-left 3x3 (direction, no
              * translation). */
             const C3D_Mtx *mv = &g.mv_stack[g.mv_sp];
@@ -374,6 +382,10 @@ void glLightfv(GLenum light, GLenum pname, const GLfloat *params) {
                 L->spot_direction[i] = mv->r[i].x * params[0] + mv->r[i].y * params[1] +
                                        mv->r[i].z * params[2];
             }
+#else
+            L->spot_direction[0] = params[0]; L->spot_direction[1] = params[1];
+            L->spot_direction[2] = params[2];
+#endif
             break;
         }
         case GL_SPOT_EXPONENT:   L->spot_exponent   = params[0]; break;

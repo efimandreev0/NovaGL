@@ -41,19 +41,34 @@
      GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
      GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
-/* Frame submit mode. C3D_FRAME_SYNCDRAW = wait for previous frame before
- * accepting new draws (no tearing, simpler timing). 0 = non-blocking, lets
- * CPU build frame N+1 while GPU still processes N — typically +20–40% FPS
- * on borderline scenes but you have to be careful about state cache reuse
- * across frames (our cache is invalidated on frame boundaries implicitly
- * via novaSwapBuffers's render-target reset, so we're safe).
- *
- * Override at compile time:  -DNOVAGL_FRAME_MODE=0   for async. */
-#ifndef NOVAGL_FRAME_MODE
-#define NOVAGL_FRAME_MODE C3D_FRAME_SYNCDRAW
+/* Frame buffering depth (1 = single/SYNCDRAW, 2 = double, 3 = triple). With K>1
+ * the CPU runs ahead of the GPU (async); NovaGL splits the vertex/index rings
+ * and the texture/FBO orphan GC into K rotating slots so a slot is reused only
+ * K frames later (GPU finished) — making async SAFE. Choose at runtime with
+ * novaSetFrameBuffers() before nova_init(), or set the compile default here.
+ * Legacy -DNOVAGL_ASYNC_FRAME maps to double-buffering (now safe). */
+#ifndef NOVAGL_FRAME_BUFFERS
+#  if defined(NOVAGL_ASYNC_FRAME) && NOVAGL_ASYNC_FRAME
+#    define NOVAGL_FRAME_BUFFERS 2
+#  else
+#    define NOVAGL_FRAME_BUFFERS 1
+#  endif
 #endif
 
 struct NovaState g;
+
+/* Pending frame-buffer count set by novaSetFrameBuffers() before init (0 = use
+ * the compile-time NOVAGL_FRAME_BUFFERS default). Lives outside `g` because
+ * nova_init memsets `g`. */
+static int s_pending_frame_buffers = 0;
+
+void novaSetFrameBuffers(int count) {
+    s_pending_frame_buffers = count; /* clamped to [1,3] in nova_init_ex */
+}
+
+int novaGetFrameBuffers(void) {
+    return g.initialized ? g.frame_buffers : 0;
+}
 
 // stuff we skip on purpose, so nobody ask "why this not fixed" later:
 //
@@ -196,6 +211,36 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
         }
     }
 
+    /* Previous-frame snapshot ("front buffer" emulation). Same POT layout as
+     * the app surface, colour only (never depth-tested). If VRAM is too tight
+     * the snapshot quietly stays NULL and captures fall back to the live app
+     * surface (loses one frame of history but still renders something). */
+    if (g.app_target) {
+        if (C3D_TexInitVRAM(&g.app_prev_tex, (u16) g.app_pot_w, (u16) g.app_pot_h, GPU_RGBA8)) {
+            C3D_TexSetFilter(&g.app_prev_tex, GPU_LINEAR, GPU_LINEAR);
+            C3D_TexSetWrap(&g.app_prev_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+            g.app_prev_target = C3D_RenderTargetCreateFromTex(&g.app_prev_tex, GPU_TEXFACE_2D, 0, -1);
+            if (!g.app_prev_target) {
+                C3D_TexDelete(&g.app_prev_tex);
+                memset(&g.app_prev_tex, 0, sizeof(g.app_prev_tex));
+            } else {
+                /* GPU-clear: CPU-memset нулей до Citra-сэмплера может не доехать. */
+                C3D_RenderTargetClear(g.app_prev_target, C3D_CLEAR_COLOR, 0x00000000, 0);
+            }
+        }
+    }
+
+#if NOVAGL_APP_SURFACE
+    /* Diagnostic: confirm the app surface (the sampleable "fb 0") actually
+     * allocated. If app_target is NULL the screen fell back to the NPOT LCD and
+     * every "copy screen into FBO" effect (PD damage blur / menu backdrop) will
+     * silently no-op. Lands in sdmc:/3ds/pd/stdout.txt. */
+    printf("[NovaGL] APP_SURFACE: app_target=%p app_tex.data=%p prev_target=%p screen_tex_id=%u pot=%dx%d logical=%dx%d\n",
+           (void *)g.app_target, (void *)g.app_tex.data, (void *)g.app_prev_target,
+           (unsigned)g.app_screen_tex_id,
+           g.app_pot_w, g.app_pot_h, g.app_logical_w, g.app_logical_h);
+#endif
+
     g.render_target_bot = C3D_RenderTargetCreate(NOVA_SCREEN_BOTTOM_W, NOVA_SCREEN_BOTTOM_H,
                                                  GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
     C3D_RenderTargetSetOutput(g.render_target_bot, GFX_BOTTOM, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
@@ -268,11 +313,36 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.polygon_offset_fill_enabled = 0;
     apply_depth_map();
 
+    /* Resolve frame buffering depth K (runtime override > compile default),
+     * clamp to [1,3]. K==1 -> SYNCDRAW (CPU waits); K>1 -> async (flag 0). */
+    int K = (s_pending_frame_buffers > 0) ? s_pending_frame_buffers : NOVAGL_FRAME_BUFFERS;
+    if (K < 1) K = 1;
+    if (K > 3) K = 3;
+    g.frame_buffers = K;
+    g.frame_slot = 0;
+    g.c3d_frame_flag = (K > 1) ? 0 : C3D_FRAME_SYNCDRAW;
+
+    /* One vertex + index ring PER frame slot (full per-slot capacity), so the
+     * GPU reading slot s's data is never overwritten by the CPU until that slot
+     * comes round again K frames later. Falls back to fewer/smaller buffers if
+     * an allocation fails (K is reduced so we never index a NULL slot). */
     g.client_array_buf_size = client_array_buf_size;
-    //g.client_array_buf_size = 2 * 1024 * 1024;
-    g.client_array_buf = linearAlloc(g.client_array_buf_size);
     g.index_buf_size = index_buf_size;
-    g.index_buf = linearAlloc(g.index_buf_size);
+    for (int i = 0; i < K; i++) {
+        g.client_array_buf_slots[i] = linearAlloc(client_array_buf_size);
+        g.index_buf_slots[i]        = linearAlloc(index_buf_size);
+        if (!g.client_array_buf_slots[i] || !g.index_buf_slots[i]) {
+            /* Out of linear RAM for this slot — drop back to the slots we have. */
+            if (g.client_array_buf_slots[i]) { linearFree(g.client_array_buf_slots[i]); g.client_array_buf_slots[i] = NULL; }
+            if (g.index_buf_slots[i])        { linearFree(g.index_buf_slots[i]);        g.index_buf_slots[i] = NULL; }
+            if (i == 0) { K = 1; } else { K = i; }
+            g.frame_buffers = K;
+            g.c3d_frame_flag = (K > 1) ? 0 : C3D_FRAME_SYNCDRAW;
+            break;
+        }
+    }
+    g.client_array_buf = g.client_array_buf_slots[0];
+    g.index_buf = g.index_buf_slots[0];
 
     /* Bump from 16384 -> max possible under 16-bit index range. With 4 verts
      * per quad and uint16 indices, the highest packed base is 65532 ⇒ 16383
@@ -344,12 +414,19 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.cur_normal[1] = 0.0f;
     g.cur_normal[2] = 1.0f;
 
-    /* GL spec defaults: depth test DISABLED, depth func GL_LESS. (Previously
-     * NovaGL shipped enabled+LEQUAL, which is non-conformant — a correct port
-     * always sets its own depth state, and code relying on the spec "off"
-     * default was getting unexpected z-rejection.) */
+    /* NovaGL ships depth test ENABLED + GL_LEQUAL by default (NOT the GL spec
+     * default of disabled+GL_LESS). This is an intentional port-compatibility
+     * choice: several 3DS ports render 3D geometry without explicitly enabling
+     * depth, and the spec-strict "off" default silently dropped their world.
+     * A conformant app sets its own depth state regardless. Opt into the strict
+     * spec default with -DNOVAGL_STRICT_DEPTH_DEFAULT=1. */
+#ifdef NOVAGL_STRICT_DEPTH_DEFAULT
     g.depth_test_enabled = 0;
     g.depth_func = GL_LESS;
+#else
+    g.depth_test_enabled = 1;
+    g.depth_func = GL_LEQUAL;
+#endif
     g.depth_mask = GL_TRUE;
     g.clear_depth = 1.0f;
 
@@ -454,7 +531,7 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
 
     g.initialized = 1;
 
-    C3D_FrameBegin(NOVAGL_FRAME_MODE);
+    C3D_FrameBegin(g.c3d_frame_flag);
     g.client_array_buf_offset = 0;
     g.index_buf_offset = 0;
 
@@ -484,6 +561,10 @@ void novaSet3DDepth(float depth) {
 }
 
 void novaBeginEye(int eye) {
+    /* Commit the pending batch under the CURRENT eye's projection before we flip
+     * eye / target (never merge geometry across an eye boundary). */
+    nova_batch_flush();
+
     g.current_eye = eye;
 
     nova_set_render_target(eye);
@@ -502,6 +583,11 @@ void novaBeginEye(int eye) {
  * rotation. Must run inside an open C3D frame, before C3D_FrameEnd. */
 static void nova_present_app(C3D_RenderTarget *lcd) {
     if (!g.app_target || !lcd || !g.app_tex.data) return;
+
+    /* Commit any pending batch into the app surface before we switch target to
+     * the LCD and clobber state (novaSwapBuffers already flushes; belt-and-
+     * suspenders for any direct caller). */
+    nova_batch_flush();
 
     /* Make sure the app-surface render is finished in VRAM before we sample
      * it (render-to-texture → sample-in-same-frame hazard). */
@@ -580,6 +666,95 @@ static void nova_present_app(C3D_RenderTarget *lcd) {
     nova_invalidate_state_cache();
 }
 
+/* Copy the app surface's logical content into the previous-frame snapshot.
+ * Called at the TOP of each frame (before the frame's clear/draws) so that
+ * while frame F is being built the snapshot holds the fully-presented frame
+ * F-1 — the exact "front buffer" a PD-style screen capture expects. Same
+ * sideways layout both sides, so a straight 1:1 quad. Must run inside an
+ * open C3D frame. */
+void novaSnapshotAppSurface(void) {
+    if (!g.app_target || !g.app_tex.data || !g.app_prev_target || !g.app_prev_tex.data) return;
+
+    nova_batch_flush();
+    /* Commit the app surface's writes before sampling it. */
+    C3D_FrameSplit(0);
+
+    C3D_FrameDrawOn(g.app_prev_target);
+
+    C3D_TexEnv *env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, (GPU_TEVSRC) 0, (GPU_TEVSRC) 0);
+    C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+    for (int i = 1; i < 6; i++) {
+        C3D_TexEnv *e = C3D_GetTexEnv(i);
+        C3D_TexEnvInit(e);
+        C3D_TexEnvSrc(e, C3D_Both, GPU_PREVIOUS, (GPU_TEVSRC) 0, (GPU_TEVSRC) 0);
+        C3D_TexEnvFunc(e, C3D_Both, GPU_REPLACE);
+    }
+
+    C3D_TexBind(0, &g.app_tex);
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    C3D_CullFace(GPU_CULL_NONE);
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    /* Logical sub-rect → logical sub-rect, 1:1. */
+    C3D_SetViewport(0, 0, (u32) g.app_logical_w, (u32) g.app_logical_h);
+
+    const float u1 = (float) g.app_logical_w / (float) g.app_pot_w;
+    const float v1 = (float) g.app_logical_h / (float) g.app_pot_h;
+
+    float v[6 * 7];
+    const float corners[6][4] = {
+        {-1.f, -1.f, 0.f, 0.f},
+        { 1.f, -1.f, u1,  0.f},
+        { 1.f,  1.f, u1,  v1 },
+        {-1.f, -1.f, 0.f, 0.f},
+        { 1.f,  1.f, u1,  v1 },
+        {-1.f,  1.f, 0.f, v1 },
+    };
+    for (int i = 0; i < 6; i++) {
+        float *o = &v[i * 7];
+        o[0] = corners[i][0]; o[1] = corners[i][1]; o[2] = 0.f; o[3] = 1.f;
+        o[4] = corners[i][2]; o[5] = corners[i][3];
+        ((uint8_t *) (o + 6))[0] = 255;
+        ((uint8_t *) (o + 6))[1] = 255;
+        ((uint8_t *) (o + 6))[2] = 255;
+        ((uint8_t *) (o + 6))[3] = 255;
+    }
+
+    int prev_clipspace = g.clipspace_mode_enabled;
+    int prev_shader = g.active_shader;
+    if (g.shader_clipspace_dvlb) {
+        C3D_BindProgram(&g.shader_clipspace_program);
+        g.active_shader = NOVA_SHADER_CLIPSPACE;
+        C3D_Mtx id; Mtx_Identity(&id);
+        if (g.uLoc_projection_clipspace >= 0)
+            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection_clipspace, &id);
+    }
+
+    const int bytes = 6 * 28;
+    uint8_t *staged = (uint8_t *) linear_alloc_ring(g.client_array_buf, &g.client_array_buf_offset,
+                                                    bytes, g.client_array_buf_size);
+    if (staged) {
+        memcpy(staged, v, (size_t) bytes);
+        GSPGPU_FlushDataCache(staged, (u32) bytes);
+        nova_setup_attr_info(4);
+        nova_setup_buf_info(staged, 28);
+        C3D_DrawArrays(GPU_TRIANGLES, 0, 6);
+        /* Resolve the snapshot before anything samples it. */
+        C3D_FrameSplit(0);
+    }
+
+    g.active_shader = prev_shader;
+    g.clipspace_mode_enabled = prev_clipspace;
+
+    /* Back to the app surface for the frame's real draws. */
+    C3D_FrameDrawOn(g.app_target);
+    g.current_target = g.app_target;
+    nova_invalidate_state_cache();
+}
+
 /* Frame-rate cap. citro3d's C3D_FRAME_SYNCDRAW only waits for the GPU to
  * finish drawing — it does NOT pace the CPU loop to the display. On real
  * hardware the slow ARM11 hides this, but under Citra the GPU "finishes"
@@ -594,6 +769,9 @@ static void nova_present_app(C3D_RenderTarget *lcd) {
 #endif
 
 void novaSwapBuffers(void) {
+    /* Commit any pending batch before the frame ends + the ring slot rotates —
+     * an un-issued batch's verts would be lost when its slot is reused. */
+    nova_batch_flush();
     /* Present the app surface to the physical top LCD before ending the frame. */
     if (g.app_target) nova_present_app(g.render_target_top);
 
@@ -601,16 +779,23 @@ void novaSwapBuffers(void) {
 #if NOVAGL_VSYNC
     gspWaitForVBlank();
 #endif
-    nova_fbo_gc_collect();
 
-    C3D_FrameBegin(NOVAGL_FRAME_MODE);
+    /* Rotate to the next frame slot. The vertex/index rings and the orphan GC
+     * buckets for THIS slot were last used `frame_buffers` frames ago, so the
+     * GPU has finished them — they're safe to reuse/free now. (K==1 is the old
+     * 1-frame deferral, safe because C3D_FrameBegin below runs SYNCDRAW.) */
+    g.frame_slot = (g.frame_slot + 1) % g.frame_buffers;
 
-    /* SYNCDRAW above waited for the previous frame to finish on the GPU, so
-     * texture storage orphaned during that frame is reclaimable now. (If
-     * NOVAGL_FRAME_MODE is ever overridden to async (0), this would need a
-     * two-frame delay instead.) */
-    nova_tex_gc_collect();
+    nova_fbo_gc_collect();              /* free this slot's orphaned FBO targets */
 
+    C3D_FrameBegin(g.c3d_frame_flag);   /* SYNCDRAW (K==1) waits; async (K>1) doesn't */
+
+    nova_tex_gc_collect();              /* free this slot's orphaned textures   */
+
+    /* Point the active rings at this slot's buffers and reset their offsets —
+     * the GPU is done with whatever was here K frames ago. */
+    g.client_array_buf = g.client_array_buf_slots[g.frame_slot];
+    g.index_buf        = g.index_buf_slots[g.frame_slot];
     g.client_array_buf_offset = 0;
     g.index_buf_offset = 0;
 
@@ -627,6 +812,9 @@ void novaSwapBuffers(void) {
 void nova_fini(void) {
     if (!g.initialized) return;
 
+    /* Commit any pending batch before the final C3D_FrameEnd. */
+    nova_batch_flush();
+
     // Когда nova_fini зовут из главного цикла после break, мы находимся
     // МЕЖДУ FrameBegin (последний swap) и невыполненным FrameEnd — то есть у
     // GPU ещё открыт кадр на наших render_target_top/_right/_bot. Если сразу
@@ -636,11 +824,16 @@ void nova_fini(void) {
     C3D_FrameEnd(0);
     gspWaitForP3D();
 
-    /* GPU is idle now — flush any texture storage still parked in the GC. */
-    nova_tex_gc_collect();
+    /* GPU is idle now — flush ALL frame slots of orphaned texture/FBO storage. */
+    nova_tex_gc_collect_all();
+    nova_fbo_gc_collect_all();
 
-    if (g.client_array_buf) linearFree(g.client_array_buf);
-    if (g.index_buf) linearFree(g.index_buf);
+    for (int i = 0; i < g.frame_buffers; i++) {
+        if (g.client_array_buf_slots[i]) linearFree(g.client_array_buf_slots[i]);
+        if (g.index_buf_slots[i])        linearFree(g.index_buf_slots[i]);
+    }
+    g.client_array_buf = NULL;
+    g.index_buf = NULL;
 
     if (g.tex_staging) {
         free(g.tex_staging);
@@ -682,7 +875,7 @@ void nova_fini(void) {
         DVLB_Free(g.shader_clipspace_dvlb);
     }
 
-    nova_fbo_gc_collect();
+    /* FBO orphans already flushed (all slots) above via nova_fbo_gc_collect_all. */
 
     if (g.app_target) {
         C3D_RenderTargetDelete(g.app_target);
@@ -700,6 +893,10 @@ void nova_fini(void) {
 }
 
 void nova_set_render_target(int target_mode) {
+    /* Switching the draw target with an open batch would draw the old run into
+     * the new target — commit it first (every branch below does C3D_FrameDrawOn
+     * with no preceding split). */
+    nova_batch_flush();
     if (target_mode == 1) {
         /* Lazy-init right-eye target on first use — see comment in nova_init_ex. */
         if (!g.render_target_top_right) {
@@ -776,7 +973,172 @@ static int packed_ptc_attr_compatible(GLint size, GLenum type, GLsizei stride, c
            size <= max_size;
 }
 
+/* ── Near-plane triangle clipping ───────────────────────────────────────────
+ * PICA's clip-z range is [-w, 0] (not GL's [-w, w]); the vertex shaders only
+ * CLAMP z into it (depth-only). So a triangle that straddles the near plane
+ * (a vertex with z < -w, i.e. z+w < 0) is never properly clipped — its near
+ * vertex projects to a garbage screen position and the triangle drops/distorts
+ * → "see through walls" when close/oblique. PowerVR/vitaGL near-clip in HW so
+ * they don't show it. We clip such triangles on the CPU (Sutherland-Hodgman
+ * against z+w>=0). Two entry points, each with its own vertex layout:
+ *   • novaDrawClipspaceTris (below) — fast3d/PD already hands us clip-space
+ *     xyzw, so we clip in clip space (NovaClipV).
+ *   • nova_basic_near_clip — the GPU-MVP path (e.g. Wolfenstein-RPG walls): we
+ *     replay the shader's MVP only to get each vertex's near distance, then clip
+ *     in MODEL space (NovaModelV) and redraw through the SAME shader, so fog /
+ *     texmtx / depth stay intact.
+ * Both only kick in when a vertex actually crosses near; otherwise the normal
+ * draw path runs. Disable: -DNOVAGL_NO_CLIPSPACE_NEAR_CLIP=1 / -DNOVAGL_NO_NEAR_CLIP=1. */
+#ifndef NOVAGL_NO_CLIPSPACE_NEAR_CLIP
+typedef struct { float x, y, z, w, u, v; uint8_t r, g, b, a; } NovaClipV; /* 28 B */
+
+static inline NovaClipV nova_clipv_lerp(const NovaClipV *a, const NovaClipV *b, float t) {
+    NovaClipV o;
+    o.x = a->x + t * (b->x - a->x); o.y = a->y + t * (b->y - a->y);
+    o.z = a->z + t * (b->z - a->z); o.w = a->w + t * (b->w - a->w);
+    o.u = a->u + t * (b->u - a->u); o.v = a->v + t * (b->v - a->v);
+    o.r = (uint8_t) (a->r + t * ((float) b->r - a->r));
+    o.g = (uint8_t) (a->g + t * ((float) b->g - a->g));
+    o.b = (uint8_t) (a->b + t * ((float) b->b - a->b));
+    o.a = (uint8_t) (a->a + t * ((float) b->a - a->a));
+    return o;
+}
+
+/* Clip one triangle against z + w >= 0 (Sutherland-Hodgman), fan-triangulate the
+ * <=4-vertex result into `out` (<=6 verts). Returns vertices written. */
+static int nova_clip_tri_near(const NovaClipV tri[3], NovaClipV out[6]) {
+    NovaClipV poly[4];
+    int n = 0;
+    for (int i = 0; i < 3 && n < 4; i++) {
+        const NovaClipV *cur = &tri[i];
+        const NovaClipV *nxt = &tri[(i + 1) % 3];
+        float dc = cur->z + cur->w;
+        float dn = nxt->z + nxt->w;
+        int ci = dc >= 0.0f, ni = dn >= 0.0f;
+        if (ci) poly[n++] = *cur;
+        if (ci != ni && n < 4) {
+            float denom = dc - dn;
+            float t = (denom != 0.0f) ? (dc / denom) : 0.0f;
+            poly[n++] = nova_clipv_lerp(cur, nxt, t);
+        }
+    }
+    if (n < 3) return 0;
+    int vc = 0;
+    for (int i = 1; i + 1 < n; i++) {
+        out[vc++] = poly[0]; out[vc++] = poly[i]; out[vc++] = poly[i + 1];
+    }
+    return vc;
+}
+#endif
+
+#ifndef NOVAGL_NO_NEAR_CLIP
+typedef struct { float x, y, z, u, v; uint8_t r, g, b, a; } NovaModelV; /* 24 B = [pos3|uv2|col4] */
+
+static inline NovaModelV nova_modelv_lerp(const NovaModelV *a, const NovaModelV *b, float t) {
+    NovaModelV o;
+    o.x = a->x + t * (b->x - a->x); o.y = a->y + t * (b->y - a->y); o.z = a->z + t * (b->z - a->z);
+    o.u = a->u + t * (b->u - a->u); o.v = a->v + t * (b->v - a->v);
+    o.r = (uint8_t) (a->r + t * ((float) b->r - a->r));
+    o.g = (uint8_t) (a->g + t * ((float) b->g - a->g));
+    o.b = (uint8_t) (a->b + t * ((float) b->b - a->b));
+    o.a = (uint8_t) (a->a + t * ((float) b->a - a->a));
+    return o;
+}
+
+/* Clip a triangle (model-space verts + each vertex's clip-space near distance
+ * d = z+w) against the near plane, fan-triangulate into out[<=6]. Interpolating
+ * the MODEL verts by the clip-space t is exact (MVP is linear, so the model
+ * point at parameter t maps to the clip point at t). Returns vertices written. */
+static int nova_clip_tri_near_model(const NovaModelV tri[3], const float d[3], NovaModelV out[6]) {
+    NovaModelV poly[4];
+    int n = 0;
+    for (int i = 0; i < 3 && n < 4; i++) {
+        int j = (i + 1) % 3;
+        float dc = d[i], dn = d[j];
+        int ci = dc >= 0.0f, ni = dn >= 0.0f;
+        if (ci) poly[n++] = tri[i];
+        if (ci != ni && n < 4) {
+            float denom = dc - dn;
+            float t = (denom != 0.0f) ? (dc / denom) : 0.0f;
+            poly[n++] = nova_modelv_lerp(&tri[i], &tri[j], t);
+        }
+    }
+    if (n < 3) return 0;
+    int vc = 0;
+    for (int i = 1; i + 1 < n; i++) {
+        out[vc++] = poly[0]; out[vc++] = poly[i]; out[vc++] = poly[i + 1];
+    }
+    return vc;
+}
+
+/* Near-clip the GPU-MVP triangle path (basic/texmtx/full shaders). `flat` is the
+ * de-indexed [pos3|uv2|col4]=24B buffer nova_draw_internal builds. We replay the
+ * shader's MVP (final_proj·modelview) on the CPU only to get each vertex's
+ * near-plane distance z+w, then clip in MODEL space and redraw via draw_packed_run
+ * — i.e. through the SAME bound shader, so fog/texmtx/depth are untouched (unlike
+ * a clipspace passthrough, which would drop GL_LINEAR fog and the texture matrix).
+ * Returns 1 if it drew the batch (caller must skip its own draw), else 0. */
+static int nova_basic_near_clip(GLenum mode, GPU_Primitive_t prim, const uint8_t *flat,
+                                int count, int stride, int pos_elements) {
+    if (mode != GL_TRIANGLES || count < 3) return 0;
+    if (stride != 24 || pos_elements != 3) return 0; /* only the [pos3|uv2|col4] layout */
+    if (g.active_shader != NOVA_SHADER_BASIC &&
+        g.active_shader != NOVA_SHADER_TEXMTX &&
+        g.active_shader != NOVA_SHADER_FULL) return 0;
+
+    /* MVP the active shader applies (valid after apply_gpu_state). Pre-fold the z
+     * and w rows into one row 'a' so the near distance is a single dot/vertex:
+     * d = z_clip + w_clip = a·(x,y,z,1). */
+    C3D_Mtx mvp;
+    Mtx_Multiply(&mvp, &g.final_proj_cached, &g.mv_stack[g.mv_sp]);
+    const C3D_FVec rz = mvp.r[2], rw = mvp.r[3];
+    float ax = rz.x + rw.x, ay = rz.y + rw.y, az = rz.z + rw.z, aw = rz.w + rw.w;
+
+    const NovaModelV *vin = (const NovaModelV *) flat;
+
+    /* Pass 1 — does any vertex cross the near plane (z + w < 0)? */
+    int crosses = 0;
+    for (int i = 0; i < count; i++) {
+        const NovaModelV *p = &vin[i];
+        if (ax * p->x + ay * p->y + az * p->z + aw < 0.0f) { crosses = 1; break; }
+    }
+    if (!crosses) return 0;
+
+    /* Pass 2 — clip the crossing triangles (worst case 2 out tris per input). */
+    int in_tris = count / 3;
+    int out_bytes = in_tris * 6 * 24;
+    if (out_bytes > g.client_array_buf_size) return 0;
+    NovaModelV *out = (NovaModelV *) linear_alloc_ring(
+        g.client_array_buf, &g.client_array_buf_offset, out_bytes, g.client_array_buf_size);
+    int out_count = 0;
+    for (int t = 0; t < in_tris; t++) {
+        const NovaModelV *tri = &vin[t * 3];
+        float d[3];
+        for (int k = 0; k < 3; k++) {
+            const NovaModelV *p = &tri[k];
+            d[k] = ax * p->x + ay * p->y + az * p->z + aw;
+        }
+        out_count += nova_clip_tri_near_model(tri, d, &out[out_count]);
+    }
+    if (out_count == 0) return 1; /* whole batch behind near — nothing to draw */
+
+    GSPGPU_FlushDataCache(out, (u32) (out_count * 24));
+    draw_packed_run(mode, prim, (uint8_t *) out, out_count, 24, pos_elements);
+    return 1;
+}
+#else
+static inline int nova_basic_near_clip(GLenum mode, GPU_Primitive_t prim, const uint8_t *flat,
+                                       int count, int stride, int pos_elements) {
+    (void) mode; (void) prim; (void) flat; (void) count; (void) stride; (void) pos_elements;
+    return 0;
+}
+#endif
+
 void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements, GLenum type, const GLvoid *indices) {
+    /* If this app mixes the clipspace fast-lane with the generic draw path,
+     * commit any pending clipspace batch first so draw order is preserved.
+     * No-op for pure-clipspace (PD) and pure-generic (other ports) callers. */
+    nova_batch_flush();
     /* Spec validation order matters: GL_INVALID_ENUM for bad mode/type,
      * GL_INVALID_VALUE for negative count/first — all before any drawing.
      * Compiled out under NOVAGL_NO_DEBUG: the enum/value checks become pure
@@ -821,15 +1183,6 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
         return;
     }
 #endif
-
-    /* Drawing into a bound-but-incomplete FBO (no colour attachment) is
-     * GL_INVALID_FRAMEBUFFER_OPERATION with no draw — otherwise the geometry
-     * would silently land on whatever target the GPU last drew to. */
-    if (g.bound_fbo != 0 &&
-        (g.bound_fbo >= NOVA_MAX_FBOS || !g.fbos[g.bound_fbo].in_use || !g.fbos[g.bound_fbo].target)) {
-        gl_set_error(GL_INVALID_FRAMEBUFFER_OPERATION);
-        return;
-    }
 
     if (g.va_vertex.enabled && g.va_vertex.vbo_id > 0 && g.va_vertex.vbo_id < NOVA_MAX_VBOS) {
         if (!g.vbos[g.va_vertex.vbo_id].allocated || g.vbos[g.va_vertex.vbo_id].data == NULL) return;
@@ -1166,7 +1519,13 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
             C3D_DrawArrays(prim, 0, count);
         }
     } else {
-        draw_packed_run(mode, prim, dst_start, count, internal_stride, pos_elements);
+        /* GPU-MVP path: near-clip triangles that straddle the near plane (e.g.
+         * Wolfenstein-RPG walls under the real projection) before they reach
+         * PICA, which can't near-clip them. Falls through to the normal draw
+         * when nothing crosses near (the common case). */
+        if (!nova_basic_near_clip(mode, prim, dst_start, count, internal_stride, pos_elements)) {
+            draw_packed_run(mode, prim, dst_start, count, internal_stride, pos_elements);
+        }
     }
     cleanup_vbo_stream();
 }
@@ -1177,17 +1536,65 @@ GLenum glGetError(void) {
     return e;
 }
 
+/* NovaClipV + nova_clip_tri_near + nova_basic_near_clip are defined above
+ * nova_draw_internal (both draw paths share them). */
+
 void novaDrawClipspaceTris(const void *verts, int vertex_count) {
     if (!verts || vertex_count <= 0) return;
     if (g.cull_face_enabled && g.cull_face_mode == GL_FRONT_AND_BACK) return;
 
+#if !NOVAGL_BATCH_CLIPSPACE
+    /* Batcher runs apply_gpu_state once per run (see nova_batch_submit); the
+     * immediate path applies it per draw. */
     apply_gpu_state();
+#endif
+
+#ifndef NOVAGL_NO_CLIPSPACE_NEAR_CLIP
+    /* Does ANY vertex cross the near plane (z + w < 0)? If not, skip clipping. */
+    int any_near = 0;
+    const NovaClipV *in_v = (const NovaClipV *) verts;
+    for (int i = 0; i < vertex_count; i++) {
+        if (in_v[i].z + in_v[i].w < 0.0f) { any_near = 1; break; }
+    }
+    if (any_near) {
+        int in_tris = vertex_count / 3;
+        int max_out = in_tris * 6;                 /* <=2 output tris per input */
+        int out_bytes = max_out * 28;
+        if (out_bytes <= g.client_array_buf_size) {  /* else fall through to no-clip */
+#if NOVAGL_BATCH_CLIPSPACE
+            /* The clipped stream is variable-length and never batched: commit
+             * the pending run first (the GPU still holds its state), then apply
+             * state for this standalone clipped draw. */
+            nova_batch_flush();
+            apply_gpu_state();
+#endif
+            NovaClipV *cdst = (NovaClipV *) linear_alloc_ring(
+                g.client_array_buf, &g.client_array_buf_offset, out_bytes, g.client_array_buf_size);
+            int out_count = 0;
+            for (int t = 0; t < in_tris; t++) {
+                out_count += nova_clip_tri_near(&in_v[t * 3], &cdst[out_count]);
+            }
+            if (out_count == 0) return;            /* whole batch behind near */
+            GSPGPU_FlushDataCache(cdst, (u32) (out_count * 28));
+            nova_setup_attr_info(4);
+            nova_setup_buf_info(cdst, 28);
+            C3D_DrawArrays(GPU_TRIANGLES, 0, out_count);
+            return;
+        }
+    }
+#endif
 
     const int bytes = vertex_count * 28;
     if (bytes > g.client_array_buf_size) {
         gl_set_error(GL_OUT_OF_MEMORY);
         return;
     }
+#if NOVAGL_BATCH_CLIPSPACE
+    /* Defer + coalesce: appended to the open run, or flushes the old run and
+     * starts a new one. The actual C3D_DrawArrays happens in nova_batch_flush
+     * (at the next state change or a barrier). */
+    nova_batch_submit(verts, vertex_count);
+#else
     uint8_t *dst = (uint8_t *) linear_alloc_ring(g.client_array_buf, &g.client_array_buf_offset,
                                                  bytes, g.client_array_buf_size);
     memcpy(dst, verts, (size_t) bytes);
@@ -1198,13 +1605,16 @@ void novaDrawClipspaceTris(const void *verts, int vertex_count) {
     nova_setup_attr_info(4);
     nova_setup_buf_info(dst, 28);
     C3D_DrawArrays(GPU_TRIANGLES, 0, vertex_count);
+#endif
 }
 
 void glFlush(void) {
+    nova_batch_flush();   /* commit deferred draws before the split */
     C3D_FrameSplit(0);
 }
 
 void glFinish(void) {
+    nova_batch_flush();   /* commit deferred draws before the split */
     C3D_FrameSplit(0);
     gspWaitForP3D();
 }

@@ -63,9 +63,12 @@ if (NOVA_VBO_STREAM)
     target_compile_definitions(NovaGL PRIVATE NOVA_VBO_STREAM)
 endif ()
 
-# ---- Performance hacks (off by default; trade compliance/safety for speed) ----
-# Master switch: enables NO_DEBUG + DRAW_SPEEDHACK + ASYNC_FRAME together.
-option(NOVAGL_SPEEDHACKS "Enable the full NovaGL speedhack bundle" ON)
+# ---- Performance hacks ----
+# Master switch: enables the SAFE bundle (NO_DEBUG + DRAW_SPEEDHACK). It does NOT
+# enable NOVAGL_ASYNC_FRAME — async frame submission is unsafe with the current
+# single-buffered rings + 1-frame texture GC (textures go black / corrupt under
+# streaming; see context.h). Enable async explicitly only if you know that risk.
+option(NOVAGL_SPEEDHACKS "Enable the safe NovaGL speedhack bundle (NO_DEBUG + DRAW_SPEEDHACK)" OFF)
 if (NOVAGL_SPEEDHACKS)
     target_compile_definitions(NovaGL PRIVATE NOVAGL_SPEEDHACKS=1)
 endif ()
@@ -81,9 +84,38 @@ if (NOVAGL_DRAW_SPEEDHACK)
     target_compile_definitions(NovaGL PRIVATE NOVAGL_DRAW_SPEEDHACK=1)
 endif ()
 
-option(NOVAGL_ASYNC_FRAME "Non-blocking frame submission (NOVAGL_FRAME_MODE=0)" OFF)
+# Non-blocking frame submission. Now an alias for double-buffering
+# (NOVAGL_FRAME_BUFFERS=2) — SAFE: the rings + orphan GC are multi-buffered so the
+# CPU never overwrites/frees memory the GPU is still reading. Prefer choosing the
+# depth at runtime with novaSetFrameBuffers(1/2/3), or set NOVAGL_FRAME_BUFFERS.
+option(NOVAGL_ASYNC_FRAME "Async frame submission = double-buffer (alias for NOVAGL_FRAME_BUFFERS=2)" OFF)
 if (NOVAGL_ASYNC_FRAME)
     target_compile_definitions(NovaGL PRIVATE NOVAGL_ASYNC_FRAME=1)
+endif ()
+
+# Compile-time default frame buffering depth (1=single/SYNCDRAW, 2=double,
+# 3=triple). Overridden at runtime by novaSetFrameBuffers() before nova_init().
+set(NOVAGL_FRAME_BUFFERS "" CACHE STRING "Default frame buffering depth: 1, 2 or 3 (blank = 1)")
+if (NOVAGL_FRAME_BUFFERS)
+    target_compile_definitions(NovaGL PRIVATE NOVAGL_FRAME_BUFFERS=${NOVAGL_FRAME_BUFFERS})
+endif ()
+
+# ---- Near-plane clipping (ON by default) ----
+# PICA's clip-z range is [-w,0] and the shaders only CLAMP z into it, so a
+# triangle straddling the near plane isn't truly clipped -> "see through walls"
+# when close/oblique (Wolfenstein-RPG walls, Perfect Dark floor). NovaGL CPU
+# near-clips such triangles: the clipspace fast lane (novaDrawClipspaceTris, PD)
+# and the GPU-MVP draw path (basic/texmtx/full shaders, e.g. Wolf). Both only
+# fire when a vertex actually crosses near. Turn OFF only if a port regresses or
+# you need the last bit of CPU back.
+option(NOVAGL_NEAR_CLIP "CPU near-plane clip the GPU-MVP draw path (basic/full/texmtx)" ON)
+if (NOT NOVAGL_NEAR_CLIP)
+    target_compile_definitions(NovaGL PRIVATE NOVAGL_NO_NEAR_CLIP=1)
+endif ()
+
+option(NOVAGL_CLIPSPACE_NEAR_CLIP "CPU near-plane clip the clipspace fast lane (fast3d/PD)" ON)
+if (NOT NOVAGL_CLIPSPACE_NEAR_CLIP)
+    target_compile_definitions(NovaGL PRIVATE NOVAGL_NO_CLIPSPACE_NEAR_CLIP=1)
 endif ()
 
 # Boot splashscreen is ON by default; flip this OFF to compile it out.

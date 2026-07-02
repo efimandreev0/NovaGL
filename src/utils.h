@@ -74,6 +74,7 @@ void *get_tex_staging(int size);
  * novaSwapBuffers does it right after C3D_FrameBegin's SYNCDRAW wait. */
 void nova_tex_gc_push(C3D_Tex *tex);
 void nova_tex_gc_collect(void);
+void nova_tex_gc_collect_all(void);
 
 /* Drop the per-unit TexBind skip-cache entries referring to `tex_id` so the
  * next draw re-emits the bind. MUST be called whenever a texture's storage
@@ -99,6 +100,29 @@ void downscale_8bit(uint8_t *dst, const uint8_t *src, int src_w, int src_h, int 
 void apply_depth_map(void);
 
 void apply_gpu_state(void);
+
+/* ---- Clipspace draw-call batcher (utils.c) -----------------------------
+ * Coalesces consecutive novaDrawClipspaceTris() calls whose ENTIRE draw-
+ * affecting GPU state is identical into a single C3D_DrawArrays — cuts the
+ * per-draw-call cost that dominates scenes with many small same-material
+ * draws (sparks, explosion parts, >2 characters). Default ON; opt out with
+ * -DNOVAGL_BATCH_CLIPSPACE=0.
+ *
+ * Only novaDrawClipspaceTris (the Perfect Dark / fast3d clip-space path)
+ * feeds it. Every other draw path and every render-target / frame / readback
+ * site just calls nova_batch_flush(), which is a no-op unless a batch is open,
+ * so other NovaGL consumers are unaffected. */
+#ifndef NOVAGL_BATCH_CLIPSPACE
+#define NOVAGL_BATCH_CLIPSPACE 1
+#endif
+/* Emit any pending batch NOW (no-op when empty). MUST be called before any
+ * render-target switch, frame split/end, buffer clear, framebuffer readback,
+ * or vertex-ring reset — see the barrier list in utils.c. */
+void nova_batch_flush(void);
+/* Append a clip-space triangle list to the current batch, merging into the
+ * open run when state is unchanged or starting a new run (flush + one
+ * apply_gpu_state) otherwise. Caller must have ruled out the near-clip case. */
+void nova_batch_submit(const void *verts, int vertex_count);
 
 void cleanup_vbo_stream(void);
 

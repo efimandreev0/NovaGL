@@ -40,7 +40,20 @@ Drop-in replacement for `<GLES/gl.h>` that maps fixed-function GL calls to Citro
 
 ### Standards compliance
 
-The default build aims to behave exactly like desktop/ES OpenGL — including error reporting (`glGetError` keeps the **first** error per spec, and the entry points raise `GL_INVALID_ENUM`/`GL_INVALID_VALUE`/`GL_INVALID_OPERATION` for bad arguments), default state, and `glBindFramebuffer` read/draw separation. The non-standard speed/VRAM optimizations are now opt-in flags (see *Compliance opt-outs* below). **One behaviour change to note:** the depth test now defaults to **disabled** with `glDepthFunc(GL_LESS)` (the GL spec default) instead of the old enabled/`GL_LEQUAL`. A correct port always sets its own depth state; if yours relied on the old default, add `glEnable(GL_DEPTH_TEST)`.
+NovaGL now reports errors properly (`glGetError` keeps the **first** error per spec, and the entry points raise `GL_INVALID_ENUM`/`GL_INVALID_VALUE`/`GL_INVALID_OPERATION` for bad arguments) and tightens a lot of state tracking and `glBindFramebuffer` read/draw separation. Where matching the spec *exactly* would change rendering, the **default keeps the historical port-friendly behaviour** and the strict behaviour is a compile flag (see *Strict-spec opt-ins* above) — so upgrading NovaGL shouldn't silently change how an existing port renders. Build with the strict flags for a more conformant layer once your port is known-good.
+
+### Near-plane clipping (ON by default)
+
+PICA's clip-space z range is `[-w, 0]`, not desktop GL's `[-w, w]`, and the vertex shaders only **clamp** z into it (a depth-range fix, not a clip). So a triangle that **straddles the near plane** — a vertex with `z < -w`, i.e. right under/through the camera — isn't actually clipped the way a desktop/PowerVR GPU clips it: its near vertex projects to a garbage screen position and the triangle drops out or distorts. The symptom is **"see-through walls/floor" when you stand close to or oblique to a surface** (seen in Wolfenstein-RPG walls and Perfect Dark's floor; absent on PS Vita because PowerVR near-clips in hardware).
+
+NovaGL fixes this by CPU near-clipping the offending triangles (Sutherland–Hodgman against `z + w ≥ 0`) on both draw routes:
+
+| Route | What it does |
+|---|---|
+| `novaDrawClipspaceTris` (fast3d / PD) | clips in clip space (verts already carry `xyzw`) |
+| GPU-MVP path — `basic`/`texmtx`/`full` shaders (e.g. Wolfenstein-RPG via client arrays) | replays the shader's MVP **only** to find each vertex's near distance, then clips in **model space** and redraws through the *same* shader, so fog / texture-matrix / depth stay intact |
+
+Both only run when a vertex actually crosses the near plane (a cheap one-dot-per-vertex test gates it), so geometry fully in front of the camera takes the normal path untouched. Disable with `-DNOVAGL_NEAR_CLIP=OFF` (GPU-MVP path) / `-DNOVAGL_CLIPSPACE_NEAR_CLIP=OFF` (clipspace lane), or the raw `-DNOVAGL_NO_NEAR_CLIP=1` / `-DNOVAGL_NO_CLIPSPACE_NEAR_CLIP=1`. Note: the VBO-based fast draw lanes (a port feeding an interleaved `[pos3|uv2|col4]` VBO that takes `C3D_DrawElements` directly) are **not** near-clipped — only client-array / de-indexed draws are.
 
 ## GLFW + GLAD drop-in
 
@@ -94,16 +107,21 @@ Useful compile flags:
 | `-DNOVAGL_GL2_RETURN_DUMMY=1` | glCreateShader/glCreateProgram return fake non-zero ids. For ports that don't check and call glUseProgram regardless. |
 | `-DNOVAGL_ENABLE_GLREADPIXELS_HW=1` | Use DisplayTransfer for full-screen glReadPixels. Faster but output is transposed relative to GL convention. |
 
-### Compliance opt-outs (default build is spec-correct)
+### Strict-spec opt-ins (defaults favour port compatibility)
 
-These restore older, non-standard-but-convenient behaviours. The default build now matches OpenGL; turn one on only if a port depended on the lenient behaviour.
+NovaGL adds proper `glGetError` reporting and a lot of spec-correct error handling, but where matching the spec *exactly* would change rendering and risk breaking an existing port, the **default keeps the historical, port-friendly behaviour** and the strict behaviour is opt-in. Turn these on for a cleaner, more conformant build once your port is known-good.
 
-| Flag | Effect |
+| Flag | Effect (default → strict) |
 |---|---|
-| `-DNOVAGL_SOLID_TEX_OPT=1` | Collapse single-colour textures to an 8×8 VRAM stub (big VRAM saving; bit-exact for plain sampling, but `glTexSubImage2D`/`glCopyTexSubImage2D`/readback then see the stub). Off → real-size upload. |
-| `-DNOVAGL_DOWNSCALE_OVERSIZE=1` | Auto-downscale textures larger than 1024 instead of raising `GL_INVALID_VALUE` (handy for oversized desktop atlases). |
-| `-DNOVAGL_LENIENT_BUFFERSUBDATA=1` | Auto-grow the buffer on an out-of-range `glBufferSubData` instead of `GL_INVALID_VALUE`. |
-| `-DNOVAGL_FBO_RESET_SCISSOR=1` | Reset the scissor box to the full surface when binding an FBO (fast3d menu-blur workaround). Spec leaves the scissor untouched on a framebuffer bind. |
+| `-DNOVAGL_STRICT_DEPTH_DEFAULT=1` | Initial depth state. Default: test **enabled**, `GL_LEQUAL` (port-friendly — some ports draw 3D without enabling depth). Strict: disabled, `GL_LESS` (GL spec). |
+| `-DNOVAGL_CLEAR_RESPECTS_MASK=1` | `glClear`. Default: always clears the requested buffers. Strict: clear respects `glColorMask`/`glDepthMask`/stencil writemask (a stale `glDepthMask(FALSE)` then makes `glClear(DEPTH)` a no-op — which is spec, but breaks fast3d-style frame-start depth clears). |
+| `-DNOVAGL_STRICT_TEX_FORMAT=1` | `glTexImage2D`/`glTexSubImage2D`. Default: unrecognized `(format,type)` falls back to RGBA8 (historical). Strict: reject with `GL_INVALID_ENUM`/`GL_INVALID_OPERATION` (catches the over-read on a wrong combo like `GL_RGBA + GL_UNSIGNED_SHORT_5_6_5`). |
+| `-DNOVAGL_STRICT_MAX_TEXTURE_SIZE=1` | Textures > 1024. Default: auto-downscale (graceful on a constrained device). Strict: `GL_INVALID_VALUE`, no upload. |
+| `-DNOVAGL_STRICT_BUFFERSUBDATA=1` | Out-of-range `glBufferSubData`. Default: auto-grow. Strict: `GL_INVALID_VALUE`. |
+| `-DNOVAGL_GL_LIGHT_EYE_SPACE=1` | `glLight(GL_POSITION/GL_SPOT_DIRECTION)`. Default: stored raw (what the HW light env was tuned against). Strict: transformed by the current modelview into eye space (GL spec). |
+| `-DNOVAGL_FBO_DEPTH24_STENCIL8=1` | FBO depth attachment. Default: `DEPTH16` (lower VRAM). Strict: `DEPTH24_STENCIL8` (matches the screen + enables stencil in FBOs, but doubles FBO depth VRAM). |
+| `-DNOVAGL_NO_FBO_RESET_SCISSOR=1` | Inverse opt-out: binding an FBO resets the scissor to the full surface **by default** (fast3d menu-blur needs it); set this to leave the scissor untouched per spec. |
+| `-DNOVAGL_NO_SOLID_TEX_OPT=1` | Inverse opt-out: single-colour textures collapse to an 8×8 VRAM stub **by default** (big VRAM saving, bit-exact for sampling); set this to upload them at real size. |
 
 ### Performance hacks
 
@@ -111,11 +129,29 @@ All **off by default** — each trades some OpenGL compliance/safety for raw thr
 
 | Flag | Effect | Risk |
 |---|---|---|
-| `-DNOVAGL_SPEEDHACKS=1` | **Master switch.** Enables `NO_DEBUG` + `DRAW_SPEEDHACK` + `ASYNC_FRAME` in one go. The "just make it fast" bundle. | The union of the three below. |
+| `-DNOVAGL_SPEEDHACKS=1` | **Master switch.** Enables the *safe* bundle: `NO_DEBUG` + `DRAW_SPEEDHACK`. Does **not** enable `ASYNC_FRAME`. | The union of the two safe ones below. |
 | `-DNOVAGL_NO_DEBUG=1` | Strips per-draw GL spec validation (enum/value/type checks) and the per-vertex pointer sanity guards in the interleave loop. Biggest CPU win on draw-call-bound scenes. | Bad enums / negative counts / wild client pointers stop being caught and will crash or corrupt. |
 | `-DNOVAGL_DRAW_SPEEDHACK=1` | Tightens the vertex ring buffer to 64-byte alignment (less padding → fewer ring wraps and GPU stalls) and trusts caller-supplied array pointers. Implies `NOVAGL_RING_ALIGN_64`. | Slightly looser GPU fetch alignment; assumes valid pointers. |
-| `-DNOVAGL_ASYNC_FRAME=1` | Friendly alias for `-DNOVAGL_FRAME_MODE=0` — non-blocking frame submission, overlaps CPU frame N+1 with GPU frame N. ~20–40% on GPU-bound scenes. | None we know of (state cache is reset on frame boundaries), but harder to reason about timing. |
+| `-DNOVAGL_ASYNC_FRAME=1` | Non-blocking frame submission — overlaps CPU frame N+1 with GPU frame N (~20–40% on GPU-bound scenes). Now an alias for **double-buffering** (`NOVAGL_FRAME_BUFFERS=2`), which is **safe** (see *Frame buffering* below). | None — the rings and orphan GC are multi-buffered so the GPU never reads freed/overwritten memory. |
 | `-DNOVAGL_RING_ALIGN_64=1` | Just the 64-byte ring alignment, without the rest of `DRAW_SPEEDHACK`. | Low. |
+
+### Frame buffering (single / double / triple)
+
+How many frames the CPU may run ahead of the GPU. Pick at **runtime** with `novaSetFrameBuffers(n)` *before* `nova_init()`, or set the compile default `-DNOVAGL_FRAME_BUFFERS=n`:
+
+| n | Mode | Behaviour |
+|---|---|---|
+| 1 | single (default) | `C3D_FRAME_SYNCDRAW` — the CPU waits for the GPU each frame. Lowest latency + memory; no overlap. |
+| 2 | double | CPU builds frame N+1 while the GPU renders frame N. ~20–40% FPS on GPU-bound scenes. |
+| 3 | triple | CPU may run up to two frames ahead — smoother under uneven frame times; highest latency + memory. |
+
+```c
+novaSetFrameBuffers(2);   // double-buffer
+gfxInitDefault();
+nova_init();
+```
+
+With 2/3, NovaGL keeps that many copies of the vertex/index ring buffers and defers texture/render-target deletion by the same number of frames, so a buffer is only reused/freed once the GPU has finished the frame that used it — async is **safe** (no black/swapping textures or corruption). Cost: `n ×` the ring memory (per-slot = the `nova_init_ex` sizes; ~2.5 MB each by default, so triple ≈ 7.5 MB of linear RAM). If a slot allocation fails, NovaGL transparently falls back to fewer buffers; `novaGetFrameBuffers()` reports the count actually in use.
 
 ```bash
 # fastest preset

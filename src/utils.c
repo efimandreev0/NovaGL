@@ -1600,6 +1600,234 @@ void nova_invalidate_state_cache(void) {
     g.light_env_built = 0;
 }
 
+/* ========================================================================
+ * Clipspace draw-call batcher
+ * ========================================================================
+ * Defers the C3D_DrawArrays in novaDrawClipspaceTris() and concatenates
+ * consecutive draws whose entire draw-affecting GPU state is identical into a
+ * single draw call. Correctness rule: two draws may merge ONLY if they would
+ * produce pixel-identical output to drawing them separately in order. Merging
+ * is order-preserving (verts appended in call order), so translucent/additive
+ * blending stays correct.
+ *
+ * Design (see the spec this was built from):
+ *  - The merge predicate is "apply_gpu_state() would push ZERO registers for
+ *    the next draw": captured as a value snapshot (NovaBatchSig) of everything
+ *    apply_gpu_state reads, PLUS guard dirty-flags for matrices/fog/tev (whose
+ *    effect isn't cheap to snapshot — final_proj is 16 floats) and a stereo
+ *    break (per-eye projection differs).
+ *  - apply_gpu_state() runs ONCE per run (at run start), never per deferred
+ *    draw, so the GPU holds exactly the run's state for its whole life. A new
+ *    run flushes the old one FIRST (while the GPU still holds the old state)
+ *    and then applies the new state.
+ *  - Verts accumulate in a contiguous CPU scratch and are copied into the
+ *    per-frame ring as ONE block at flush. (Appending straight into the ring
+ *    would NOT work: linear_alloc_ring rounds every allocation up to 128 B, so
+ *    consecutive appends leave alignment gaps that a single strided DrawArrays
+ *    would read as garbage vertices.)
+ */
+#if NOVAGL_BATCH_CLIPSPACE
+
+typedef struct {
+    /* fog (per-pixel HW LUT is shader-independent, applies to clipspace) */
+    int    fog_enabled; GLenum fog_mode;
+    float  fog_density, fog_start, fog_end; float fog_color[4];
+    /* writemask + depth */
+    GLboolean cmask_r, cmask_g, cmask_b, cmask_a, depth_mask;
+    int    depth_test; GLenum depth_func;
+    /* alpha test (quantized ref, matches the apply_gpu_state cache) */
+    int    alpha_test; GLenum alpha_func; u8 alpha_ref8;
+    /* blend / logic op (packed colour, matches the cache) */
+    int    blend_en; GLenum bsrc, bdst, bsrc_a, bdst_a, beq_rgb, beq_a;
+    int    logic_en; GLenum logic_op; u32 blend_color_packed;
+    /* cull */
+    int    cull_en; GLenum cull_mode, front_face;
+    /* scissor + render-target identity */
+    int    scissor_en; GLint sx, sy; GLsizei sw, sh; int scissor_fbo_bit;
+    void  *current_target; int bound_fbo;
+    /* textures + per-bound-unit sampler params (eagerly baked into the C3D_Tex,
+     * read by the GPU at draw time — THE main batching hazard) */
+    GLuint bound_tex[3]; int tex_en[3];
+    int    minf[3], magf[3], wraps[3], wrapt[3];
+    /* explicit TEV programme (PD's primary path; CC constants live inside) */
+    int    explicit_tev_count;
+    NovaTevStageGL explicit_tev[NOVA_TEV_MAX_STAGES];
+    /* legacy per-unit TEV — only meaningful when explicit_tev_count == 0 */
+    GLint  te_mode[3];
+    GLint  te_combine_rgb[3], te_src0_rgb[3], te_src1_rgb[3], te_src2_rgb[3];
+    GLint  te_op0_rgb[3], te_op1_rgb[3], te_op2_rgb[3];
+    GLint  te_combine_a[3], te_src0_a[3], te_src1_a[3], te_src2_a[3];
+    GLint  te_op0_a[3], te_op1_a[3], te_op2_a[3];
+    float  te_color[3][4];
+    GLint  te_rgb_scale[3], te_alpha_scale[3];
+} NovaBatchSig;
+
+static struct {
+    int          active;       /* a run is open */
+    uint8_t     *scratch;      /* contiguous accumulated verts (28 B each) */
+    int          scratch_cap;  /* bytes */
+    int          total_verts;
+    NovaBatchSig sig;          /* state shared by every vert in the run */
+} s_batch;
+
+static void batch_build_sig(NovaBatchSig *o) {
+    memset(o, 0, sizeof(*o));   /* zero padding so memcmp is well-defined */
+
+    o->fog_enabled = g.fog_enabled; o->fog_mode = g.fog_mode;
+    o->fog_density = g.fog_density; o->fog_start = g.fog_start; o->fog_end = g.fog_end;
+    o->fog_color[0] = g.fog_color[0]; o->fog_color[1] = g.fog_color[1];
+    o->fog_color[2] = g.fog_color[2]; o->fog_color[3] = g.fog_color[3];
+
+    o->cmask_r = g.color_mask_r; o->cmask_g = g.color_mask_g;
+    o->cmask_b = g.color_mask_b; o->cmask_a = g.color_mask_a;
+    o->depth_mask = g.depth_mask;
+    o->depth_test = g.depth_test_enabled; o->depth_func = g.depth_func;
+
+    o->alpha_test = g.alpha_test_enabled; o->alpha_func = g.alpha_func;
+    o->alpha_ref8 = (u8)(clampf(g.alpha_ref, 0.0f, 1.0f) * 255.0f + 0.5f);
+
+    o->blend_en = g.blend_enabled;
+    o->bsrc = g.blend_src; o->bdst = g.blend_dst;
+    o->bsrc_a = g.blend_src_alpha; o->bdst_a = g.blend_dst_alpha;
+    o->beq_rgb = g.blend_eq_rgb; o->beq_a = g.blend_eq_alpha;
+    o->logic_en = g.color_logic_op_enabled; o->logic_op = g.logic_op;
+    o->blend_color_packed = pack_tev_color(g.blend_color);
+
+    o->cull_en = g.cull_face_enabled; o->cull_mode = g.cull_face_mode;
+    o->front_face = g.front_face;
+
+    o->scissor_en = g.scissor_test_enabled;
+    o->sx = g.scissor_x; o->sy = g.scissor_y; o->sw = g.scissor_w; o->sh = g.scissor_h;
+    o->scissor_fbo_bit = (g.bound_fbo == 0);
+    o->current_target = g.current_target; o->bound_fbo = (int) g.bound_fbo;
+
+    for (int u = 0; u < 3; u++) {
+        o->bound_tex[u] = g.bound_texture[u];
+        o->tex_en[u] = g.texture_2d_enabled_unit[u];
+        if (g.texture_2d_enabled_unit[u] && g.bound_texture[u] > 0 &&
+            g.bound_texture[u] < NOVA_MAX_TEXTURES) {
+            TexSlot *t = &g.textures[g.bound_texture[u]];
+            o->minf[u] = t->min_filter; o->magf[u] = t->mag_filter;
+            o->wraps[u] = t->wrap_s;    o->wrapt[u] = t->wrap_t;
+        }
+    }
+
+    o->explicit_tev_count = g.explicit_tev_count;
+    int n = g.explicit_tev_count;
+    if (n < 0) n = 0; if (n > NOVA_TEV_MAX_STAGES) n = NOVA_TEV_MAX_STAGES;
+    for (int i = 0; i < n; i++) o->explicit_tev[i] = g.explicit_tev_stages[i];
+
+    if (g.explicit_tev_count == 0) {
+        for (int u = 0; u < 3; u++) {
+            o->te_mode[u]        = g.tex_env_mode[u];
+            o->te_combine_rgb[u] = g.tex_env_combine_rgb[u];
+            o->te_src0_rgb[u]    = g.tex_env_src0_rgb[u];
+            o->te_src1_rgb[u]    = g.tex_env_src1_rgb[u];
+            o->te_src2_rgb[u]    = g.tex_env_src2_rgb[u];
+            o->te_op0_rgb[u]     = g.tex_env_operand0_rgb[u];
+            o->te_op1_rgb[u]     = g.tex_env_operand1_rgb[u];
+            o->te_op2_rgb[u]     = g.tex_env_operand2_rgb[u];
+            o->te_combine_a[u]   = g.tex_env_combine_alpha[u];
+            o->te_src0_a[u]      = g.tex_env_src0_alpha[u];
+            o->te_src1_a[u]      = g.tex_env_src1_alpha[u];
+            o->te_src2_a[u]      = g.tex_env_src2_alpha[u];
+            o->te_op0_a[u]       = g.tex_env_operand0_alpha[u];
+            o->te_op1_a[u]       = g.tex_env_operand1_alpha[u];
+            o->te_op2_a[u]       = g.tex_env_operand2_alpha[u];
+            o->te_color[u][0] = g.tex_env_color[u][0];
+            o->te_color[u][1] = g.tex_env_color[u][1];
+            o->te_color[u][2] = g.tex_env_color[u][2];
+            o->te_color[u][3] = g.tex_env_color[u][3];
+            o->te_rgb_scale[u]   = g.tex_env_rgb_scale[u];
+            o->te_alpha_scale[u] = g.tex_env_alpha_scale[u];
+        }
+    }
+}
+
+void nova_batch_flush(void) {
+    if (!s_batch.active || s_batch.total_verts <= 0) {
+        s_batch.active = 0;
+        s_batch.total_verts = 0;
+        return;
+    }
+    int bytes = s_batch.total_verts * 28;
+    /* Stage the whole run into the per-frame ring (aligned, handles wrap with
+     * its own FrameSplit) and issue ONE draw with the run's current C3D state. */
+    uint8_t *dst = (uint8_t *) linear_alloc_ring(g.client_array_buf,
+                                                 &g.client_array_buf_offset,
+                                                 bytes, g.client_array_buf_size);
+    if (dst) {
+        memcpy(dst, s_batch.scratch, (size_t) bytes);
+        GSPGPU_FlushDataCache(dst, (u32) bytes);
+        nova_setup_attr_info(4);
+        nova_setup_buf_info(dst, 28);
+        C3D_DrawArrays(GPU_TRIANGLES, 0, s_batch.total_verts);
+    }
+    s_batch.active = 0;
+    s_batch.total_verts = 0;
+}
+
+void nova_batch_submit(const void *verts, int vertex_count) {
+    const int bytes = vertex_count * 28;
+
+    /* Capture the matrices/fog/tev dirty flags BEFORE apply_gpu_state clears
+     * them — a pending real change to any of these breaks the run. */
+    int break_dirty = g.matrices_dirty || g.proj_dirty || g.fog_dirty || g.tev_dirty;
+    int stereo = (osGet3DSliderState() > 0.0f && g.stereo_depth != 0.0f);
+
+    NovaBatchSig cand;
+    batch_build_sig(&cand);
+
+    int fits = s_batch.active &&
+               ((s_batch.total_verts + vertex_count) * 28 <= g.client_array_buf_size);
+    int can_merge = fits && !break_dirty && !stereo &&
+                    cand.current_target == s_batch.sig.current_target &&
+                    memcmp(&cand, &s_batch.sig, sizeof(NovaBatchSig)) == 0;
+
+    if (!can_merge) {
+        nova_batch_flush();   /* commit the old run (GPU still holds its state) */
+        apply_gpu_state();    /* push THIS run's state, exactly once */
+        s_batch.active = 1;
+        s_batch.total_verts = 0;
+        s_batch.sig = cand;
+    }
+
+    int need = (s_batch.total_verts + vertex_count) * 28;
+    if (need > s_batch.scratch_cap) {
+        int newcap = need + 64 * 1024;
+        uint8_t *p = (uint8_t *) realloc(s_batch.scratch, (size_t) newcap);
+        if (!p) {
+            /* Couldn't grow scratch — draw what we have, then this chunk direct. The
+             * run's state is already on the GPU (applied above, or unchanged on
+             * the merge path), so a direct ring draw is correct. */
+            nova_batch_flush();
+            uint8_t *dst = (uint8_t *) linear_alloc_ring(g.client_array_buf,
+                                                         &g.client_array_buf_offset,
+                                                         bytes, g.client_array_buf_size);
+            if (dst) {
+                memcpy(dst, verts, (size_t) bytes);
+                GSPGPU_FlushDataCache(dst, (u32) bytes);
+                nova_setup_attr_info(4);
+                nova_setup_buf_info(dst, 28);
+                C3D_DrawArrays(GPU_TRIANGLES, 0, vertex_count);
+            }
+            s_batch.active = 0;
+            s_batch.total_verts = 0;
+            return;
+        }
+        s_batch.scratch = p;
+        s_batch.scratch_cap = newcap;
+    }
+
+    memcpy(s_batch.scratch + s_batch.total_verts * 28, verts, (size_t) bytes);
+    s_batch.total_verts += vertex_count;
+}
+
+#else  /* !NOVAGL_BATCH_CLIPSPACE — batcher compiled out, flush is a no-op */
+void nova_batch_flush(void) { }
+void nova_batch_submit(const void *verts, int vertex_count) { (void) verts; (void) vertex_count; }
+#endif
+
 void cleanup_vbo_stream(void) {
 #if 0
 #ifdef NOVA_VBO_STREAM

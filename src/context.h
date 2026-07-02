@@ -26,8 +26,8 @@
  * in only once you know your port behaves. See README.md / api.md for the table.
  *
  * Master switch:
- *   -DNOVAGL_SPEEDHACKS=1   turns the whole safe-ish "go fast" bundle on
- *                           (NO_DEBUG + DRAW_SPEEDHACK + ASYNC_FRAME).
+ *   -DNOVAGL_SPEEDHACKS=1   turns the safe "go fast" bundle on
+ *                           (NO_DEBUG + DRAW_SPEEDHACK).
  *
  * Individual switches (also settable on their own):
  *   -DNOVAGL_NO_DEBUG=1       strip per-draw GL validation + per-vertex pointer
@@ -37,9 +37,17 @@
  *   -DNOVAGL_DRAW_SPEEDHACK=1 tighter vertex-ring alignment (64B vs 128B → less
  *                             padding, fewer ring wraps/stalls) + trust caller
  *                             pointers in the interleave loop.
- *   -DNOVAGL_ASYNC_FRAME=1    non-blocking frame submission (alias that forces
- *                             NOVAGL_FRAME_MODE=0). Overlaps CPU frame N+1 with
- *                             GPU frame N; typically +20–40% on GPU-bound scenes.
+ *   -DNOVAGL_ASYNC_FRAME=1    non-blocking frame submission. Now a friendly
+ *                             alias for double-buffering (NOVAGL_FRAME_BUFFERS=2,
+ *                             resolved in NovaGL.c) — overlaps CPU frame N+1 with
+ *                             GPU frame N (~+20–40% on GPU-bound scenes). This is
+ *                             SAFE: the vertex/index rings and the texture/FBO
+ *                             orphan GC are split into per-frame slots, so the GPU
+ *                             never reads a buffer the CPU has overwritten/freed.
+ *                             It is NOT in the SPEEDHACKS bundle only so frame
+ *                             buffering stays an explicit, memory-cost choice (N×
+ *                             the ring memory). Prefer the runtime
+ *                             novaSetFrameBuffers(1/2/3) selector.
  * ====================================================================== */
 #if defined(NOVAGL_SPEEDHACKS) && NOVAGL_SPEEDHACKS
 #  ifndef NOVAGL_NO_DEBUG
@@ -48,9 +56,9 @@
 #  ifndef NOVAGL_DRAW_SPEEDHACK
 #    define NOVAGL_DRAW_SPEEDHACK 1
 #  endif
-#  ifndef NOVAGL_ASYNC_FRAME
-#    define NOVAGL_ASYNC_FRAME 1
-#  endif
+/* NOVAGL_ASYNC_FRAME is intentionally NOT enabled by the bundle — frame
+ * buffering depth is a separate, memory-cost choice (see novaSetFrameBuffers /
+ * NOVAGL_FRAME_BUFFERS). */
 #endif
 
 /* DRAW_SPEEDHACK implies the 64-byte ring alignment that linear_alloc_ring
@@ -58,15 +66,6 @@
 #if defined(NOVAGL_DRAW_SPEEDHACK) && NOVAGL_DRAW_SPEEDHACK
 #  ifndef NOVAGL_RING_ALIGN_64
 #    define NOVAGL_RING_ALIGN_64 1
-#  endif
-#endif
-
-/* ASYNC_FRAME is a friendly alias for NOVAGL_FRAME_MODE=0 (C3D non-blocking).
- * NovaGL.c reads NOVAGL_FRAME_MODE after including this header, so seeding it
- * here wins over its internal default. */
-#if defined(NOVAGL_ASYNC_FRAME) && NOVAGL_ASYNC_FRAME
-#  ifndef NOVAGL_FRAME_MODE
-#    define NOVAGL_FRAME_MODE 0
 #  endif
 #endif
 
@@ -214,6 +213,13 @@ extern struct NovaState {
 
     C3D_Tex           app_tex;
     C3D_RenderTarget *app_target;
+    /* Previous-frame snapshot of the app surface — emulates the N64/PC
+     * "front buffer": while frame F is being built, holds frame F-1.
+     * Updated at the top of every frame (novaSnapshotAppSurface), consumed
+     * by novaBlitSnapshotToFBO for PD-style screen captures. Optional —
+     * NULL target when allocation failed or the app surface is off. */
+    C3D_Tex           app_prev_tex;
+    C3D_RenderTarget *app_prev_target;
     int               app_pot_w, app_pot_h;     // texture storage (POT)
     int               app_logical_w, app_logical_h; // = LCD dims (240x400 native)
     /* A normal g.textures[] slot that ALIASES app_tex, so the screen can be
@@ -418,6 +424,18 @@ extern struct NovaState {
 
     GLenum last_error;
     int initialized;
+    /* Frame buffering: 1 = single (SYNCDRAW, CPU waits for GPU each frame),
+     * 2 = double, 3 = triple (async — CPU runs ahead of the GPU). With K>1 the
+     * vertex/index rings and the texture/FBO orphan GC are split into K slots
+     * rotated per frame, so a slot is only reused/freed K frames later (when the
+     * GPU has definitely finished it) — the use-after-free that broke async is
+     * gone. See novaSetFrameBuffers(). */
+    int frame_buffers;        /* K = 1/2/3 */
+    int frame_slot;           /* current ring/GC slot, 0..K-1 */
+    int c3d_frame_flag;       /* C3D_FrameBegin flag: SYNCDRAW (K==1) or 0 (async) */
+
+    /* Active ring (points at the current slot's buffer). client_array_buf_size /
+     * index_buf_size are the PER-SLOT capacities. */
     void *client_array_buf;
     int client_array_buf_size;
     int client_array_buf_offset;
@@ -425,6 +443,9 @@ extern struct NovaState {
     void *index_buf;
     int index_buf_size;
     int index_buf_offset;
+
+    void *client_array_buf_slots[3];
+    void *index_buf_slots[3];
 
     int tev_dirty;
     int last_tex_state;
@@ -526,6 +547,7 @@ static inline void gl_set_error(GLenum e) {
 }
 
 void nova_fbo_gc_collect(void);
+void nova_fbo_gc_collect_all(void);
 
 /* Animated boot splashscreen (src/splashscreen.c). Runs synchronously at the
  * tail of nova_init_ex unless compiled out with -DNOVAGL_NO_SPLASHSCREEN=1

@@ -16,6 +16,9 @@ void glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
         gl_set_error(GL_INVALID_VALUE);
         return;
     }
+    /* C3D_SetViewport below records an immediate viewport command; a pending
+     * batch must be drawn under the OLD viewport first. */
+    nova_batch_flush();
     g.vp_x = x;
     g.vp_y = y;
     g.vp_w = width;
@@ -81,6 +84,7 @@ void glDepthFunc(GLenum func) {
 void glDepthMask(GLboolean flag) { g.depth_mask = flag; }
 
 void glDepthRangef(GLclampf near_val, GLclampf far_val) {
+    nova_batch_flush();   /* apply_depth_map changes depth state for later draws */
     g.depth_near = clampf(near_val, 0.0f, 1.0f);
     g.depth_far = clampf(far_val, 0.0f, 1.0f);
     apply_depth_map();
@@ -214,6 +218,7 @@ void glShadeModel(GLenum mode) {
 }
 
 void glPolygonOffset(GLfloat factor, GLfloat units) {
+    nova_batch_flush();   /* apply_depth_map changes the depth bias for later draws */
     g.polygon_offset_factor = factor;
     g.polygon_offset_units = units;
     apply_depth_map();
@@ -239,6 +244,7 @@ void glPolygonMode(GLenum face, GLenum mode) {
 
 
 void glDepthRange(GLclampd near_val, GLclampd far_val) {
+    nova_batch_flush();   /* apply_depth_map changes depth state for later draws */
     g.depth_near = clampf((GLfloat) near_val, 0.0f, 1.0f);
     g.depth_far = clampf((GLfloat) far_val, 0.0f, 1.0f);
     apply_depth_map();

@@ -201,7 +201,10 @@ void glEnable(GLenum cap) {
             break;
         case GL_SCISSOR_TEST: g.scissor_test_enabled = 1; break;
         case GL_STENCIL_TEST: g.stencil_test_enabled = 1;
-            /* Re-push stencil state with enabled flag flipped. */
+            /* Re-push stencil state with enabled flag flipped. This is an EAGER
+             * GPU command, so commit any pending clipspace batch first or the
+             * deferred run would draw under the new stencil state. */
+            nova_batch_flush();
             C3D_StencilTest(1, stencil_func_to_gpu(g.stencil_func),
                             g.stencil_ref, (u8)g.stencil_mask,
                             (u8)g.stencil_write_mask);
@@ -210,6 +213,10 @@ void glEnable(GLenum cap) {
             if (!g.fog_enabled) { g.fog_enabled = 1; g.fog_dirty = 1; }
             break;
         case GL_POLYGON_OFFSET_FILL:
+            /* apply_depth_map() eagerly re-emits C3D_DepthMap (the polygon-offset
+             * bias). PD's r_set_depth_mode toggles this per ZMODE between batched
+             * draws — flush first so the open run keeps its old bias. */
+            nova_batch_flush();
             g.polygon_offset_fill_enabled = 1;
             apply_depth_map();
             break;
@@ -244,12 +251,14 @@ void glDisable(GLenum cap) {
             break;
         case GL_SCISSOR_TEST: g.scissor_test_enabled = 0; break;
         case GL_STENCIL_TEST: g.stencil_test_enabled = 0;
+            nova_batch_flush();   /* eager C3D_StencilTest — see glEnable note */
             C3D_StencilTest(0, GPU_ALWAYS, 0, 0xFF, 0xFF);
             break;
         case GL_FOG:
             if (g.fog_enabled) { g.fog_enabled = 0; g.fog_dirty = 1; }
             break;
         case GL_POLYGON_OFFSET_FILL:
+            nova_batch_flush();   /* eager C3D_DepthMap — see glEnable note */
             g.polygon_offset_fill_enabled = 0;
             apply_depth_map();
             break;

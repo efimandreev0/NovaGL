@@ -2,34 +2,58 @@
 // created by efimandreev0 on 05.04.2026.
 //
 
+#include <stdio.h>
+
 #include "NovaGL.h"
 #include "utils.h"
+
+/* TEMP DIAG: включает константно-красный вывод блита (см. novaBlitTargetToFBO). */
+/* #define NOVAGL_BLIT_DIAG_CONST_RED 1 */
 
 /* Bumped from 128 because engines doing FBO-heavy post-processing (e.g. fast3d
  * for PD, anything with per-frame transient surfaces) can churn through dozens
  * of targets per frame. At 128 we were spilling into the synchronous-delete
  * fallback below, which stalls between draws and shows up as a stutter. */
-#define NOVA_FBO_GC_TARGETS 512
-static C3D_RenderTarget *s_fbo_gc_targets[NOVA_FBO_GC_TARGETS];
-static int s_fbo_gc_count = 0;
+#define NOVA_FBO_GC_TARGETS  512
+#define NOVA_FBO_FRAME_SLOTS 3   /* max frame_buffers */
+/* Like the texture GC, orphaned render targets are bucketed by the frame slot
+ * that retired them and only deleted K (= frame_buffers) frames later, once the
+ * GPU has finished the frame that referenced them (see novaSwapBuffers). */
+static C3D_RenderTarget *s_fbo_gc_targets[NOVA_FBO_FRAME_SLOTS][NOVA_FBO_GC_TARGETS];
+static int s_fbo_gc_count[NOVA_FBO_FRAME_SLOTS] = {0, 0, 0};
+
+static void fbo_gc_free_slot(int s) {
+    for (int i = 0; i < s_fbo_gc_count[s]; i++) {
+        if (s_fbo_gc_targets[s][i]) {
+            C3D_RenderTargetDelete(s_fbo_gc_targets[s][i]);
+            s_fbo_gc_targets[s][i] = NULL;
+        }
+    }
+    s_fbo_gc_count[s] = 0;
+}
 
 static void nova_queue_render_target_delete(C3D_RenderTarget *target) {
     if (!target) return;
-    if (s_fbo_gc_count < NOVA_FBO_GC_TARGETS) {
-        s_fbo_gc_targets[s_fbo_gc_count++] = target;
-    } else {
-        C3D_RenderTargetDelete(target);
+    int s = g.frame_slot;
+    if (s_fbo_gc_count[s] >= NOVA_FBO_GC_TARGETS) {
+        /* Slot full (512 orphans in K frames — extreme). Sync the GPU so this
+         * slot's targets are safe to delete now, then reuse it. */
+        C3D_FrameSplit(0);
+        gspWaitForP3D();
+        fbo_gc_free_slot(s);
     }
+    s_fbo_gc_targets[s][s_fbo_gc_count[s]++] = target;
 }
 
+/* Free the CURRENT slot's targets (called at swap after rotating to the next
+ * slot — reclaims targets from K frames ago, GPU done). */
 void nova_fbo_gc_collect(void) {
-    for (int i = 0; i < s_fbo_gc_count; i++) {
-        if (s_fbo_gc_targets[i]) {
-            C3D_RenderTargetDelete(s_fbo_gc_targets[i]);
-            s_fbo_gc_targets[i] = NULL;
-        }
-    }
-    s_fbo_gc_count = 0;
+    fbo_gc_free_slot(g.frame_slot);
+}
+
+/* Free all slots — only when the GPU is idle (nova_fini). */
+void nova_fbo_gc_collect_all(void) {
+    for (int s = 0; s < NOVA_FBO_FRAME_SLOTS; s++) fbo_gc_free_slot(s);
 }
 
 static inline int fb_morton_offset(int x, int y, int pot_w, int pot_h) {
@@ -62,6 +86,9 @@ void glGenFramebuffers(GLsizei n, GLuint *ids) {
 void glDeleteFramebuffers(GLsizei n, const GLuint *ids) {
     if (n < 0) { gl_set_error(GL_INVALID_VALUE); return; }
     if (!ids) return;
+    /* Deleting the bound FBO reverts the draw target to the screen and queues
+     * the target for deletion — commit any pending batch first. */
+    nova_batch_flush();
     for (GLsizei i = 0; i < n; i++) {
         GLuint id = ids[i];
         if (id == 0 || id >= NOVA_MAX_FBOS) continue;
@@ -117,8 +144,11 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
      * effectively broken for any complete FBO.) */
     if (target == GL_READ_FRAMEBUFFER) {
         g.bound_read_fbo = new_bound;
-        return;
+        return;   /* read binding only — does NOT change the draw target */
     }
+    /* About to (possibly) change the DRAW target — commit the pending batch into
+     * the current target first, while the GPU still holds its state. */
+    nova_batch_flush();
     /* GL_FRAMEBUFFER updates BOTH bindings; GL_DRAW_FRAMEBUFFER only the draw one. */
     if (target == GL_FRAMEBUFFER) g.bound_read_fbo = new_bound;
 
@@ -154,13 +184,13 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
     /* OPT-IN WORKAROUND (-DNOVAGL_FBO_RESET_SCISSOR=1, default OFF): reset the
      * scissor to the FULL FBO when binding an offscreen target.
      *
-     * Per the GL spec the scissor box is GLOBAL context state and is NOT changed
-     * by a framebuffer bind, so the default build leaves it untouched (the app's
-     * scissor survives the bind, exactly like desktop GL). fast3d-style backends
-     * that force a full VIEWPORT for their 2D blits but DON'T reset the scissor
-     * (so an FBO render wrongly inherits the previous screen pass's scissor —
-     * the "dark menu blur" symptom) can opt back into the auto-reset. */
-#ifdef NOVAGL_FBO_RESET_SCISSOR
+     * ON by default (historical behaviour fast3d-style backends rely on): they
+     * force a full VIEWPORT for their 2D blits but DON'T reset the scissor, so
+     * an FBO render would otherwise inherit the previous screen pass's scissor
+     * (the "dark menu blur" / clipped post-process symptom). Strictly the GL
+     * scissor is global context state and shouldn't change on a bind — opt into
+     * that spec behaviour with -DNOVAGL_NO_FBO_RESET_SCISSOR=1. */
+#ifndef NOVAGL_NO_FBO_RESET_SCISSOR
     if (g.bound_fbo != 0) {
         GLuint ctex = g.fbos[framebuffer].color_tex_id;
         int lw = (ctex > 0 && ctex < NOVA_MAX_TEXTURES && g.textures[ctex].allocated)
@@ -240,6 +270,10 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
      * mandated/implemented type here (PICA colour buffer is RGBA8). */
     if (width < 0 || height < 0) { gl_set_error(GL_INVALID_VALUE); return; }
     if (type != GL_UNSIGNED_BYTE) { gl_set_error(GL_INVALID_ENUM); return; }
+
+    /* Commit pending draws so the read-back sees this frame's full geometry,
+     * not a framebuffer missing the un-issued batch. */
+    nova_batch_flush();
 
     /* Number of output channels by GL format. */
     int bpp;
@@ -408,6 +442,11 @@ void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, 
         return;
     }
 
+    /* Re-homing the texture to VRAM (immediate C3D_TexDelete of old storage) and
+     * re-pointing the FBO target are about to happen — commit any pending batch
+     * that might reference the current target / old storage first. */
+    nova_batch_flush();
+
     if (g.bound_fbo == 0 || g.bound_fbo >= NOVA_MAX_FBOS || !g.fbos[g.bound_fbo].in_use) {
         gl_set_error(GL_INVALID_OPERATION);
         return;
@@ -442,10 +481,15 @@ void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, 
         nova_queue_render_target_delete(fbo->target);
         fbo->target = NULL;
     }
-    /* D24S8 (not D16) so FBO depth precision + stencil match the main screen and
-     * the glClear / inverted-depth packing (which produces 24-bit depth + 8-bit
-     * stencil); a 16-bit FBO depth buffer silently lost stencil and z-fought. */
+    /* DEPTH16 by default (historical, lower VRAM). FBO stencil + D24 precision
+     * are opt-in via -DNOVAGL_FBO_DEPTH24_STENCIL8=1 — D24S8 doubles the FBO
+     * depth-buffer VRAM, which can fail RenderTarget creation on VRAM-tight
+     * scenes (PD's many per-frame effect FBOs). */
+#ifdef NOVAGL_FBO_DEPTH24_STENCIL8
     fbo->target = C3D_RenderTargetCreateFromTex(&slot->tex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH24_STENCIL8);
+#else
+    fbo->target = C3D_RenderTargetCreateFromTex(&slot->tex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH16);
+#endif
     fbo->color_tex_id = texture;
 
     if (!fbo->target) {
@@ -587,10 +631,14 @@ int novaCreateRenderTextureFBO(int width, int height, int has_depth,
     /* C3D_DEPTHTYPE is a transparent union — passing GPU_RB_DEPTH24_STENCIL8 picks
      * the enum branch, passing -1 (int) picks the "no depth" sentinel. */
     if (has_depth) {
-        /* D24S8 to match the screen + glClear/stencil packing (see
-         * glFramebufferTexture2D). */
+        /* DEPTH16 default (lower VRAM); D24S8 opt-in (see glFramebufferTexture2D). */
+#ifdef NOVAGL_FBO_DEPTH24_STENCIL8
         fbo->target = C3D_RenderTargetCreateFromTex(&slot->tex, GPU_TEXFACE_2D, 0,
                                                     GPU_RB_DEPTH24_STENCIL8);
+#else
+        fbo->target = C3D_RenderTargetCreateFromTex(&slot->tex, GPU_TEXFACE_2D, 0,
+                                                    GPU_RB_DEPTH16);
+#endif
     } else {
         fbo->target = C3D_RenderTargetCreateFromTex(&slot->tex, GPU_TEXFACE_2D, 0, -1);
     }
@@ -616,6 +664,18 @@ int novaCreateRenderTextureFBO(int width, int height, int has_depth,
         memset(slot->tex.data, 0, slot->tex.size);
         GSPGPU_FlushDataCache(slot->tex.data, slot->tex.size);
     }
+
+    /* CPU-memset нулей до VRAM-сэмплера в Citra может не доехать (hw-рендерер
+     * не перечитывает emulated VRAM при создании host-поверхности) — чистим и
+     * GPU-заливкой тоже: это идёт через GX memory fill, который Citra честно
+     * исполняет. Иначе несэмплированный ещё FBO читается как цветной шум. */
+    C3D_RenderTargetClear(fbo->target, C3D_CLEAR_COLOR, 0x00000000, 0);
+
+    /* TEMP DIAG: физические адреса для Citra Pica surface viewer'а —
+     * tex data (VRAM) и colorBuf таргета. Убрать после отладки FBO-цепочки. */
+    printf("[FBOdiag] tex=%u fbo=%u data=%p colorBuf=%p pot=%dx%d\n",
+           (unsigned)tex_id, (unsigned)fbo_id, slot->tex.data,
+           (void *)fbo->target->frameBuf.colorBuf, pot_w, pot_h);
 
     *out_tex_id = tex_id;
     *out_fbo_id = fbo_id;
@@ -643,8 +703,51 @@ int novaCreateRenderTextureFBO(int width, int height, int has_depth,
 // TEV in REPLACE mode (out = TEX, no primary modulation, no depth test, no
 // blending). After the draw we restore the previous render target / state.
 // ---------------------------------------------------------------------------
+/* One-shot source override: when set, a src_fbo_id==0 blit samples this
+ * texture instead of the live app surface. Used by novaBlitSnapshotToFBO to
+ * capture the PREVIOUS frame (front-buffer semantics). */
+static C3D_Tex *s_blit_src_override;
+
+/* Front-buffer capture: blit the previous-frame snapshot into dst. Falls
+ * back to the live app surface when the snapshot isn't allocated. */
+int novaBlitSnapshotToFBO(GLuint dst_fbo_id)
+{
+    int r;
+    if (g.app_prev_target && g.app_prev_tex.data) {
+        s_blit_src_override = &g.app_prev_tex;
+        r = novaBlitTargetToFBO(0, dst_fbo_id);
+        s_blit_src_override = NULL;
+    } else {
+        r = novaBlitTargetToFBO(0, dst_fbo_id);
+    }
+    return r;
+}
+
 int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
 {
+    /* Commit any pending batch first: if the source is the current target its
+     * batched pixels must be in VRAM before the blit samples them, and the blit
+     * switches target + clobbers all GPU state regardless. */
+    nova_batch_flush();
+
+    /* Diagnostic for the "captured framebuffer shows garbage" bugs: log the
+     * first handful of blits so we can see whether the screen source (fb 0) and
+     * the dst FBO are actually backed. Lands in sdmc:/3ds/pd/stdout.txt. */
+    {
+        static int s_blit_diag = 0;
+        if (s_blit_diag < 24) {
+            s_blit_diag++;
+            GLuint stex = (src_fbo_id && src_fbo_id < NOVA_MAX_FBOS) ? g.fbos[src_fbo_id].color_tex_id : 0;
+            GLuint dtex = (dst_fbo_id && dst_fbo_id < NOVA_MAX_FBOS) ? g.fbos[dst_fbo_id].color_tex_id : 0;
+
+
+            printf("[blit] src=%u dst=%u app_target=%p app_tex=%p src_tex=%u dst_tex=%u dst_target=%p\n",
+                   src_fbo_id, dst_fbo_id, (void *)g.app_target, (void *)g.app_tex.data,
+                   (unsigned)stex, (unsigned)dtex,
+                   (dst_fbo_id && dst_fbo_id < NOVA_MAX_FBOS) ? (void *)g.fbos[dst_fbo_id].target : NULL);
+        }
+    }
+
     /* --- Resolve SOURCE as a sampleable C3D_Tex ------------------------- *
      * PICA texture units only address power-of-two dims, so we must bind a
      * real POT texture, never alias the NPOT physical LCD. "fb 0" (the
@@ -655,7 +758,8 @@ int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
     float su = 1.0f, sv = 1.0f; /* source logical/POT UV extent */
     if (src_fbo_id == 0) {
         if (!g.app_target || !g.app_tex.data) return 0; /* no app surface */
-        bind_tex = &g.app_tex;
+        /* Snapshot override (front-buffer capture) — same layout as app_tex. */
+        bind_tex = s_blit_src_override ? s_blit_src_override : &g.app_tex;
         su = (float) g.app_logical_w / (float) g.app_pot_w;
         sv = (float) g.app_logical_h / (float) g.app_pot_h;
     } else {
@@ -682,6 +786,12 @@ int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
      * SIDEWAYS, so a present into it must rotate 90°. We flag that here and apply
      * the tilt to the blit quad's projection below. */
     int dst_is_screen = (dst_fbo_id == 0);
+    /* Capturing the screen (app surface) INTO a landscape FBO is the inverse
+     * problem: the app surface is stored SIDEWAYS (it gets the per-draw tilt),
+     * FBOs are stored landscape, so the blit must apply the INVERSE 90° tilt or
+     * the captured image lands rotated. (PD's damage/scope blur + menu room
+     * backdrop all snapshot the screen this way.) */
+    int src_is_screen = (src_fbo_id == 0);
     if (dst_fbo_id == 0) {
         /* Prefer the POT app surface (presented later by novaSwapBuffers); if the
          * app surface is disabled (NOVAGL_APP_SURFACE=0, the default) blit
@@ -730,7 +840,15 @@ int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
     /* --- Configure TEV stage 0: out = TEX0 ------------------------------ */
     C3D_TexEnv *env = C3D_GetTexEnv(0);
     C3D_TexEnvInit(env);
+#ifdef NOVAGL_BLIT_DIAG_CONST_RED
+    /* TEMP DIAG: подменяем выборку текстуры константным красным — если
+     * downstream-цепочка (запись в FBO → ImageRect → бэкдроп) исправна,
+     * захваты станут красными; если нет — чёрный/магента укажут этап. */
+    C3D_TexEnvSrc(env, C3D_Both, GPU_CONSTANT, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+    C3D_TexEnvColor(env, 0xFF0000FF); /* R=FF A=FF */
+#else
     C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+#endif
     C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
     /* Passthrough stages 1..5 */
     for (int i = 1; i < 6; i++) {
@@ -758,13 +876,38 @@ int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
     /* --- Quad geometry: clip-space fullscreen, UV covers the SOURCE
      * logical sub-rect [0,su]x[0,sv]. NDC [-1,1], w=1. V uses the same
      * bottom-NDC→v-max flip convention this blit has always used. */
-    const float quad_verts[4 * 8] = {
-        /* x     y     z     w     u     v      colour (REPLACE ignores) */
-        -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, sv,    1.0f, 1.0f,
-         1.0f, -1.0f, 0.0f, 1.0f, su,   sv,    1.0f, 1.0f,
-         1.0f,  1.0f, 0.0f, 1.0f, su,   0.0f,  1.0f, 1.0f,
-        -1.0f,  1.0f, 0.0f, 1.0f, 0.0f, 0.0f,  1.0f, 1.0f,
+    /* 10 float'ов на вершину: pos4 + uv2 + color4. Раньше было 8 float'ов при
+     * color-лоадере на 4×GPU_FLOAT — атрибуты съедали 40 байт при страйде 32,
+     * и цвет читался из позиции СЛЕДУЮЩЕЙ вершины (REPLACE его игнорирует, но
+     * лэйаут был враньём — чинить, пока не выстрелило под другим TEV). */
+    /* Screen→FBO capture: the app surface stores the frame SIDEWAYS (per-draw
+     * tilt), the FBO is landscape. Instead of rotating the quad POSITIONS by an
+     * "inverse tilt" matrix (the old approach — it left the captured image
+     * rotated 90° inside the FBO, so consumers sampling the logical window saw
+     * mostly padding = the "black menu blur"), keep the positions as a plain
+     * fullscreen quad and TRANSPOSE THE UV FIELD: dst x walks the source's
+     * v axis, dst y walks the source's u axis. Derived from the present path
+     * (u ∝ fb column = logical y, v ∝ fb row = logical x). */
+    float quad_verts[4 * 10] = {
+        /* x     y     z     w     u     v     r     g     b     a */
+        -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, sv,   1.0f, 1.0f, 1.0f, 1.0f,
+         1.0f, -1.0f, 0.0f, 1.0f, su,   sv,   1.0f, 1.0f, 1.0f, 1.0f,
+         1.0f,  1.0f, 0.0f, 1.0f, su,   0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+        -1.0f,  1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
     };
+    if (src_is_screen && !dst_is_screen) {
+        /* corner (x,y) → uv: u=(y+1)/2·su, v=(1−x)/2·sv (transpose). */
+        const float uv_t[4][2] = {
+            { 0.0f, sv   },   /* (-1,-1) */
+            { 0.0f, 0.0f },   /* ( 1,-1) */
+            { su,   0.0f },   /* ( 1, 1) */
+            { su,   sv   },   /* (-1, 1) */
+        };
+        for (int ci = 0; ci < 4; ci++) {
+            quad_verts[ci * 10 + 4] = uv_t[ci][0];
+            quad_verts[ci * 10 + 5] = uv_t[ci][1];
+        }
+    }
 
     /* Stage the verts into the linear ring buffer (PICA reads attribs
      * straight from VRAM-mapped memory; client_array_buf is linearAlloc'd
@@ -796,7 +939,7 @@ int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
 
     C3D_BufInfo *bufInfo = C3D_GetBufInfo();
     BufInfo_Init(bufInfo);
-    BufInfo_Add(bufInfo, staged, 8 * sizeof(float), 3, 0x210);
+    BufInfo_Add(bufInfo, staged, 10 * sizeof(float), 3, 0x210);
 
     /* Use clipspace shader so position passes through (with depth clamp). */
     int prev_shader = g.active_shader;
@@ -826,6 +969,9 @@ int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
             clip_proj.r[1].x = 0.0f;  clip_proj.r[1].y = -1.0f;
             #endif
         }
+        /* src_is_screen: no position rotation — the sideways→landscape
+         * conversion happens through the transposed UV field on the quad
+         * (see quad_verts above). Identity projection. */
         if (g.uLoc_projection_clipspace >= 0) {
             C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection_clipspace, &clip_proj);
         }
@@ -842,6 +988,13 @@ int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
         GSPGPU_FlushDataCache(idx_staged, sizeof(quad_indices));
         C3D_DrawElements(GPU_TRIANGLES, 6, C3D_UNSIGNED_SHORT, idx_staged);
     }
+
+    /* Resolve the write into dst BEFORE we switch away / it gets sampled. PICA
+     * render-to-texture is only visible to a later texture fetch after the color
+     * buffer is flushed — without this split the capture's pixels are read back
+     * as stale/uninitialised VRAM (the rainbow-garbage damage/menu symptom).
+     * Mirrors the split nova_present_app does before sampling the app surface. */
+    C3D_FrameSplit(0);
 
     /* --- Restore --------------------------------------------------------- *
      * We trashed render target, viewport, depth/blend/alpha/cull/scissor,

@@ -345,25 +345,41 @@ static void apply_slot_params_to_tex(C3D_Tex *tex, const TexSlot *slot) {
  * C3D_TexDelete'd once the frame that referenced it has fully executed
  * (novaSwapBuffers collects after C3D_FrameBegin's SYNCDRAW wait). */
 #define NOVA_TEX_GC_SLOTS 128
-static C3D_Tex s_tex_gc[NOVA_TEX_GC_SLOTS];
-static int s_tex_gc_count = 0;
+#define NOVA_FRAME_SLOTS   3   /* max frame_buffers */
+/* Orphans are bucketed by the frame slot that created them. A bucket is only
+ * freed K (= frame_buffers) frames later, once the GPU has finished the frame
+ * that referenced it — see novaSwapBuffers. (Single-buffer K=1 is the old
+ * 1-frame deferral, safe because SYNCDRAW makes FrameBegin block.) */
+static C3D_Tex s_tex_gc[NOVA_FRAME_SLOTS][NOVA_TEX_GC_SLOTS];
+static int     s_tex_gc_count[NOVA_FRAME_SLOTS] = {0, 0, 0};
 
+static void tex_gc_free_slot(int s) {
+    for (int i = 0; i < s_tex_gc_count[s]; i++) C3D_TexDelete(&s_tex_gc[s][i]);
+    s_tex_gc_count[s] = 0;
+}
+
+/* Free the orphans parked in the CURRENT slot. Called at swap AFTER rotating to
+ * the next slot, so it reclaims the orphans from K frames ago (GPU done). */
 void nova_tex_gc_collect(void) {
-    for (int i = 0; i < s_tex_gc_count; i++) {
-        C3D_TexDelete(&s_tex_gc[i]);
-    }
-    s_tex_gc_count = 0;
+    tex_gc_free_slot(g.frame_slot);
+}
+
+/* Free every slot — only safe when the GPU is idle (nova_fini after FrameEnd +
+ * gspWaitForP3D). */
+void nova_tex_gc_collect_all(void) {
+    for (int s = 0; s < NOVA_FRAME_SLOTS; s++) tex_gc_free_slot(s);
 }
 
 void nova_tex_gc_push(C3D_Tex *tex) {
-    if (s_tex_gc_count >= NOVA_TEX_GC_SLOTS) {
-        /* GC full mid-frame (128 orphans in one frame — extreme). Flush the
-         * pending draws and wait so the entries become reclaimable. */
+    int s = g.frame_slot;
+    if (s_tex_gc_count[s] >= NOVA_TEX_GC_SLOTS) {
+        /* Slot full mid-frame (128 orphans in one frame — extreme). Flush the
+         * pending draws and wait so this slot's entries become reclaimable. */
         C3D_FrameSplit(0);
         gspWaitForP3D();
-        nova_tex_gc_collect();
+        tex_gc_free_slot(s);
     }
-    s_tex_gc[s_tex_gc_count++] = *tex;
+    s_tex_gc[s][s_tex_gc_count[s]++] = *tex;
     memset(tex, 0, sizeof(*tex));
 }
 
@@ -951,7 +967,7 @@ static void tex_image_cube_face(GLenum target, GLint level, GLsizei width, GLsiz
 /* Pixel transfer format/type validation shared by glTexImage2D / glTexSubImage2D
  * / the cube path. Returns 1 only for combinations NovaGL's upload path actually
  * handles correctly, so the GPU_RGBA8 reader is never fed a mismatched buffer. */
-static int tex_format_known(GLenum f) {
+__attribute__((unused)) static int tex_format_known(GLenum f) {
     switch (f) {
         case GL_RGBA: case GL_RGBA8_OES: case GL_RGB: case GL_BGRA: case GL_BGR:
         case GL_LUMINANCE: case GL_ALPHA: case GL_LUMINANCE_ALPHA:
@@ -960,7 +976,7 @@ static int tex_format_known(GLenum f) {
         default: return 0;
     }
 }
-static int tex_type_known(GLenum t) {
+__attribute__((unused)) static int tex_type_known(GLenum t) {
     switch (t) {
         case GL_UNSIGNED_BYTE: case GL_UNSIGNED_SHORT_4_4_4_4:
         case GL_UNSIGNED_SHORT_5_5_5_1: case GL_UNSIGNED_SHORT_5_6_5:
@@ -968,7 +984,7 @@ static int tex_type_known(GLenum t) {
         default: return 0;
     }
 }
-static int tex_format_type_supported(GLenum format, GLenum type) {
+__attribute__((unused)) static int tex_format_type_supported(GLenum format, GLenum type) {
     switch (format) {
         case GL_RGBA: case GL_RGBA8_OES:
             return type == GL_UNSIGNED_BYTE || type == GL_UNSIGNED_SHORT_4_4_4_4 ||
@@ -983,14 +999,24 @@ static int tex_format_type_supported(GLenum format, GLenum type) {
         default: return 0;
     }
 }
-/* Raise the spec-appropriate error for an unsupported (format,type): an
- * unrecognized token is GL_INVALID_ENUM; a known-but-incompatible pair is
- * GL_INVALID_OPERATION. Returns 1 if the pair is OK (no error). */
+/* (format,type) validation. LENIENT by default: returns 1 (allow) for any
+ * combination, so an unrecognized pair falls through to gl_to_gpu_texfmt's
+ * RGBA8 default exactly as the historical code did — this keeps ports that use
+ * formats outside NovaGL's explicit list (e.g. BGRA + UNSIGNED_INT_8_8_8_8_REV,
+ * which reads 4 bytes/texel just like RGBA8) working. Define
+ * -DNOVAGL_STRICT_TEX_FORMAT=1 to instead reject unsupported/mismatched pairs
+ * with GL_INVALID_ENUM/OPERATION (catches the over-read on a genuinely wrong
+ * combo like RGBA + UNSIGNED_SHORT_5_6_5). */
 static int tex_check_format_type(GLenum format, GLenum type) {
+#ifdef NOVAGL_STRICT_TEX_FORMAT
     if (tex_format_type_supported(format, type)) return 1;
     gl_set_error((tex_format_known(format) && tex_type_known(type))
                  ? GL_INVALID_OPERATION : GL_INVALID_ENUM);
     return 0;
+#else
+    (void) format; (void) type;
+    return 1;
+#endif
 }
 
 void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border,
@@ -1042,10 +1068,11 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
      * allocating — previously gl_to_gpu_texfmt silently aliased anything to
      * RGBA8, which over-read mismatched buffers and created a bogus texture. */
     if (!tex_check_format_type(format, type)) return;
-    /* width/height > GL_MAX_TEXTURE_SIZE (1024) is GL_INVALID_VALUE in a spec
-     * build. The auto-downscale (handy for oversized desktop atlases) is opt-in
-     * via -DNOVAGL_DOWNSCALE_OVERSIZE=1. */
-#ifndef NOVAGL_DOWNSCALE_OVERSIZE
+    /* width/height > GL_MAX_TEXTURE_SIZE (1024) is auto-downscaled below by
+     * default (a graceful fallback for oversized desktop atlases — better than a
+     * missing texture on a constrained device). The spec-strict behaviour
+     * (GL_INVALID_VALUE, no upload) is opt-in via -DNOVAGL_STRICT_MAX_TEXTURE_SIZE=1. */
+#ifdef NOVAGL_STRICT_MAX_TEXTURE_SIZE
     if (width > 1024 || height > 1024) {
         gl_set_error(GL_INVALID_VALUE);
         return;
@@ -1068,11 +1095,14 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     slot->orig_width = width;
     slot->orig_height = height;
 
-    /* Solid (single-colour) textures can be collapsed to an 8x8 stub to save
-     * VRAM — bit-exact for plain sampling, but it changes glTexSubImage2D /
-     * glCopyTexSubImage2D / readback behaviour, so it's a NONSTANDARD speedhack:
-     * opt-in via -DNOVAGL_SOLID_TEX_OPT=1. Default builds upload the real size. */
-#ifdef NOVAGL_SOLID_TEX_OPT
+    /* Single-colour textures are collapsed to an 8x8 stub to save VRAM. This is
+     * ON by default (it is bit-exact for plain sampling, and the glTexSubImage2D
+     * / glCopyTexSubImage2D paths now un-optimize a solid dest before writing,
+     * so the previously-observable cases are handled). Turning it OFF
+     * (-DNOVAGL_NO_SOLID_TEX_OPT=1) uploads real-size solids — more VRAM, which
+     * on VRAM-tight scenes can fail later texture allocations (= missing
+     * textures / holes), so keep it on unless you have a reason. */
+#ifndef NOVAGL_NO_SOLID_TEX_OPT
     int is_solid = is_texture_solid(pixels, width, height, format, type, g.unpack_alignment);
 #else
     int is_solid = 0;
@@ -1946,6 +1976,9 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
     TexSlot *slot = &g.textures[bound];
     if (!slot->allocated) { gl_set_error(GL_INVALID_OPERATION); return; }
     if (!g.current_target) return;
+    /* This reads the current target's color buffer back — commit pending draws
+     * so the copy captures this frame's full geometry. */
+    nova_batch_flush();
     /* A solid-optimized destination (opt-in NOVAGL_SOLID_TEX_OPT) is an 8x8 stub;
      * copying framebuffer pixels into it would clip to 8x8. Promote it to its
      * real size first so the copy lands correctly (matches glTexSubImage2D). */

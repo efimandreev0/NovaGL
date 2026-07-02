@@ -17,7 +17,18 @@ void glClear(GLbitfield mask) {
     u32 color = 0;
     u32 depth = 0;
 
+    /* By DEFAULT glClear clears every requested buffer regardless of the write
+     * masks — matches NovaGL's historical behaviour and what real ports rely on
+     * (PD/fast3d's gfx_novagl clears depth at frame start without re-enabling
+     * glDepthMask first; gating on a stale depthMask=FALSE left the depth buffer
+     * un-cleared and z-rejected the whole world). The strict spec behaviour
+     * (clear respects glColorMask/glDepthMask/stencil writemask) is opt-in via
+     * -DNOVAGL_CLEAR_RESPECTS_MASK=1. */
+#ifdef NOVAGL_CLEAR_RESPECTS_MASK
     int color_writable = g.color_mask_r || g.color_mask_g || g.color_mask_b || g.color_mask_a;
+#else
+    int color_writable = 1;
+#endif
     if ((mask & GL_COLOR_BUFFER_BIT) && color_writable) {
         bits |= C3D_CLEAR_COLOR;
         // Use +0.5f for proper rounding before casting to integer
@@ -43,8 +54,13 @@ void glClear(GLbitfield mask) {
      *
      * PICA depth is stored inverted vs GL (see apply_depth_map): GL's
      * glClearDepth(1.0) = far plane = PICA value 0. */
+#ifdef NOVAGL_CLEAR_RESPECTS_MASK
     int want_depth   = (mask & GL_DEPTH_BUFFER_BIT)   && g.depth_mask;
     int want_stencil = (mask & GL_STENCIL_BUFFER_BIT) && (g.stencil_write_mask != 0);
+#else
+    int want_depth   = (mask & GL_DEPTH_BUFFER_BIT)   != 0;
+    int want_stencil = (mask & GL_STENCIL_BUFFER_BIT) != 0;
+#endif
     if (want_depth || want_stencil) {
         bits |= C3D_CLEAR_DEPTH;
         u32 dval = (u32) ((1.0f - g.clear_depth) * 0xFFFFFF + 0.5f);
@@ -52,6 +68,10 @@ void glClear(GLbitfield mask) {
     }
 
     if (bits && g.current_target) {
+        /* Commit pending deferred draws into the command list BEFORE the split,
+         * so they execute ahead of this clear's GX fill (the clear must not
+         * wipe geometry that was logically issued before it). */
+        nova_batch_flush();
         /* C3D_RenderTargetClear is an IMMEDIATE GX memory-fill, while the
          * draws recorded so far only reach the GPU at C3D_FrameEnd. Without
          * a split, a mid-frame clear lands BEFORE this frame's earlier draws
