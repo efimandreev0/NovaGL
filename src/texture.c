@@ -385,6 +385,10 @@ void nova_tex_gc_push(C3D_Tex *tex) {
 
 static void free_texture_storage(TexSlot *slot) {
     if (slot->allocated) {
+        /* Any FBO render target wrapping this storage would render into the
+         * freed buffer — orphan them first (they're re-wired from the new
+         * storage on the next glBindFramebuffer / glFramebufferTexture2D). */
+        nova_fbo_orphan_texture_targets((GLuint) (slot - g.textures));
         if (slot->is_cube) {
             /* Cube face buffers are referenced by slot->cube (embedded in the
              * slot), so they can't go through the deferred orphan GC, which
@@ -439,8 +443,31 @@ int nova_texture_make_vram_target(GLuint texture) {
 
     C3D_Tex newtex;
     if (!C3D_TexInitVRAM(&newtex, (u16) slot->pot_w, (u16) slot->pot_h, slot->fmt)) {
-        gl_set_error(GL_OUT_OF_MEMORY);
-        return 0;
+        /* VRAM exhausted. Butterscotch-style fallback: a linear-RAM colour
+         * buffer is a valid PICA render target too (citro3d resolves the
+         * physical address either way — Butterscotch ships exactly this
+         * C3D_TexInitVRAM→C3D_TexInit fallback for its surfaces). Reuse the
+         * existing linear storage when it's a flat base-level allocation;
+         * re-init flat when it carries mips (targets are single-level). */
+        if (slot->has_mipmap || !slot->tex.data) {
+            if (!C3D_TexInit(&newtex, (u16) slot->pot_w, (u16) slot->pot_h, slot->fmt)) {
+                gl_set_error(GL_OUT_OF_MEMORY);
+                return 0;
+            }
+            C3D_TexDelete(&slot->tex);
+            slot->tex = newtex;
+        }
+        slot->has_mipmap = 0;
+        /* is_vram doubles as "storage is render-target-capable — never re-home
+         * it again"; set it for the linear fallback too so repeat attaches
+         * don't re-zero the texture every call. */
+        slot->is_vram = 1;
+        apply_slot_params_to_tex(&slot->tex, slot);
+        if (slot->tex.data && slot->tex.size > 0) {
+            memset(slot->tex.data, 0, slot->tex.size);
+            GSPGPU_FlushDataCache(slot->tex.data, slot->tex.size);
+        }
+        return 1;
     }
     C3D_TexDelete(&slot->tex);
     slot->tex = newtex;
@@ -780,6 +807,15 @@ void glDeleteTextures(GLsizei n, const GLuint *textures) {
         if (id > 0 && id < NOVA_MAX_TEXTURES && g.textures[id].in_use) {
             free_texture_storage(&g.textures[id]);
             g.textures[id].in_use = 0;
+
+            /* Unlike a re-spec, DELETING the texture detaches it from any FBO
+             * (GL semantics) — otherwise a recycled id would silently re-wire
+             * an unrelated texture into an old FBO on the next bind. The
+             * targets themselves were already orphaned by free_texture_storage. */
+            for (int f = 1; f < NOVA_MAX_FBOS; f++) {
+                if (g.fbos[f].in_use && g.fbos[f].color_tex_id == id)
+                    g.fbos[f].color_tex_id = 0;
+            }
 
             /* Don't C3D_TexBind(unit, NULL) — passing NULL through libctru is
              * not universally safe; instead invalidate the bind cache so the
@@ -1976,8 +2012,8 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
     TexSlot *slot = &g.textures[bound];
     if (!slot->allocated) { gl_set_error(GL_INVALID_OPERATION); return; }
     if (!g.current_target) return;
-    /* This reads the current target's color buffer back — commit pending draws
-     * so the copy captures this frame's full geometry. */
+    /* This reads the framebuffer back — commit pending draws so the copy
+     * captures this frame's full geometry. */
     nova_batch_flush();
     /* A solid-optimized destination (opt-in NOVAGL_SOLID_TEX_OPT) is an 8x8 stub;
      * copying framebuffer pixels into it would clip to 8x8. Promote it to its
@@ -1989,7 +2025,33 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
                      GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     }
 
-    C3D_FrameBuf *fb = &g.current_target->frameBuf;
+    /* GPU fast path (Butterscotch's ctr_create_surf_ex pattern): full-texture
+     * snapshots — the sprite_create_from_surface family, and everything coming
+     * through glCopyTexImage2D — are drawn by the GPU into the destination
+     * instead of the per-pixel morton loop + full GPU sync below. The GPU
+     * handles the tiling, the format conversion and the sideways-screen
+     * rotation; typical cost drops from ~8-10ms CPU + sync stall to one quad. */
+    if (nova_copy_read_fb_to_texture(bound, xoffset, yoffset, x, y, width, height))
+        return;
+
+    /* --- CPU fallback ---------------------------------------------------- *
+     * Source = the GL_READ_FRAMEBUFFER binding (same as glReadPixels and the
+     * blit path). The screen is stored sideways (axis swap below); FBO content
+     * is landscape and copies 1:1 — the old code applied the screen swap to
+     * FBO sources too, transposing every FBO readback into garbage. */
+    C3D_RenderTarget *src_tgt;
+    int src_is_screen;
+    if (g.bound_read_fbo != 0) {
+        src_is_screen = 0;
+        src_tgt = (g.bound_read_fbo < NOVA_MAX_FBOS && g.fbos[g.bound_read_fbo].in_use)
+                      ? g.fbos[g.bound_read_fbo].target : NULL;
+    } else {
+        src_is_screen = 1;
+        src_tgt = g.app_target ? g.app_target : g.current_target;
+    }
+    if (!src_tgt) return;
+
+    C3D_FrameBuf *fb = &src_tgt->frameBuf;
     uint32_t *fb_data = (uint32_t *) fb->colorBuf;
     if (!fb_data) return;
 
@@ -2003,7 +2065,7 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
      * format). When source is the screen, the axis-swap rule still applies
      * and we have to keep the per-pixel path. */
 #ifndef NOVAGL_DISABLE_GLCOPYTEXSUB_HW
-    if (g.bound_fbo != 0 && slot->fmt == GPU_RGBA8 &&
+    if (!src_is_screen && slot->fmt == GPU_RGBA8 &&
         x == 0 && y == 0 && xoffset == 0 && yoffset == 0 &&
         width == fb_w && height == fb_h &&
         slot->pot_w == fb_w && slot->pot_h == fb_h) {
@@ -2022,8 +2084,17 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
             int logical_x = x + cx;
             int logical_y = y + cy;
 
-            int phys_x = logical_y;
-            int phys_y = logical_x;
+            int phys_x, phys_y;
+            if (src_is_screen) {
+                /* Screen storage is sideways: fb column = logical y, row = x. */
+                phys_x = logical_y;
+                phys_y = logical_x;
+            } else {
+                /* FBO storage is landscape — identity mapping (matches the
+                 * raw-layout HW fast path above). */
+                phys_x = logical_x;
+                phys_y = logical_y;
+            }
 
             if (phys_x < 0 || phys_x >= fb_w || phys_y < 0 || phys_y >= fb_h) continue;
 

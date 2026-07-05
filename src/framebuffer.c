@@ -45,6 +45,34 @@ static void nova_queue_render_target_delete(C3D_RenderTarget *target) {
     s_fbo_gc_targets[s][s_fbo_gc_count[s]++] = target;
 }
 
+/* Called from free_texture_storage (texture.c) whenever a texture's storage is
+ * about to be orphaned/re-created: any FBO render target wrapping that storage
+ * would keep rendering into the freed buffer. Queue those targets for GC and
+ * clear the pointer; the ATTACHMENT itself survives (GL semantics — re-specifying
+ * an attached texture keeps it attached), so color_tex_id stays and the target
+ * is re-wired from the new storage on the next glBindFramebuffer /
+ * glFramebufferTexture2D (see the lazy re-wire in glBindFramebuffer). */
+void nova_fbo_orphan_texture_targets(GLuint tex_id) {
+    if (tex_id == 0) return;
+    for (int i = 1; i < NOVA_MAX_FBOS; i++) {
+        FBOSlot *fbo = &g.fbos[i];
+        if (!fbo->in_use || fbo->color_tex_id != tex_id || !fbo->target) continue;
+        if (g.current_target == fbo->target) {
+            /* The live draw target is dying — flush what's queued for it and
+             * park drawing on the logical screen until the FBO is re-wired. */
+            nova_batch_flush();
+            C3D_FrameSplit(0);
+            C3D_RenderTarget *scr = g.app_target ? g.app_target : g.render_target_top;
+            if (scr) {
+                C3D_FrameDrawOn(scr);
+                g.current_target = scr;
+            }
+        }
+        nova_queue_render_target_delete(fbo->target);
+        fbo->target = NULL;
+    }
+}
+
 /* Free the CURRENT slot's targets (called at swap after rotating to the next
  * slot — reclaims targets from K frames ago, GPU done). */
 void nova_fbo_gc_collect(void) {
@@ -151,6 +179,29 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
     nova_batch_flush();
     /* GL_FRAMEBUFFER updates BOTH bindings; GL_DRAW_FRAMEBUFFER only the draw one. */
     if (target == GL_FRAMEBUFFER) g.bound_read_fbo = new_bound;
+
+    /* Lazy re-wire: the attachment survives a glTexImage2D re-spec (GL
+     * semantics), but the C3D target wrapping the OLD storage was orphaned by
+     * nova_fbo_orphan_texture_targets. Recreate it from the new storage here,
+     * the first time the FBO is bound again. This is the GL-shaped version of
+     * Butterscotch's surface slot reuse: same slot, storage swapped under it. */
+    if (framebuffer != 0 && !new_target) {
+        FBOSlot *fbo = &g.fbos[framebuffer];
+        GLuint ctex = fbo->color_tex_id;
+        if (ctex > 0 && ctex < NOVA_MAX_TEXTURES && g.textures[ctex].in_use &&
+            g.textures[ctex].allocated && !g.textures[ctex].is_cube &&
+            nova_texture_make_vram_target(ctex)) {
+#ifdef NOVAGL_FBO_DEPTH24_STENCIL8
+            fbo->target = C3D_RenderTargetCreateFromTex(&g.textures[ctex].tex,
+                                                        GPU_TEXFACE_2D, 0,
+                                                        GPU_RB_DEPTH24_STENCIL8);
+#else
+            fbo->target = C3D_RenderTargetCreateFromTex(&g.textures[ctex].tex,
+                                                        GPU_TEXFACE_2D, 0, GPU_RB_DEPTH16);
+#endif
+            new_target = fbo->target;
+        }
+    }
 
     if (framebuffer != 0 && !new_target) {
         /* FBO with no colour attachment yet: record the draw binding so a later
@@ -477,6 +528,16 @@ void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, 
         return;
     }
 
+    /* Anti-churn (Butterscotch's surface-slot-reuse fix): re-attaching the SAME
+     * texture whose storage hasn't moved keeps the existing target. Engines
+     * that run their attach path every frame (GM-style per-frame surfaces)
+     * otherwise orphan + recreate a render target per call — hundreds of GC
+     * entries and creation stalls per second for a no-op state change. */
+    if (fbo->color_tex_id == texture && fbo->target &&
+        fbo->target->frameBuf.colorBuf == slot->tex.data) {
+        return;
+    }
+
     if (fbo->target) {
         nova_queue_render_target_delete(fbo->target);
         fbo->target = NULL;
@@ -671,12 +732,6 @@ int novaCreateRenderTextureFBO(int width, int height, int has_depth,
      * исполняет. Иначе несэмплированный ещё FBO читается как цветной шум. */
     C3D_RenderTargetClear(fbo->target, C3D_CLEAR_COLOR, 0x00000000, 0);
 
-    /* TEMP DIAG: физические адреса для Citra Pica surface viewer'а —
-     * tex data (VRAM) и colorBuf таргета. Убрать после отладки FBO-цепочки. */
-    printf("[FBOdiag] tex=%u fbo=%u data=%p colorBuf=%p pot=%dx%d\n",
-           (unsigned)tex_id, (unsigned)fbo_id, slot->tex.data,
-           (void *)fbo->target->frameBuf.colorBuf, pot_w, pot_h);
-
     *out_tex_id = tex_id;
     *out_fbo_id = fbo_id;
     return 1;
@@ -708,6 +763,281 @@ int novaCreateRenderTextureFBO(int width, int height, int has_depth,
  * capture the PREVIOUS frame (front-buffer semantics). */
 static C3D_Tex *s_blit_src_override;
 
+/* ---------------------------------------------------------------------------
+ * nova_gpu_blit_quad — the shared GPU copy core (Butterscotch's
+ * ctr_create_surf_ex pattern, proven on hardware): draw src_tex through a
+ * REPLACE TEV onto dst_tgt's (0,0,vp_w,vp_h) viewport as one fullscreen
+ * clip-space quad with caller-supplied per-corner UVs. The GPU untiles,
+ * retiles, converts formats and (via the UV field) rotates — no CPU morton
+ * math, no gspWaitForP3D stall.
+ *
+ * Caller contract: pending batch flushed + C3D_FrameSplit issued BEFORE (so
+ * the source's pixels are resolved in memory); AFTER the call the caller
+ * restores its render target and calls nova_invalidate_state_cache() — we
+ * clobber TEV, attr/buf info, viewport, depth/blend/cull/scissor, texture
+ * bind and shader. UV corner order: (-1,-1) (1,-1) (1,1) (-1,1).
+ * tilt_for_screen applies the 90° present tilt (landscape source onto the
+ * sideways-stored screen). vp_x/vp_y place the write window inside the dst
+ * framebuffer (the FBO/blit convention writes at (0,0); the glCopyTex* path
+ * writes at (0, pot_h - h) to land in the same rows a CPU upload fills).
+ * Returns 1 on success, 0 if the vertex/index ring had no room this frame.
+ * ------------------------------------------------------------------------- */
+static int nova_gpu_blit_quad(C3D_Tex *src_tex, const float uv[4][2],
+                              C3D_RenderTarget *dst_tgt,
+                              int vp_x, int vp_y, int vp_w, int vp_h,
+                              int tilt_for_screen)
+{
+    C3D_FrameDrawOn(dst_tgt);
+    g.current_target = dst_tgt;
+
+    /* --- Configure TEV stage 0: out = TEX0 ------------------------------ */
+    C3D_TexEnv *env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+#ifdef NOVAGL_BLIT_DIAG_CONST_RED
+    /* TEMP DIAG: подменяем выборку текстуры константным красным — если
+     * downstream-цепочка (запись в FBO → ImageRect → бэкдроп) исправна,
+     * захваты станут красными; если нет — чёрный/магента укажут этап. */
+    C3D_TexEnvSrc(env, C3D_Both, GPU_CONSTANT, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+    C3D_TexEnvColor(env, 0xFF0000FF); /* R=FF A=FF */
+#else
+    C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+#endif
+    C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+    /* Passthrough stages 1..5 */
+    for (int i = 1; i < 6; i++) {
+        C3D_TexEnv *e = C3D_GetTexEnv(i);
+        C3D_TexEnvInit(e);
+        C3D_TexEnvSrc(e, C3D_Both, GPU_PREVIOUS, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+        C3D_TexEnvFunc(e, C3D_Both, GPU_REPLACE);
+    }
+
+    C3D_TexBind(0, src_tex);
+
+    /* --- Disable depth / blend / cull / scissor ------------------------- */
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                   GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    C3D_CullFace(GPU_CULL_NONE);
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+
+    /* --- Viewport over the dst write window ----------------------------- */
+    C3D_SetViewport((u32) vp_x, (u32) vp_y, (u32) vp_w, (u32) vp_h);
+
+    /* 10 float'ов на вершину: pos4 + uv2 + color4 (см. историю: лэйаут должен
+     * совпадать с лоадерами, иначе цвет читается из соседней вершины). */
+    float quad_verts[4 * 10] = {
+        /* x     y     z     w     u         v         r     g     b     a */
+        -1.0f, -1.0f, 0.0f, 1.0f, uv[0][0], uv[0][1], 1.0f, 1.0f, 1.0f, 1.0f,
+         1.0f, -1.0f, 0.0f, 1.0f, uv[1][0], uv[1][1], 1.0f, 1.0f, 1.0f, 1.0f,
+         1.0f,  1.0f, 0.0f, 1.0f, uv[2][0], uv[2][1], 1.0f, 1.0f, 1.0f, 1.0f,
+        -1.0f,  1.0f, 0.0f, 1.0f, uv[3][0], uv[3][1], 1.0f, 1.0f, 1.0f, 1.0f,
+    };
+
+    /* Stage the verts into the linear ring buffer (PICA reads attribs
+     * straight from VRAM-mapped memory). */
+    const int vbytes = sizeof(quad_verts);
+    uint8_t *staged = (uint8_t *)linear_alloc_ring(g.client_array_buf,
+                                                   &g.client_array_buf_offset,
+                                                   vbytes,
+                                                   g.client_array_buf_size);
+    if (!staged) return 0;
+    memcpy(staged, quad_verts, vbytes);
+    GSPGPU_FlushDataCache(staged, vbytes);
+
+    /* Bind attributes: pos(4f), uv(2f), color(4f) at stride 40 */
+    AttrInfo_Init(&g.attr_info);
+    AttrInfo_AddLoader(&g.attr_info, 0, GPU_FLOAT, 4);  /* position */
+    AttrInfo_AddLoader(&g.attr_info, 1, GPU_FLOAT, 2);  /* texcoord */
+    AttrInfo_AddLoader(&g.attr_info, 2, GPU_FLOAT, 4);  /* color (TEV ignores in REPLACE) */
+    C3D_SetAttrInfo(&g.attr_info);
+
+    C3D_BufInfo *bufInfo = C3D_GetBufInfo();
+    BufInfo_Init(bufInfo);
+    BufInfo_Add(bufInfo, staged, 10 * sizeof(float), 3, 0x210);
+
+    /* Use clipspace shader so position passes through (with depth clamp). */
+    int prev_shader = g.active_shader;
+    int prev_clipspace = g.clipspace_mode_enabled;
+    if (g.shader_clipspace_dvlb) {
+        C3D_BindProgram(&g.shader_clipspace_program);
+        g.active_shader = NOVA_SHADER_CLIPSPACE;
+        /* The quad is already in clip space. For an FBO->FBO copy upload identity
+         * (landscape->landscape, no rotation). For a present onto the logical
+         * screen, upload the SAME 90° tilt the normal per-draw path uses (see
+         * utils.c) so the landscape source lands upright on the sideways screen.
+         * Keep NOVAGL_TILT_VARIANT in sync with utils.c. */
+        C3D_Mtx clip_proj;
+        Mtx_Identity(&clip_proj);
+        if (tilt_for_screen) {
+            #ifndef NOVAGL_TILT_VARIANT
+            #define NOVAGL_TILT_VARIANT 1
+            #endif
+            #if NOVAGL_TILT_VARIANT == 1
+            clip_proj.r[0].x = 0.0f; clip_proj.r[0].y =  1.0f;
+            clip_proj.r[1].x = -1.0f; clip_proj.r[1].y = 0.0f;
+            #elif NOVAGL_TILT_VARIANT == 2
+            clip_proj.r[0].x = 0.0f; clip_proj.r[0].y = -1.0f;
+            clip_proj.r[1].x = 1.0f;  clip_proj.r[1].y = 0.0f;
+            #elif NOVAGL_TILT_VARIANT == 3
+            clip_proj.r[0].x = -1.0f; clip_proj.r[0].y = 0.0f;
+            clip_proj.r[1].x = 0.0f;  clip_proj.r[1].y = -1.0f;
+            #endif
+        }
+        if (g.uLoc_projection_clipspace >= 0) {
+            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection_clipspace, &clip_proj);
+        }
+    }
+
+    /* Draw as 2 triangles (fan-equivalent: 0-1-2, 0-2-3). */
+    static const uint16_t quad_indices[6] = { 0, 1, 2, 0, 2, 3 };
+    uint8_t *idx_staged = (uint8_t *)linear_alloc_ring(g.index_buf,
+                                                       &g.index_buf_offset,
+                                                       sizeof(quad_indices),
+                                                       g.index_buf_size);
+    int drew = 0;
+    if (idx_staged) {
+        memcpy(idx_staged, quad_indices, sizeof(quad_indices));
+        GSPGPU_FlushDataCache(idx_staged, sizeof(quad_indices));
+        C3D_DrawElements(GPU_TRIANGLES, 6, C3D_UNSIGNED_SHORT, idx_staged);
+        drew = 1;
+    }
+
+    /* Resolve the write into dst BEFORE we switch away / it gets sampled. PICA
+     * render-to-texture is only visible to a later texture fetch after the color
+     * buffer is flushed — without this split the capture's pixels are read back
+     * as stale/uninitialised VRAM (the rainbow-garbage damage/menu symptom). */
+    C3D_FrameSplit(0);
+
+    g.active_shader = prev_shader;
+    g.clipspace_mode_enabled = prev_clipspace;
+    return drew;
+}
+
+/* ---------------------------------------------------------------------------
+ * nova_copy_read_fb_to_texture — GPU path for glCopyTex(Sub)Image2D.
+ *
+ * Butterscotch's ctr_create_surf_ex proved this on hardware: instead of
+ * untangling the tiled/Morton colour buffer with CPU math (slow, a full
+ * gspWaitForP3D stall, AND wrong for the FBO layout — the old loop applied
+ * the sideways-screen axis swap to landscape FBO sources too), wrap the
+ * destination texture in a render target and let the GPU draw the source
+ * region as a textured quad. Only FULL-texture copies take this path (the
+ * sprite_create_from_surface / snapshot family — glCopyTexImage2D always
+ * lands here); partial updates keep the CPU fallback so untouched texels
+ * survive the VRAM promotion. Returns 1 = copied, 0 = use the CPU path.
+ * ------------------------------------------------------------------------- */
+int nova_copy_read_fb_to_texture(GLuint tex_id, GLint xoffset, GLint yoffset,
+                                 GLint x, GLint y, GLsizei w, GLsizei h) {
+    if (tex_id == 0 || tex_id >= NOVA_MAX_TEXTURES) return 0;
+    TexSlot *dst = &g.textures[tex_id];
+    if (!dst->in_use || !dst->allocated || dst->is_cube) return 0;
+    if (w <= 0 || h <= 0) return 0;
+    /* Full-destination copies only (see above). */
+    if (xoffset != 0 || yoffset != 0 || w != dst->width || h != dst->height) return 0;
+    /* Destination must be a renderable colour format — GPU_TEXCOLOR values
+     * 0..4 map 1:1 onto GPU_COLORBUF (RGBA8/RGB8/RGBA5551/RGB565/RGBA4).
+     * LA8 and friends keep the CPU path. */
+    if (dst->fmt != GPU_RGBA8 && dst->fmt != GPU_RGB8 && dst->fmt != GPU_RGBA5551 &&
+        dst->fmt != GPU_RGB565 && dst->fmt != GPU_RGBA4) return 0;
+
+    /* --- Resolve the READ framebuffer as a sampleable texture + the UV
+     * window of the (x,y,w,h) rect. Same conventions as novaBlitTargetToFBO:
+     * FBO sources are landscape (v runs sv at GL-bottom → 0 at top); the
+     * screen is stored sideways, so its field is transposed (u follows the
+     * source y axis, v follows source x) — the GPU does the rotation. */
+    C3D_Tex *src_tex;
+    float uv[4][2]; /* corner order (-1,-1) (1,-1) (1,1) (-1,1) */
+    if (g.bound_read_fbo == 0) {
+        /* Screen source needs the POT app surface; the raw LCD target is NPOT
+         * and can't be sampled — direct-to-LCD builds use the CPU path. */
+        if (!g.app_target || !g.app_tex.data) return 0;
+        src_tex = &g.app_tex;
+        /* Sideways storage: screen col X lives at memory row 400-X, screen
+         * row Y at memory column Y (the tilt) — so the UV field is transposed:
+         * u follows the source y axis across the quad's NDC y, v follows
+         * source x across NDC x. u runs high-at-NDC-bottom because the
+         * destination is written in upload row order (rows inverted). */
+        float u_lo = (float) y / (float) g.app_pot_w;
+        float u_hi = (float) (y + h) / (float) g.app_pot_w;
+        float v_lo = (float) (g.app_logical_h - x) / (float) g.app_pot_h;
+        float v_hi = (float) (g.app_logical_h - (x + w)) / (float) g.app_pot_h;
+        uv[0][0] = u_hi; uv[0][1] = v_lo;
+        uv[1][0] = u_hi; uv[1][1] = v_hi;
+        uv[2][0] = u_lo; uv[2][1] = v_hi;
+        uv[3][0] = u_lo; uv[3][1] = v_lo;
+    } else {
+        if (g.bound_read_fbo >= NOVA_MAX_FBOS || !g.fbos[g.bound_read_fbo].in_use ||
+            !g.fbos[g.bound_read_fbo].target) return 0;
+        GLuint stex = g.fbos[g.bound_read_fbo].color_tex_id;
+        if (stex == 0 || stex >= NOVA_MAX_TEXTURES || !g.textures[stex].allocated) return 0;
+        /* Feedback loop (copying an FBO into its own colour texture) — the
+         * GPU can't sample its own render target; CPU path handles it. */
+        if (stex == tex_id) return 0;
+        TexSlot *ss = &g.textures[stex];
+        src_tex = &ss->tex;
+        /* FBO content occupies memory rows [0, height) (natural raster, the
+         * window the blit path samples as [0,sv]) — GL window row y+j is
+         * memory row y+j, so the rect's v window is [y, y+h)/pot_h. The v
+         * DIRECTION across the quad is flipped (v high at NDC bottom): the
+         * destination is written in upload row order (see the dst viewport
+         * note below), which inverts rows relative to FBO storage. */
+        float u_lo  = (float) x / (float) ss->pot_w;
+        float u_hi  = (float) (x + w) / (float) ss->pot_w;
+        float v_bot = (float) (y + h) / (float) ss->pot_h;
+        float v_top = (float) y / (float) ss->pot_h;
+        uv[0][0] = u_lo; uv[0][1] = v_bot;
+        uv[1][0] = u_hi; uv[1][1] = v_bot;
+        uv[2][0] = u_hi; uv[2][1] = v_top;
+        uv[3][0] = u_lo; uv[3][1] = v_top;
+    }
+
+    /* Destination storage must be render-target-capable. The copy covers the
+     * whole texture, so the promotion's zeroing loses nothing. */
+    if (!nova_texture_make_vram_target(tex_id)) return 0;
+
+    /* Reuse an FBO target already wrapping this texture — creating + GCing a
+     * transient target per snapshot is exactly the churn Butterscotch's slot
+     * reuse fixed. Only when none exists do we make a temp one. */
+    C3D_RenderTarget *dst_tgt = NULL;
+    int dst_tgt_is_temp = 0;
+    for (int i = 1; i < NOVA_MAX_FBOS; i++) {
+        if (g.fbos[i].in_use && g.fbos[i].color_tex_id == tex_id && g.fbos[i].target &&
+            g.fbos[i].target->frameBuf.colorBuf == dst->tex.data) {
+            dst_tgt = g.fbos[i].target;
+            break;
+        }
+    }
+    if (!dst_tgt) {
+        dst_tgt = C3D_RenderTargetCreateFromTex(&dst->tex, GPU_TEXFACE_2D, 0, -1);
+        if (!dst_tgt) return 0;
+        dst_tgt_is_temp = 1;
+    }
+
+    /* Commit pending work so the source's pixels are resolved in memory. */
+    nova_batch_flush();
+    C3D_FrameSplit(0);
+
+    C3D_RenderTarget *saved_target = g.current_target;
+    /* Write window (0, pot_h - h): a CPU upload places texel row j at memory
+     * row pot_h-1-j, i.e. the content occupies the TOP pot rows. The copy must
+     * land in the same window (in the same row order — the quad's v direction
+     * handles that) or regular texture sampling of an NPOT destination would
+     * read POT padding instead of the copied pixels. */
+    int ok = nova_gpu_blit_quad(src_tex, uv, dst_tgt,
+                                0, dst->pot_h - h, w, h, /*tilt_for_screen=*/0);
+
+    if (saved_target) {
+        C3D_FrameDrawOn(saved_target);
+        g.current_target = saved_target;
+    }
+    /* Temp target rides the orphan GC (Butterscotch's gc_add_target): the GPU
+     * may still be executing the copy, so no synchronous delete. */
+    if (dst_tgt_is_temp) nova_queue_render_target_delete(dst_tgt);
+    nova_invalidate_state_cache();
+    return ok;
+}
+
 /* Front-buffer capture: blit the previous-frame snapshot into dst. Falls
  * back to the live app surface when the snapshot isn't allocated. */
 int novaBlitSnapshotToFBO(GLuint dst_fbo_id)
@@ -729,24 +1059,6 @@ int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
      * batched pixels must be in VRAM before the blit samples them, and the blit
      * switches target + clobbers all GPU state regardless. */
     nova_batch_flush();
-
-    /* Diagnostic for the "captured framebuffer shows garbage" bugs: log the
-     * first handful of blits so we can see whether the screen source (fb 0) and
-     * the dst FBO are actually backed. Lands in sdmc:/3ds/pd/stdout.txt. */
-    {
-        static int s_blit_diag = 0;
-        if (s_blit_diag < 24) {
-            s_blit_diag++;
-            GLuint stex = (src_fbo_id && src_fbo_id < NOVA_MAX_FBOS) ? g.fbos[src_fbo_id].color_tex_id : 0;
-            GLuint dtex = (dst_fbo_id && dst_fbo_id < NOVA_MAX_FBOS) ? g.fbos[dst_fbo_id].color_tex_id : 0;
-
-
-            printf("[blit] src=%u dst=%u app_target=%p app_tex=%p src_tex=%u dst_tex=%u dst_target=%p\n",
-                   src_fbo_id, dst_fbo_id, (void *)g.app_target, (void *)g.app_tex.data,
-                   (unsigned)stex, (unsigned)dtex,
-                   (dst_fbo_id && dst_fbo_id < NOVA_MAX_FBOS) ? (void *)g.fbos[dst_fbo_id].target : NULL);
-        }
-    }
 
     /* --- Resolve SOURCE as a sampleable C3D_Tex ------------------------- *
      * PICA texture units only address power-of-two dims, so we must bind a
@@ -833,185 +1145,49 @@ int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
     /* --- Save state we're about to clobber ------------------------------ */
     C3D_RenderTarget *saved_target = g.current_target;
     GLuint saved_bound_fbo = g.bound_fbo;
-
-    /* --- Bind dst as the render target --------------------------------- */
-    C3D_FrameDrawOn(dst_tgt);
-    g.current_target = dst_tgt;
     g.bound_fbo = dst_fbo_id;
 
-    /* --- Configure TEV stage 0: out = TEX0 ------------------------------ */
-    C3D_TexEnv *env = C3D_GetTexEnv(0);
-    C3D_TexEnvInit(env);
-#ifdef NOVAGL_BLIT_DIAG_CONST_RED
-    /* TEMP DIAG: подменяем выборку текстуры константным красным — если
-     * downstream-цепочка (запись в FBO → ImageRect → бэкдроп) исправна,
-     * захваты станут красными; если нет — чёрный/магента укажут этап. */
-    C3D_TexEnvSrc(env, C3D_Both, GPU_CONSTANT, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
-    C3D_TexEnvColor(env, 0xFF0000FF); /* R=FF A=FF */
-#else
-    C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
-#endif
-    C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
-    /* Passthrough stages 1..5 */
-    for (int i = 1; i < 6; i++) {
-        C3D_TexEnv *e = C3D_GetTexEnv(i);
-        C3D_TexEnvInit(e);
-        C3D_TexEnvSrc(e, C3D_Both, GPU_PREVIOUS, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
-        C3D_TexEnvFunc(e, C3D_Both, GPU_REPLACE);
-    }
-
-    C3D_TexBind(0, bind_tex);
-
-    /* --- Disable depth / blend / cull / scissor ------------------------- */
-    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
-    C3D_AlphaTest(false, GPU_ALWAYS, 0);
-    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
-                   GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
-    C3D_CullFace(GPU_CULL_NONE);
-    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
-
-    /* --- Set viewport over the dst LOGICAL extent ---------------------- *
-     * Draw into the logical region only (origin (0,0)), leaving POT padding
-     * untouched so a later logical/POT-scaled sample reads clean content. */
-    C3D_SetViewport(0, 0, (u32) dst_logical_w, (u32) dst_logical_h);
-
-    /* --- Quad geometry: clip-space fullscreen, UV covers the SOURCE
-     * logical sub-rect [0,su]x[0,sv]. NDC [-1,1], w=1. V uses the same
-     * bottom-NDC→v-max flip convention this blit has always used. */
-    /* 10 float'ов на вершину: pos4 + uv2 + color4. Раньше было 8 float'ов при
-     * color-лоадере на 4×GPU_FLOAT — атрибуты съедали 40 байт при страйде 32,
-     * и цвет читался из позиции СЛЕДУЮЩЕЙ вершины (REPLACE его игнорирует, но
-     * лэйаут был враньём — чинить, пока не выстрелило под другим TEV). */
-    /* Screen→FBO capture: the app surface stores the frame SIDEWAYS (per-draw
-     * tilt), the FBO is landscape. Instead of rotating the quad POSITIONS by an
-     * "inverse tilt" matrix (the old approach — it left the captured image
+    /* --- Per-corner UVs, order (-1,-1) (1,-1) (1,1) (-1,1) --------------- *
+     * Default landscape mapping covers the source logical sub-rect
+     * [0,su]x[0,sv] (bottom-NDC→v-max flip, this blit's historical
+     * convention).
+     *
+     * Screen→FBO capture: the app surface stores the frame SIDEWAYS (per-draw
+     * tilt), the FBO is landscape. Instead of rotating the quad POSITIONS by
+     * an "inverse tilt" matrix (the old approach — it left the captured image
      * rotated 90° inside the FBO, so consumers sampling the logical window saw
      * mostly padding = the "black menu blur"), keep the positions as a plain
      * fullscreen quad and TRANSPOSE THE UV FIELD: dst x walks the source's
      * v axis, dst y walks the source's u axis. Derived from the present path
      * (u ∝ fb column = logical y, v ∝ fb row = logical x). */
-    float quad_verts[4 * 10] = {
-        /* x     y     z     w     u     v     r     g     b     a */
-        -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, sv,   1.0f, 1.0f, 1.0f, 1.0f,
-         1.0f, -1.0f, 0.0f, 1.0f, su,   sv,   1.0f, 1.0f, 1.0f, 1.0f,
-         1.0f,  1.0f, 0.0f, 1.0f, su,   0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-        -1.0f,  1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+    float uv[4][2] = {
+        { 0.0f, sv   },
+        { su,   sv   },
+        { su,   0.0f },
+        { 0.0f, 0.0f },
     };
     if (src_is_screen && !dst_is_screen) {
         /* corner (x,y) → uv: u=(y+1)/2·su, v=(1−x)/2·sv (transpose). */
-        const float uv_t[4][2] = {
-            { 0.0f, sv   },   /* (-1,-1) */
-            { 0.0f, 0.0f },   /* ( 1,-1) */
-            { su,   0.0f },   /* ( 1, 1) */
-            { su,   sv   },   /* (-1, 1) */
-        };
-        for (int ci = 0; ci < 4; ci++) {
-            quad_verts[ci * 10 + 4] = uv_t[ci][0];
-            quad_verts[ci * 10 + 5] = uv_t[ci][1];
-        }
+        uv[0][0] = 0.0f; uv[0][1] = sv;
+        uv[1][0] = 0.0f; uv[1][1] = 0.0f;
+        uv[2][0] = su;   uv[2][1] = 0.0f;
+        uv[3][0] = su;   uv[3][1] = sv;
     }
 
-    /* Stage the verts into the linear ring buffer (PICA reads attribs
-     * straight from VRAM-mapped memory; client_array_buf is linearAlloc'd
-     * for exactly this purpose). */
-    const int vbytes = sizeof(quad_verts);
-    uint8_t *staged = (uint8_t *)linear_alloc_ring(g.client_array_buf,
-                                                   &g.client_array_buf_offset,
-                                                   vbytes,
-                                                   g.client_array_buf_size);
-    if (!staged) {
-        /* Restore and bail */
-        if (saved_target) {
-            C3D_FrameDrawOn(saved_target);
-            g.current_target = saved_target;
-            g.bound_fbo = saved_bound_fbo;
-        }
-        nova_invalidate_state_cache();
-        return 0;
-    }
-    memcpy(staged, quad_verts, vbytes);
-    GSPGPU_FlushDataCache(staged, vbytes);
-
-    /* Bind attributes: pos(4f), uv(2f), color(4f) at stride 32 */
-    AttrInfo_Init(&g.attr_info);
-    AttrInfo_AddLoader(&g.attr_info, 0, GPU_FLOAT, 4);  /* position */
-    AttrInfo_AddLoader(&g.attr_info, 1, GPU_FLOAT, 2);  /* texcoord */
-    AttrInfo_AddLoader(&g.attr_info, 2, GPU_FLOAT, 4);  /* color (TEV ignores in REPLACE) */
-    C3D_SetAttrInfo(&g.attr_info);
-
-    C3D_BufInfo *bufInfo = C3D_GetBufInfo();
-    BufInfo_Init(bufInfo);
-    BufInfo_Add(bufInfo, staged, 10 * sizeof(float), 3, 0x210);
-
-    /* Use clipspace shader so position passes through (with depth clamp). */
-    int prev_shader = g.active_shader;
-    int prev_clipspace = g.clipspace_mode_enabled;
-    if (g.shader_clipspace_dvlb) {
-        C3D_BindProgram(&g.shader_clipspace_program);
-        g.active_shader = NOVA_SHADER_CLIPSPACE;
-        /* The quad is already in clip space. For an FBO->FBO copy upload identity
-         * (landscape->landscape, no rotation). For a present onto the logical
-         * screen, upload the SAME 90° tilt the normal per-draw path uses (see
-         * utils.c) so the landscape source lands upright on the sideways screen.
-         * Keep NOVAGL_TILT_VARIANT in sync with utils.c. */
-        C3D_Mtx clip_proj;
-        Mtx_Identity(&clip_proj);
-        if (dst_is_screen) {
-            #ifndef NOVAGL_TILT_VARIANT
-            #define NOVAGL_TILT_VARIANT 1
-            #endif
-            #if NOVAGL_TILT_VARIANT == 1
-            clip_proj.r[0].x = 0.0f; clip_proj.r[0].y =  1.0f;
-            clip_proj.r[1].x = -1.0f; clip_proj.r[1].y = 0.0f;
-            #elif NOVAGL_TILT_VARIANT == 2
-            clip_proj.r[0].x = 0.0f; clip_proj.r[0].y = -1.0f;
-            clip_proj.r[1].x = 1.0f;  clip_proj.r[1].y = 0.0f;
-            #elif NOVAGL_TILT_VARIANT == 3
-            clip_proj.r[0].x = -1.0f; clip_proj.r[0].y = 0.0f;
-            clip_proj.r[1].x = 0.0f;  clip_proj.r[1].y = -1.0f;
-            #endif
-        }
-        /* src_is_screen: no position rotation — the sideways→landscape
-         * conversion happens through the transposed UV field on the quad
-         * (see quad_verts above). Identity projection. */
-        if (g.uLoc_projection_clipspace >= 0) {
-            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection_clipspace, &clip_proj);
-        }
-    }
-
-    /* Draw as 2 triangles (fan-equivalent: 0-1-2, 0-2-3). */
-    static const uint16_t quad_indices[6] = { 0, 1, 2, 0, 2, 3 };
-    uint8_t *idx_staged = (uint8_t *)linear_alloc_ring(g.index_buf,
-                                                       &g.index_buf_offset,
-                                                       sizeof(quad_indices),
-                                                       g.index_buf_size);
-    if (idx_staged) {
-        memcpy(idx_staged, quad_indices, sizeof(quad_indices));
-        GSPGPU_FlushDataCache(idx_staged, sizeof(quad_indices));
-        C3D_DrawElements(GPU_TRIANGLES, 6, C3D_UNSIGNED_SHORT, idx_staged);
-    }
-
-    /* Resolve the write into dst BEFORE we switch away / it gets sampled. PICA
-     * render-to-texture is only visible to a later texture fetch after the color
-     * buffer is flushed — without this split the capture's pixels are read back
-     * as stale/uninitialised VRAM (the rainbow-garbage damage/menu symptom).
-     * Mirrors the split nova_present_app does before sampling the app surface. */
-    C3D_FrameSplit(0);
+    int ok = nova_gpu_blit_quad(bind_tex, uv, dst_tgt,
+                                0, 0, dst_logical_w, dst_logical_h, dst_is_screen);
 
     /* --- Restore --------------------------------------------------------- *
-     * We trashed render target, viewport, depth/blend/alpha/cull/scissor,
-     * TEV stages, AttrInfo, BufInfo, active shader, and bound texture. The
-     * cleanest restore is to mark the entire state cache dirty so the next
-     * apply_gpu_state re-pushes everything from g.* fields — much simpler
-     * than threading save/restore through every register. */
+     * The blit trashed render target, viewport, depth/blend/alpha/cull/
+     * scissor, TEV stages, AttrInfo, BufInfo, active shader, and bound
+     * texture. The cleanest restore is to mark the entire state cache dirty
+     * so the next apply_gpu_state re-pushes everything from g.* fields. */
     if (saved_target) {
         C3D_FrameDrawOn(saved_target);
         g.current_target = saved_target;
-        g.bound_fbo = saved_bound_fbo;
     }
-    g.active_shader = prev_shader;
-    g.clipspace_mode_enabled = prev_clipspace;
+    g.bound_fbo = saved_bound_fbo;
     nova_invalidate_state_cache();
 
-    return 1;
+    return ok;
 }

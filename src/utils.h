@@ -14,6 +14,19 @@ unsigned int nova_next_pow2(unsigned int v);
  * Returns 1 on success, 0 on failure. Defined in texture.c. */
 int nova_texture_make_vram_target(GLuint texture);
 
+/* GPU path for glCopyTex(Sub)Image2D: draw the READ framebuffer's (x,y,w,h)
+ * rect into texture `tex_id` via a render-target quad (Butterscotch's
+ * ctr_create_surf_ex pattern). Full-destination copies only. Returns 1 when
+ * copied, 0 when the caller must fall back to the CPU loop. framebuffer.c. */
+int nova_copy_read_fb_to_texture(GLuint tex_id, GLint xoffset, GLint yoffset,
+                                 GLint x, GLint y, GLsizei w, GLsizei h);
+
+/* Orphan (GC-delete) every FBO render target wrapping texture `tex_id`'s
+ * current storage. MUST be called before that storage is freed/re-created or
+ * the target keeps rendering into freed memory. Attachments survive (GL
+ * re-spec semantics) — targets are re-wired on the next bind. framebuffer.c. */
+void nova_fbo_orphan_texture_targets(GLuint tex_id);
+
 void *linear_alloc_ring(void *base, int *offset, int size, int capacity);
 
 float clampf(float x, float lo, float hi);
