@@ -23,6 +23,13 @@
 #include "NovaGL_shader_clipspace_shbin.h"
 #include "NovaGL_shader_lighting_shbin.h"
 
+/* VBlank pacing default for novaSwapBuffers (runtime-overridable through
+ * novaSetSwapInterval). Compile with -DNOVAGL_VSYNC=0 to free-run. Must be
+ * defined before nova_init_ex seeds g.swap_interval from it. */
+#ifndef NOVAGL_VSYNC
+#define NOVAGL_VSYNC 1
+#endif
+
 /* Primitive enums used by the draw-mode validator; values fixed by spec. */
 #ifndef GL_POINTS
 #define GL_POINTS 0x0000
@@ -658,11 +665,15 @@ static void nova_present_app(C3D_RenderTarget *lcd) {
     const int bytes = 6 * 28;
     uint8_t *staged = (uint8_t *) linear_alloc_ring(g.client_array_buf, &g.client_array_buf_offset,
                                                     bytes, g.client_array_buf_size);
-    memcpy(staged, v, (size_t) bytes);
-    GSPGPU_FlushDataCache(staged, (u32) bytes);
-    nova_setup_attr_info(4);
-    nova_setup_buf_info(staged, 28);
-    C3D_DrawArrays(GPU_TRIANGLES, 0, 6);
+    /* linear_alloc_ring can now return NULL (ring can't fit this draw). Skip
+     * the present quad rather than dereference NULL. */
+    if (staged) {
+        memcpy(staged, v, (size_t) bytes);
+        GSPGPU_FlushDataCache(staged, (u32) bytes);
+        nova_setup_attr_info(4);
+        nova_setup_buf_info(staged, 28);
+        C3D_DrawArrays(GPU_TRIANGLES, 0, 6);
+    }
 
     g.active_shader = prev_shader;
     g.clipspace_mode_enabled = prev_clipspace;
@@ -766,10 +777,7 @@ void novaSnapshotAppSurface(void) {
  * iteration) then spin absurdly fast. Waiting one VBlank per swap caps the
  * loop at 60 fps — the standard 3DS main-loop idiom — so per-frame animation
  * runs at a sane, hardware-consistent rate. Compile with -DNOVAGL_VSYNC=0 to
- * free-run (e.g. for benchmarking). */
-#ifndef NOVAGL_VSYNC
-#define NOVAGL_VSYNC 1
-#endif
+ * free-run (e.g. for benchmarking); see the guard near the top of the file. */
 
 void novaSetSwapInterval(int interval) {
     g.swap_interval = interval < 0 ? 0 : interval;
@@ -804,6 +812,7 @@ void novaSwapBuffers(void) {
 
     nova_tex_gc_collect();              /* free this slot's orphaned textures   */
     nova_ring_gc_collect();             /* free ring buffers orphaned by growth */
+    nova_tex_staging_tick();            /* shrink idle texture staging buffer   */
 
     /* Point the active rings at this slot's buffers and reset their offsets —
      * the GPU is done with whatever was here K frames ago. Capacities are
@@ -814,6 +823,8 @@ void novaSwapBuffers(void) {
     g.index_buf_size = g.index_buf_caps[g.frame_slot];
     g.client_array_buf_offset = 0;
     g.index_buf_offset = 0;
+    /* New frame: re-arm the once-per-frame linear_alloc_ring mid-frame drain. */
+    g.ring_synced_this_frame = 0;
 
     /* Resume drawing into the app surface (the logical "screen"). */
     if (g.app_target) {
@@ -1130,6 +1141,10 @@ static int nova_basic_near_clip(GLenum mode, GPU_Primitive_t prim, const uint8_t
     if (out_bytes > g.client_array_buf_size) return 0;
     NovaModelV *out = (NovaModelV *) linear_alloc_ring(
         g.client_array_buf, &g.client_array_buf_offset, out_bytes, g.client_array_buf_size);
+    /* Ring couldn't fit the clipped output. Returning 0 makes the caller fall
+     * through to its own (unclipped) draw path — which will also hit the ring
+     * and skip if it can't fit. Either way, no NULL deref. */
+    if (!out) return 0;
     int out_count = 0;
     for (int t = 0; t < in_tris; t++) {
         const NovaModelV *tri = &vin[t * 3];
@@ -1247,6 +1262,8 @@ static int try_draw_multistream(GLenum mode, GPU_Primitive_t prim, GLint first, 
             if (ibytes > g.index_buf_size)
                 return 0;
             void *staged = linear_alloc_ring(g.index_buf, &g.index_buf_offset, ibytes, g.index_buf_size);
+            if (!staged)
+                return 0; /* index ring can't fit — bail to the staged path */
             memcpy(staged, idx_src, ibytes);
             GSPGPU_FlushDataCache(staged, (u32) ibytes);
             gpuIdx = staged;
@@ -1399,9 +1416,13 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
             }
             uint8_t *dst_start = (uint8_t *) linear_alloc_ring(g.client_array_buf, &g.client_array_buf_offset, req_size,
                                                                g.client_array_buf_size);
-            vbo_decode_packed_ptc_span(vbo, first, count, dst_start);
-            GSPGPU_FlushDataCache(dst_start, req_size);
-            draw_packed_run(mode, prim, dst_start, count, 24, 3);
+            /* Ring can't fit this decoded run — skip the draw (drop geometry)
+             * rather than decode into a NULL pointer. */
+            if (dst_start) {
+                vbo_decode_packed_ptc_span(vbo, first, count, dst_start);
+                GSPGPU_FlushDataCache(dst_start, req_size);
+                draw_packed_run(mode, prim, dst_start, count, 24, 3);
+            }
         } else {
 
             uint8_t *base = (uint8_t *) vbo->data + first * 24;
@@ -1436,9 +1457,14 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
             if (ibytes <= g.index_buf_size) {
                 void *staged = linear_alloc_ring(g.index_buf, &g.index_buf_offset,
                                                  ibytes, g.index_buf_size);
-                memcpy(staged, idx_src, ibytes);
-                GSPGPU_FlushDataCache(staged, ibytes);
-                gpu_indices = staged;
+                /* NULL => index ring can't fit; gpu_indices stays NULL and the
+                 * `if (gpu_indices)` guard below skips this fast path so the
+                 * generic staged path (or a dropped draw) handles it. */
+                if (staged) {
+                    memcpy(staged, idx_src, ibytes);
+                    GSPGPU_FlushDataCache(staged, ibytes);
+                    gpu_indices = staged;
+                }
             }
         }
 
@@ -1459,6 +1485,28 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
         return;
     }
     nova_wait_tag("[Draw] staged");
+
+    /* Safe-fallback (change 3): if ANY enabled, VBO-bound attribute array
+     * points at a VBO slot that failed to allocate (allocated==0 || data==NULL
+     * — e.g. a fresh glBufferData that hit linear exhaustion), SKIP this draw
+     * entirely instead of routing its geometry through the gather ring (which
+     * under the same exhaustion is exactly what wedges the render traversal).
+     * A stale-but-valid VBO (kept by change 1) still has allocated!=0, so it
+     * draws normally. The vertex/element VBOs were already guarded above; this
+     * also covers texcoord/color/normal so we never gather from an empty slot. */
+    {
+        const NovaVertArray *arrs[4] = { &g.va_vertex, &g.va_texcoord, &g.va_color, &g.va_normal };
+        for (int a = 0; a < 4; a++) {
+            const NovaVertArray *va = arrs[a];
+            if (va->enabled && va->vbo_id > 0 && va->vbo_id < NOVA_MAX_VBOS) {
+                const VBOSlot *s = &g.vbos[va->vbo_id];
+                if (!s->allocated || s->data == NULL) {
+                    cleanup_vbo_stream();
+                    return;
+                }
+            }
+        }
+    }
 
     // Position-element selection.
     //
@@ -1495,6 +1543,16 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
 
     uint8_t *dst = (uint8_t *) linear_alloc_ring(g.client_array_buf, &g.client_array_buf_offset, req_size,
                                                  g.client_array_buf_size);
+    /* Ring exhausted and this draw can't fit even after a wrap (a single draw
+     * bigger than the whole ring). SKIP the entire gather+draw rather than
+     * write the interleave loop into a NULL pointer — this is the wedge the
+     * safe-fallback rework fixes: drop this batch's geometry for one frame
+     * instead of hanging the render traversal. */
+    if (!dst) {
+        gl_set_error(GL_OUT_OF_MEMORY);
+        cleanup_vbo_stream();
+        return;
+    }
     uint8_t *dst_start = dst;
 
     VBOSlot *v_slot = (g.va_vertex.vbo_id > 0 && g.va_vertex.vbo_id < NOVA_MAX_VBOS)
@@ -1747,6 +1805,9 @@ void novaDrawClipspaceTris(const void *verts, int vertex_count) {
 #endif
             NovaClipV *cdst = (NovaClipV *) linear_alloc_ring(
                 g.client_array_buf, &g.client_array_buf_offset, out_bytes, g.client_array_buf_size);
+            /* Ring can't fit the clipped output — drop this draw rather than
+             * clip into NULL. */
+            if (!cdst) return;
             int out_count = 0;
             for (int t = 0; t < in_tris; t++) {
                 out_count += nova_clip_tri_near(&in_v[t * 3], &cdst[out_count]);
@@ -1774,14 +1835,18 @@ void novaDrawClipspaceTris(const void *verts, int vertex_count) {
 #else
     uint8_t *dst = (uint8_t *) linear_alloc_ring(g.client_array_buf, &g.client_array_buf_offset,
                                                  bytes, g.client_array_buf_size);
-    memcpy(dst, verts, (size_t) bytes);
-    GSPGPU_FlushDataCache(dst, (u32) bytes);
+    /* Ring can't fit this passthrough batch — drop it rather than memcpy into
+     * NULL. */
+    if (dst) {
+        memcpy(dst, verts, (size_t) bytes);
+        GSPGPU_FlushDataCache(dst, (u32) bytes);
 
-    /* pos 4×float + uv 2×float + colour 4×u8 — exactly the loader layout
-     * nova_setup_attr_info(4) configures, 28-byte stride. */
-    nova_setup_attr_info(4);
-    nova_setup_buf_info(dst, 28);
-    C3D_DrawArrays(GPU_TRIANGLES, 0, vertex_count);
+        /* pos 4×float + uv 2×float + colour 4×u8 — exactly the loader layout
+         * nova_setup_attr_info(4) configures, 28-byte stride. */
+        nova_setup_attr_info(4);
+        nova_setup_buf_info(dst, 28);
+        C3D_DrawArrays(GPU_TRIANGLES, 0, vertex_count);
+    }
 #endif
 }
 

@@ -49,6 +49,14 @@
  *                             the ring memory). Prefer the runtime
  *                             novaSetFrameBuffers(1/2/3) selector.
  * ====================================================================== */
+/* This checkout defaults the bundle ON: OpenMW issues hundreds of validated
+ * draws per frame through OSG (never malformed), and the per-draw enum/pointer
+ * guards are measurable on the 268MHz ARM11. Build with -DNOVAGL_SPEEDHACKS=0
+ * to restore strict validation. */
+#ifndef NOVAGL_SPEEDHACKS
+#define NOVAGL_SPEEDHACKS 1
+#endif
+
 #if defined(NOVAGL_SPEEDHACKS) && NOVAGL_SPEEDHACKS
 #  ifndef NOVAGL_NO_DEBUG
 #    define NOVAGL_NO_DEBUG 1
@@ -436,6 +444,13 @@ extern struct NovaState {
     int swap_interval;        /* novaSetSwapInterval: 0 = free-run (no VBlank wait
                                * at swap), N>0 = wait N VBlanks. Default comes from
                                * the NOVAGL_VSYNC compile flag. */
+    int ring_synced_this_frame; /* per-frame guard for the linear_alloc_ring
+                               * mid-frame drain (C3D_FrameEnd(0)+FrameBegin
+                               * SYNCDRAW). The drain is the ONLY sanctioned
+                               * mid-frame wait, and it may fire AT MOST ONCE per
+                               * frame — a second drain in the same frame is both
+                               * wasteful (extra partial present) and a hang risk.
+                               * Reset to 0 in novaSwapBuffers. */
     int p3d_pending;          /* nonzero: draw commands were submitted since the
                                * last completed gspWaitForP3D. Guards every
                                * FrameSplit+WaitForP3D pair: splitting an EMPTY

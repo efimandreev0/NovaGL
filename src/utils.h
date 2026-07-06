@@ -87,6 +87,11 @@ C3D_Mtx *cur_stack(void);
 
 void *get_tex_staging(int size);
 
+/* Once-per-frame maintenance for the persistent texture staging buffer:
+ * shrinks it back toward the floor after a long idle stretch (change 5).
+ * Called from novaSwapBuffers. */
+void nova_tex_staging_tick(void);
+
 /* Deferred texture deletion (orphaning GC in texture.c). Push retires a
  * C3D_Tex whose storage may still be referenced by THIS frame's queued
  * draws — it is deleted later instead of immediately (the struct is copied;

@@ -280,6 +280,27 @@ static void draw_elements_basevertex_impl(GLenum mode, GLsizei count, GLenum typ
                                                     &g.index_buf_offset,
                                                     bytes,
                                                     g.index_buf_size);
+    if (!staged) {
+        /* Ring couldn't fit the aligned request (128B round-up can push a
+         * just-under-capacity `bytes` over the edge). Fall back to the per-call
+         * malloc path rather than deref NULL. */
+        void *scratch = malloc((size_t) bytes);
+        if (!scratch) return;
+        memcpy(scratch, indices, (size_t) bytes);
+        if (type == GL_UNSIGNED_BYTE) {
+            uint8_t *p = (uint8_t *) scratch;
+            for (GLsizei i = 0; i < count; i++) p[i] = (uint8_t) (p[i] + basevertex);
+        } else if (type == GL_UNSIGNED_SHORT) {
+            uint16_t *p = (uint16_t *) scratch;
+            for (GLsizei i = 0; i < count; i++) p[i] = (uint16_t) (p[i] + basevertex);
+        } else {
+            uint32_t *p = (uint32_t *) scratch;
+            for (GLsizei i = 0; i < count; i++) p[i] = p[i] + (uint32_t) basevertex;
+        }
+        nova_draw_internal(mode, 0, count, 1, type, scratch);
+        free(scratch);
+        return;
+    }
     memcpy(staged, indices, (size_t) bytes);
     if (type == GL_UNSIGNED_BYTE) {
         uint8_t *p = staged;

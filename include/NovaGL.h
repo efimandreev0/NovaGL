@@ -63,8 +63,16 @@ typedef void (*GLDEBUGPROC)(GLenum source, GLenum type, GLuint id, GLenum severi
 typedef GLDEBUGPROC GLDEBUGPROCKHR;
 typedef void *(*GLADloadproc)(const char *name);
 //nova_constants
-#define NOVA_MAX_TEXTURES     2048
-#define NOVA_MAX_VBOS         32768
+/* These fixed-size tables live in .bss (real RAM on the 3DS target). The old
+ * 2048/32768 caps reserved far more than any observed workload uses — the
+ * prison-ship interior high-water marks sit well under a quarter of these — so
+ * they were shrunk to reclaim ~1MB of zero-init .bss. The glGenBuffers/
+ * glGenTextures overflow branches degrade gracefully (GL_OUT_OF_MEMORY, id 0),
+ * and both emit a one-time breadcrumb when the live-id high-water mark passes
+ * 75% of the cap, so if a heavier scene ever approaches the limit we notice
+ * before it starts failing allocations. */
+#define NOVA_MAX_TEXTURES     1024
+#define NOVA_MAX_VBOS         8192
 #define NOVA_MATRIX_STACK     32
 #define NOVA_DISPLAY_LISTS    512
 #define NOVA_DL_MAX_OPS       64

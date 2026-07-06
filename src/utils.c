@@ -172,26 +172,59 @@ void *linear_alloc_ring(void *base, int *offset, int size, int capacity) {
         else if (base == g.index_buf)
             grown = ring_grow(&g.index_buf, &g.index_buf_slots[s], &g.index_buf_caps[s], &g.index_buf_size,
                               offset, size);
+
+        /* Grow failed (linear exhausted). Reclaim this slot's orphaned ring
+         * buffers from earlier growths this frame, then retry the grow ONCE —
+         * a fragmented heap sometimes has enough space once the GC frees the
+         * old blocks. */
+        if (!grown) {
+            nova_ring_gc_collect();
+            if (base == g.client_array_buf)
+                grown = ring_grow(&g.client_array_buf, &g.client_array_buf_slots[s], &g.client_array_buf_caps[s],
+                                  &g.client_array_buf_size, offset, size);
+            else if (base == g.index_buf)
+                grown = ring_grow(&g.index_buf, &g.index_buf_slots[s], &g.index_buf_caps[s], &g.index_buf_size,
+                                  offset, size);
+        }
         nova_wait_tag("[W] ring-grow<");
 
         if (grown) {
             base = grown;
+        } else if (size > capacity) {
+            /* UNRECOVERABLE: a single draw is larger than the ENTIRE ring
+             * capacity, so wrapping *offset back to 0 cannot help — the draw
+             * still would not fit. Return NULL and let the caller SKIP this
+             * draw (drop a frame's geometry) instead of corrupting the ring or
+             * hanging. This is the exact case that used to wedge the render
+             * traversal. */
+            ring_crumb("[NovaRing] overflow SKIP: size=%d KB > cap=%d KB", size / 1024, capacity / 1024);
+            return NULL;
         } else {
-            ring_crumb("[NovaRing] overflow fallback: size=%d KB cap=%d KB - sync", size / 1024, capacity / 1024);
-            /* Ring cannot grow: drain the GPU the only way citro3d supports
-             * mid-stream — end the frame and reopen it with SYNCDRAW. A raw
-             * gspWaitForP3D NEVER wakes here: citro3d's render queue owns the
-             * P3D event callback, so the waitable event is never signalled
-             * (observed as a permanent main-thread park on Citra). Costs a
-             * partial present; correctness over beauty. */
-            if (g.p3d_pending) {
+            /* RECOVERABLE: the draw fits the ring, we just ran off the end of
+             * the current fill. Drain the GPU the only way citro3d supports
+             * mid-stream — end the frame and reopen it with SYNCDRAW — then
+             * wrap. A raw gspWaitForP3D NEVER wakes here: citro3d's render
+             * queue owns the P3D event callback, so the waitable event is never
+             * signalled (observed as a permanent main-thread park on Citra).
+             *
+             * This drain may fire AT MOST ONCE per frame (g.ring_synced_this_frame):
+             * a second mid-frame drain is wasteful and a hang risk. If we have
+             * already drained this frame, fall through to a bare wrap (the
+             * earlier drain already retired the in-flight reads for this slot,
+             * so overwriting from offset 0 is safe). Costs a partial present;
+             * correctness over beauty. */
+            if (g.p3d_pending && !g.ring_synced_this_frame) {
+                ring_crumb("[NovaRing] overflow fallback: size=%d KB cap=%d KB - sync", size / 1024, capacity / 1024);
                 C3D_FrameEnd(0);
                 C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
                 if (g.current_target)
                     C3D_FrameDrawOn(g.current_target);
                 g.p3d_pending = 0;
+                g.ring_synced_this_frame = 1;
+                ring_crumb("[NovaRing] sync done - wrapped", 0, 0);
+            } else {
+                ring_crumb("[NovaRing] overflow fallback: already synced - bare wrap", 0, 0);
             }
-            ring_crumb("[NovaRing] sync done - wrapped", 0, 0);
             *offset = 0; // wrap
         }
     }
@@ -526,7 +559,25 @@ C3D_Mtx *cur_stack(void) {
     }
 }
 
+/* Persistent texture staging buffer. Capped at 1MB (change 5): the previous
+ * unbounded growth let a single 1024x1024 RGBA8 downscale (4MB) permanently
+ * inflate this buffer, holding 4MB of RAM for the rest of the run for what is a
+ * rare over-cap upload. Requests over the cap return NULL — the caller (see
+ * texture.c) then uses a transient malloc/free for that one upload. Matches the
+ * 1MB HW-swizzle staging cap. After many frames with no large upload the buffer
+ * is shrunk back to a small floor so a one-off big-ish texture doesn't pin RAM. */
+#define NOVA_TEX_STAGING_CAP    (1024 * 1024)
+#define NOVA_TEX_STAGING_FLOOR  (256 * 1024)
+#define NOVA_TEX_STAGING_SHRINK_FRAMES 240
+static int s_tex_staging_idle_frames = 0;
+
 void *get_tex_staging(int size) {
+    if (size > NOVA_TEX_STAGING_CAP) {
+        /* Over cap: do NOT grow the persistent buffer. Caller falls back to a
+         * transient allocation for this upload. */
+        return NULL;
+    }
+    s_tex_staging_idle_frames = 0; /* a real staging use this frame */
     if (g.tex_staging_size < size) {
         void *new_buf = realloc(g.tex_staging, (size_t) size);
         if (!new_buf) {
@@ -536,6 +587,23 @@ void *get_tex_staging(int size) {
         g.tex_staging_size = size;
     }
     return g.tex_staging;
+}
+
+/* Called once per frame from novaSwapBuffers. After a long stretch with no
+ * staging use, shrink the persistent buffer back to the floor so a single
+ * mid-size upload doesn't pin ~1MB forever. Cheap: only reallocs on the exact
+ * frame the idle counter trips, and only if the buffer is above the floor. */
+void nova_tex_staging_tick(void) {
+    if (g.tex_staging_size <= NOVA_TEX_STAGING_FLOOR)
+        return;
+    if (++s_tex_staging_idle_frames < NOVA_TEX_STAGING_SHRINK_FRAMES)
+        return;
+    void *shrunk = realloc(g.tex_staging, (size_t) NOVA_TEX_STAGING_FLOOR);
+    if (shrunk) {
+        g.tex_staging = shrunk;
+        g.tex_staging_size = NOVA_TEX_STAGING_FLOOR;
+    }
+    s_tex_staging_idle_frames = 0;
 }
 
 uint32_t morton_interleave(uint32_t x, uint32_t y) {

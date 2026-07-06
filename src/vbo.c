@@ -146,6 +146,21 @@ void glGenBuffers(GLsizei n, GLuint *buffers) {
         memset(&g.vbos[id], 0, sizeof(g.vbos[id]));
         g.vbos[id].in_use = 1;
         buffers[i] = id;
+
+        /* High-water-mark breadcrumb (change 4): NOVA_MAX_VBOS was shrunk to
+         * reclaim .bss. Warn ONCE if the live-id high-water passes 75% of the
+         * cap so an over-small table is noticed before allocations start
+         * failing. `id` is the largest slot index handed out so far this run. */
+        {
+            static int s_vbo_hiwater = 0;
+            static int s_warned_75 = 0;
+            if ((int) id > s_vbo_hiwater) s_vbo_hiwater = (int) id;
+            if (!s_warned_75 && s_vbo_hiwater > (NOVA_MAX_VBOS * 3) / 4) {
+                printf("[NOVA] VBO high-water %d/%d (>75%% of NOVA_MAX_VBOS) — table may be too small.\n",
+                       s_vbo_hiwater, NOVA_MAX_VBOS);
+                s_warned_75 = 1;
+            }
+        }
     }
 }
 
@@ -270,26 +285,53 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
             new_capacity = p;
         }
 
-        // Free the old block FIRST, then allocate. Allocating before freeing
-        // means a resize transiently holds both buffers, which both wastes peak
-        // linear RAM and worsens fragmentation of the linear heap (the dominant
-        // failure mode once the sliding chunk window keeps re-tessellating VBOs
-        // of slightly different sizes). Stash the old pointer so a failed alloc
-        // can still leave the slot in a sane (empty) state.
+        // Alloc-before-free (safe-fallback rework): a mid-frame linear
+        // exhaustion must NOT leave the slot empty — an empty VBO wedges the
+        // draw path (all its geometry gets routed through the client-array
+        // gather ring, which then can't grow under the same exhaustion and
+        // hangs). So keep old_buf alive across the new linearAlloc:
+        //   1. Try linearAlloc(new_capacity) while old_buf is still held.
+        //   2. If that fails AND we have an old_buf, free old_buf and retry
+        //      ONCE — this restores the original anti-fragmentation behaviour
+        //      (releasing the old block can defragment enough linear space for
+        //      the new one) as a fallback only.
+        //   3. If it STILL fails: DO NOT zero the slot. Leave the previous
+        //      valid data/capacity/allocated/size intact so the VBO keeps its
+        //      last (stale but drawable) geometry, set GL_OUT_OF_MEMORY, return.
+        // A fresh VBO (no old_buf) that fails stays data=NULL/allocated=0 — the
+        // draw path skips it (see nova_draw_internal / ms_resolve_attr guards).
         void *old_buf = slot->data;
-        if (old_buf) {
-            linearFree(old_buf);
-            slot->data = NULL;
-            slot->allocated = 0;
-        }
 
         void *new_buf = linearAlloc((size_t) new_capacity);
+        if (!new_buf && old_buf) {
+            // Retry once after releasing the old block (anti-fragmentation
+            // fallback). From here old_buf is gone; a second failure leaves the
+            // slot EMPTY (data=NULL/allocated=0) — but that only happens when we
+            // just freed a block big enough that the retry should normally
+            // succeed. The draw-path guards still cover the empty case.
+            linearFree(old_buf);
+            old_buf = NULL;
+            slot->data = NULL;
+            slot->allocated = 0;
+            slot->capacity = 0;
+            new_buf = linearAlloc((size_t) new_capacity);
+        }
         if (!new_buf) {
-            printf("[NOVA] glBufferData: linearAlloc(%d) FAILED (linearSpaceFree=%u). VBO id=%u left empty.\n",
-                   new_capacity, (unsigned) linearSpaceFree(), (unsigned) id);
+            printf("[NOVA] glBufferData: linearAlloc(%d) FAILED (linearSpaceFree=%u). "
+                   "VBO id=%u keeps %s.\n",
+                   new_capacity, (unsigned) linearSpaceFree(), (unsigned) id,
+                   old_buf ? "STALE geometry" : "empty (fresh VBO)");
             gl_set_error(GL_OUT_OF_MEMORY);
+            // old_buf != NULL here means we never freed it: slot->data /
+            // capacity / allocated / size are all still the previous valid
+            // values, so the VBO stays drawable with stale contents. Return
+            // WITHOUT touching slot->size below.
             return;
         }
+
+        // New alloc succeeded — now it is safe to release the old block.
+        if (old_buf)
+            linearFree(old_buf);
 
         slot->data = new_buf;
         slot->capacity = new_capacity;

@@ -803,6 +803,21 @@ void glGenTextures(GLsizei n, GLuint *textures) {
         g.textures[id].in_use = 1;
         init_texture_defaults(&g.textures[id]);
         textures[i] = id;
+
+        /* High-water-mark breadcrumb (change 4): NOVA_MAX_TEXTURES was shrunk to
+         * reclaim .bss. Warn ONCE if the live-id high-water passes 75% of the
+         * cap so an over-small table is noticed before allocations start
+         * failing. */
+        {
+            static int s_tex_hiwater = 0;
+            static int s_warned_75 = 0;
+            if ((int) id > s_tex_hiwater) s_tex_hiwater = (int) id;
+            if (!s_warned_75 && s_tex_hiwater > (NOVA_MAX_TEXTURES * 3) / 4) {
+                printf("[NOVA] Texture high-water %d/%d (>75%% of NOVA_MAX_TEXTURES) — table may be too small.\n",
+                       s_tex_hiwater, NOVA_MAX_TEXTURES);
+                s_warned_75 = 1;
+            }
+        }
     }
 }
 
@@ -1233,12 +1248,20 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     } else {
         const GLvoid *upload_pixels = pixels;
 
+        void *transient_staging = NULL; /* set only for an over-cap upload */
         if ((width > 1024 || height > 1024) && pixels) {
             int bpp = gpu_texfmt_bpp(gpu_fmt);
-            /* Reuse tex_staging instead of per-call malloc/free — same buffer
-             * grows as needed and stays around for subsequent uploads, no
-             * heap fragmentation. */
-            void *temp_pixels = get_tex_staging(target_w * target_h * bpp);
+            int need = target_w * target_h * bpp;
+            /* Reuse the persistent tex_staging buffer (capped at 1MB, change 5)
+             * so common uploads don't fragment the heap. For a rare over-cap
+             * upload get_tex_staging returns NULL and we use a TRANSIENT
+             * malloc/free for just this upload rather than permanently growing
+             * the persistent buffer. */
+            void *temp_pixels = get_tex_staging(need);
+            if (!temp_pixels) {
+                transient_staging = malloc((size_t) need);
+                temp_pixels = transient_staging;
+            }
             if (temp_pixels) {
                 if (gpu_fmt == GPU_RGBA8) downscale_rgba8((uint32_t *) temp_pixels, (const uint32_t *) pixels, width,
                                                           height, target_w, target_h);
@@ -1252,7 +1275,9 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
 
         upload_texture_pixels(&slot->tex, gpu_fmt, pot_w, pot_h, upload_pixels, target_w, target_h, 0, 0, target_w,
                               target_h, format, type, g.unpack_alignment);
-        /* tex_staging is owned by the global state; nothing to free here. */
+        /* The persistent tex_staging is owned by global state (nothing to free);
+         * a transient over-cap buffer, if used, is freed here. */
+        if (transient_staging) free(transient_staging);
     }
 
     // Auto-generate mip levels 1..N for the freshly-uploaded level 0.
