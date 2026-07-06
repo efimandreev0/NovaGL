@@ -66,6 +66,90 @@ unsigned int nova_next_pow2(unsigned int v) {
     return v + 1;
 }
 
+/* ---- adaptive ring growth ------------------------------------------------
+ * The old overflow path did C3D_FrameSplit + gspWaitForP3D and wrapped the
+ * ring in place. That freezes hard under real 3D load (OpenMW first world
+ * frame, main thread parked in gspWaitForEvent forever — a mid-frame split
+ * does not reliably produce a wakeable P3D on Citra), and wrapping while
+ * in-flight draws still read the bytes is corruption by design.
+ *
+ * New policy: on overflow the current slot's buffer is ORPHANED (parked on a
+ * per-slot GC, freed K frames later when the GPU is provably done with it,
+ * exactly like the texture/FBO GCs) and the slot gets a bigger allocation.
+ * Rings thereby auto-size to the real per-frame draw volume after the first
+ * heavy frame; no waits, no wraps. */
+#define NOVA_RING_GC_MAX 8
+static void *s_ring_gc[3][NOVA_RING_GC_MAX];
+static int s_ring_gc_count[3];
+
+/* Diagnostic breadcrumbs into the host app's boot log. Weak: resolves to the
+ * OpenMW CTR layer when linked into it, null elsewhere. */
+extern void vitaBreadcrumb(const char *msg) __attribute__((weak));
+static void ring_crumb(const char *fmt, int a, int b) {
+    if (&vitaBreadcrumb) {
+        char buf[96];
+        snprintf(buf, sizeof(buf), fmt, a, b);
+        vitaBreadcrumb(buf);
+    }
+}
+
+static int s_wait_tag_budget = 0; /* silent until armed by the host app */
+
+void nova_wait_tag_arm(int budget) {
+    s_wait_tag_budget = budget;
+}
+
+void nova_wait_tag(const char *tag) {
+    if (s_wait_tag_budget <= 0 || !&vitaBreadcrumb)
+        return;
+    s_wait_tag_budget--;
+    vitaBreadcrumb(tag);
+}
+
+void nova_ring_gc_collect(void) {
+    int s = g.frame_slot;
+    for (int i = 0; i < s_ring_gc_count[s]; i++) {
+        if (s_ring_gc[s][i]) {
+            linearFree(s_ring_gc[s][i]);
+            s_ring_gc[s][i] = NULL;
+        }
+    }
+    s_ring_gc_count[s] = 0;
+}
+
+static void *ring_grow(void **alias, void **slot_buf, int *slot_cap, int *shared_cap, int *offset, int size) {
+    int newcap = *slot_cap > 0 ? *slot_cap : (256 * 1024);
+    while (newcap < *slot_cap + size)
+        newcap *= 2;
+    void *nb = linearAlloc((size_t) newcap);
+    if (!nb) {
+        ring_crumb("[NovaRing] grow FAILED: want %d KB (linear exhausted)", newcap / 1024, 0);
+        return NULL; /* caller falls back to the legacy stall path */
+    }
+    ring_crumb("[NovaRing] grew ring to %d KB (alloc %d KB)", newcap / 1024, 0);
+
+    int s = g.frame_slot;
+    if (s_ring_gc_count[s] < NOVA_RING_GC_MAX) {
+        s_ring_gc[s][s_ring_gc_count[s]++] = *slot_buf;
+    } else {
+        /* GC bucket full (8 growths in one frame — pathological). Leak the
+         * old buffer rather than freeing it under the GPU's feet. */
+    }
+    *slot_buf = nb;
+    *slot_cap = newcap;
+    *shared_cap = newcap;
+    *alias = nb;
+    *offset = 0;
+    /* Kick the accumulated commands to the GPU asynchronously (NO wait — a
+     * mid-frame wait is the exact freeze this rework removes). Safe: the
+     * orphaned buffer stays alive in the GC until K frames from now, so
+     * in-flight reads stay valid. Also keeps the citro3d command buffer
+     * drained now that rings no longer force periodic splits. */
+    if (g.p3d_pending)
+        C3D_FrameSplit(0);
+    return nb;
+}
+
 void *linear_alloc_ring(void *base, int *offset, int size, int capacity) {
     /* 128-byte alignment is the historical value; the optimized 64 (still
      * safe for cache-line 32 + GX-DMA 16) is opt-in. Some PICA200 dispatch
@@ -78,19 +162,38 @@ void *linear_alloc_ring(void *base, int *offset, int size, int capacity) {
 #endif
 
     if (*offset + size > capacity) {
-        /* Ring is full. Splitting the command buffer + waiting for GPU is the
-         * only way to safely wrap, because in-flight draws may still be
-         * reading from the bytes we're about to overwrite. This is the
-         * documented soft cap on how big client_array_buf / index_buf should
-         * be relative to per-frame draw volume — if a caller hits this every
-         * frame, grow the buffer via nova_init_ex.
-         *
-         * Future: split each ring into A/B halves with a GPU fence per half,
-         * so a half can be re-used while the GPU still chews on the other.
-         * Currently a single ring with one stall. */
-        C3D_FrameSplit(0);
-        gspWaitForP3D();
-        *offset = 0; // wrap
+        /* Identify which ring this is by its alias and grow it. */
+        void *grown = NULL;
+        int s = g.frame_slot;
+        nova_wait_tag("[W] ring-grow>");
+        if (base == g.client_array_buf)
+            grown = ring_grow(&g.client_array_buf, &g.client_array_buf_slots[s], &g.client_array_buf_caps[s],
+                              &g.client_array_buf_size, offset, size);
+        else if (base == g.index_buf)
+            grown = ring_grow(&g.index_buf, &g.index_buf_slots[s], &g.index_buf_caps[s], &g.index_buf_size,
+                              offset, size);
+        nova_wait_tag("[W] ring-grow<");
+
+        if (grown) {
+            base = grown;
+        } else {
+            ring_crumb("[NovaRing] overflow fallback: size=%d KB cap=%d KB - sync", size / 1024, capacity / 1024);
+            /* Ring cannot grow: drain the GPU the only way citro3d supports
+             * mid-stream — end the frame and reopen it with SYNCDRAW. A raw
+             * gspWaitForP3D NEVER wakes here: citro3d's render queue owns the
+             * P3D event callback, so the waitable event is never signalled
+             * (observed as a permanent main-thread park on Citra). Costs a
+             * partial present; correctness over beauty. */
+            if (g.p3d_pending) {
+                C3D_FrameEnd(0);
+                C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+                if (g.current_target)
+                    C3D_FrameDrawOn(g.current_target);
+                g.p3d_pending = 0;
+            }
+            ring_crumb("[NovaRing] sync done - wrapped", 0, 0);
+            *offset = 0; // wrap
+        }
     }
 
     void *ptr = (uint8_t *) base + *offset;
@@ -1522,6 +1625,13 @@ void nova_setup_buf_info(void *base, int stride) {
 void nova_invalidate_buf_cache(void) {
     s_buf_base = (void *) -1;
     s_buf_stride = -1;
+}
+
+/* Same for the AttrInfo cache: the multistream zero-copy draw path programs
+ * per-draw loaders (formats vary per mesh), so the cached "layout already
+ * set" keys must be dropped afterwards. */
+void nova_invalidate_attr_cache(void) {
+    s_attr_pos_elements = -999;
 }
 
 /* Lit layout: pos(3f) + texcoord(2f) + color(4ub) + normal(3f), 4 attributes.

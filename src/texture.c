@@ -374,9 +374,16 @@ void nova_tex_gc_push(C3D_Tex *tex) {
     int s = g.frame_slot;
     if (s_tex_gc_count[s] >= NOVA_TEX_GC_SLOTS) {
         /* Slot full mid-frame (128 orphans in one frame — extreme). Flush the
-         * pending draws and wait so this slot's entries become reclaimable. */
-        C3D_FrameSplit(0);
-        gspWaitForP3D();
+         * pending draws and wait so this slot's entries become reclaimable.
+         * Skip when nothing was submitted since the last wait — an empty
+         * split raises no P3D interrupt and the wait would hang. */
+        if (g.p3d_pending) {
+            nova_wait_tag("[W] tex-gc>");
+            C3D_FrameSplit(0);
+            gspWaitForP3D();
+            nova_wait_tag("[W] tex-gc<");
+            g.p3d_pending = 0;
+        }
         tex_gc_free_slot(s);
     }
     s_tex_gc[s][s_tex_gc_count[s]++] = *tex;

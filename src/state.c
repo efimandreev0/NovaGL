@@ -396,6 +396,21 @@ void glGetIntegerv(GLenum pname, GLint *params) {
             return;
         case GL_MAX_TEXTURE_SIZE:     params[0] = 1024; return; /* NovaGL downscales >1024 anyway */
         case GL_MAX_TEXTURE_UNITS:    params[0] = 3; return;
+        /* GL2-era texture-unit caps: OSG/engines gate their texturing paths on
+         * these. PICA has 3 fixed-function units; report them the same. */
+        case 0x8872 /* GL_MAX_TEXTURE_IMAGE_UNITS */:
+        case 0x8B4C /* GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS (0 would be more honest,
+                       but OSG treats it as a texturing capability floor) */:
+        case 0x8B4D /* GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS */:
+        case 0x8871 /* GL_MAX_TEXTURE_COORDS */:
+            params[0] = 3; return;
+        case 0x851C /* GL_MAX_CUBE_MAP_TEXTURE_SIZE */:
+            params[0] = 1024; return;
+        case 0x8869 /* GL_MAX_VERTEX_ATTRIBS */:
+            params[0] = 0; return; /* fixed-function: no generic attributes */
+        case 0x80E8 /* GL_MAX_ELEMENTS_VERTICES */:
+        case 0x80E9 /* GL_MAX_ELEMENTS_INDICES */:
+            params[0] = 65536; return;
         case GL_MAX_LIGHTS:           params[0] = NOVA_MAX_LIGHTS; return;
         case GL_UNPACK_ALIGNMENT:     params[0] = g.unpack_alignment; return;
         case GL_PACK_ALIGNMENT:       params[0] = g.pack_alignment; return;
@@ -481,7 +496,11 @@ const GLubyte *glGetString(GLenum name) {
     if (name == GL_VENDOR) return (const GLubyte *) "NovaGL";
     if (name == GL_RENDERER) return (const GLubyte *) "PICA200 (3DS)";
     if (name == GL_VERSION) return (const GLubyte *) "OpenGL ES-CM 1.1 NovaGL by efimandreev0";
-    if (name == GL_EXTENSIONS) return (const GLubyte *) "GL_OES_vertex_buffer_object GL_OES_matrix_palette";
+    if (name == GL_EXTENSIONS)
+        /* GL_ARB_vertex_buffer_object: OSG gates its VBO path on the ARB
+         * name specifically — without it every osg::Geometry draws through
+         * client arrays (tens of MB per frame through the vertex rings). */
+        return (const GLubyte *) "GL_ARB_vertex_buffer_object GL_OES_vertex_buffer_object GL_OES_matrix_palette";
     /* Spec: an unaccepted name is GL_INVALID_ENUM and the return value is NULL
      * (not an empty string — callers strlen/strstr the result). */
     gl_set_error(GL_INVALID_ENUM);

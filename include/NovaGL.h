@@ -47,7 +47,11 @@ typedef double GLclampd;
 typedef int GLfixed;
 typedef ptrdiff_t GLintptr;
 typedef ptrdiff_t GLsizeiptr;
-typedef float GLdouble;
+/* Real double, matching desktop GL. Implementations convert to float
+ * element-wise internally (PICA is float-only), so the ABI is consistent
+ * as long as NovaGL and the app are built against the same header.
+ * (Was float historically; changed for OSG, which requires GLdouble==double.) */
+typedef double GLdouble;
 typedef char GLchar;
 
 /* GL_KHR_debug callback signature + the glad loader proc type. NovaGL is a
@@ -64,7 +68,11 @@ typedef void *(*GLADloadproc)(const char *name);
 #define NOVA_MATRIX_STACK     32
 #define NOVA_DISPLAY_LISTS    512
 #define NOVA_DL_MAX_OPS       64
-#define NOVA_CMD_BUF_SIZE     (512 * 1024)
+/* 3MB: a full FFP world frame (hundreds of draws, each with TEV/matrix
+ * state) accumulates well over 512KB of GPU commands once the vertex rings
+ * stopped force-splitting mid-frame (adaptive growth). Overflowing the
+ * citro3d command buffer wedges the GPU silently. */
+#define NOVA_CMD_BUF_SIZE     (3 * 1024 * 1024)
 
 #define NOVA_SCREEN_W         400
 #define NOVA_SCREEN_H         240
@@ -620,6 +628,11 @@ typedef void *(*GLADloadproc)(const char *name);
 void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_size, int tex_staging_size);
 
 void nova_init(void);
+/* Diagnostics: arm the GPU-wait-site breadcrumb tagger for the next 
+ * tag prints (breadcrumbs go to the host app's log via weak vitaBreadcrumb). */
+void nova_wait_tag_arm(int budget);
+/* 0 = free-run (no VBlank wait at swap), N>0 = wait N VBlanks per swap. */
+void novaSetSwapInterval(int interval);
 
 void nova_fini(void);
 

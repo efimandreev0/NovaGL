@@ -320,6 +320,7 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     if (K > 3) K = 3;
     g.frame_buffers = K;
     g.frame_slot = 0;
+    g.swap_interval = NOVAGL_VSYNC;
     g.c3d_frame_flag = (K > 1) ? 0 : C3D_FRAME_SYNCDRAW;
 
     /* One vertex + index ring PER frame slot (full per-slot capacity), so the
@@ -329,6 +330,8 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.client_array_buf_size = client_array_buf_size;
     g.index_buf_size = index_buf_size;
     for (int i = 0; i < K; i++) {
+        g.client_array_buf_caps[i] = client_array_buf_size;
+        g.index_buf_caps[i] = index_buf_size;
         g.client_array_buf_slots[i] = linearAlloc(client_array_buf_size);
         g.index_buf_slots[i]        = linearAlloc(index_buf_size);
         if (!g.client_array_buf_slots[i] || !g.index_buf_slots[i]) {
@@ -768,6 +771,10 @@ void novaSnapshotAppSurface(void) {
 #define NOVAGL_VSYNC 1
 #endif
 
+void novaSetSwapInterval(int interval) {
+    g.swap_interval = interval < 0 ? 0 : interval;
+}
+
 void novaSwapBuffers(void) {
     /* Commit any pending batch before the frame ends + the ring slot rotates —
      * an un-issued batch's verts would be lost when its slot is reused. */
@@ -776,9 +783,12 @@ void novaSwapBuffers(void) {
     if (g.app_target) nova_present_app(g.render_target_top);
 
     C3D_FrameEnd(0);
-#if NOVAGL_VSYNC
-    gspWaitForVBlank();
-#endif
+    /* VBlank pacing quantizes the frame rate to 60/N: a 45ms frame stalls
+     * until the 4th impulse and reads as a hard 15 FPS. Engines that pace
+     * themselves (OpenMW advances simulation by measured dt) disable this
+     * via novaSetSwapInterval(0). */
+    for (int vb = 0; vb < g.swap_interval; vb++)
+        gspWaitForVBlank();
 
     /* Rotate to the next frame slot. The vertex/index rings and the orphan GC
      * buckets for THIS slot were last used `frame_buffers` frames ago, so the
@@ -788,14 +798,20 @@ void novaSwapBuffers(void) {
 
     nova_fbo_gc_collect();              /* free this slot's orphaned FBO targets */
 
+    nova_wait_tag("[W] frameBegin>");
     C3D_FrameBegin(g.c3d_frame_flag);   /* SYNCDRAW (K==1) waits; async (K>1) doesn't */
+    nova_wait_tag("[W] frameBegin<");
 
     nova_tex_gc_collect();              /* free this slot's orphaned textures   */
+    nova_ring_gc_collect();             /* free ring buffers orphaned by growth */
 
     /* Point the active rings at this slot's buffers and reset their offsets —
-     * the GPU is done with whatever was here K frames ago. */
+     * the GPU is done with whatever was here K frames ago. Capacities are
+     * per-slot (adaptive growth). */
     g.client_array_buf = g.client_array_buf_slots[g.frame_slot];
     g.index_buf        = g.index_buf_slots[g.frame_slot];
+    g.client_array_buf_size = g.client_array_buf_caps[g.frame_slot];
+    g.index_buf_size = g.index_buf_caps[g.frame_slot];
     g.client_array_buf_offset = 0;
     g.index_buf_offset = 0;
 
@@ -821,8 +837,12 @@ void nova_fini(void) {
     // зовём C3D_RenderTargetDelete, оно лезет в renderqueue.c:364, видит
     // pending transfer на удаляемом таргете и валит процесс. Сначала закрываем
     // кадр и ждём GPU.
+    nova_wait_tag("[W] swap-end>");
     C3D_FrameEnd(0);
+    nova_wait_tag("[W] swap-p3d>");
     gspWaitForP3D();
+    nova_wait_tag("[W] swap-p3d<");
+    g.p3d_pending = 0; /* frame fully retired; next wait needs new work */
 
     /* GPU is idle now — flush ALL frame slots of orphaned texture/FBO storage. */
     nova_tex_gc_collect_all();
@@ -1134,6 +1154,157 @@ static inline int nova_basic_near_clip(GLenum mode, GPU_Primitive_t prim, const 
 }
 #endif
 
+/* -------------------------------------------------------------------------
+ * Zero-copy multistream draw.
+ *
+ * PICA200 reads up to 12 independent vertex streams, each with its own base
+ * address and stride, as long as the data lives in linear memory. Every VBO
+ * already does (vbo.c allocates with linearAlloc and flushes on upload), so
+ * a draw whose enabled arrays are all VBO-backed needs NO per-draw CPU
+ * gathering at all -- the exact 13MB/frame of memcpy that capped OpenMW at
+ * ~6 FPS. Attributes map to the shader inputs the staged path uses:
+ * v0=pos(3f), v1=uv(2f), v2=color, v3=normal (lit shader only). Arrays that
+ * are disabled become PICA fixed attributes carrying the current GL state.
+ *
+ * Falls back (return 0) to the staged path for: client-side arrays, packed
+ * PTC slots, flat shading (needs per-face color replication), non-triangle
+ * primitives (need CPU expansion), 32-bit indices, the clipspace pipe, and
+ * any format PICA loaders cannot fetch.
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    const uint8_t *ptr;
+    int stride;
+    GPU_FORMATS fmt;
+    int comps;
+} MsAttr;
+
+/* 1 = streamable, 0 = disabled (use fixed), -1 = enabled but not streamable */
+static int ms_resolve_attr(const NovaVertArray *va, int minComps, int maxComps, int firstVertex, MsAttr *out) {
+    if (!va->enabled)
+        return 0;
+    if (va->vbo_id <= 0 || va->vbo_id >= NOVA_MAX_VBOS)
+        return -1;
+    VBOSlot *slot = &g.vbos[va->vbo_id];
+    if (!slot->allocated || !slot->data || vbo_is_packed_ptc(slot))
+        return -1;
+
+    GPU_FORMATS fmt;
+    int esize;
+    switch (va->type) {
+        case GL_FLOAT:          fmt = GPU_FLOAT;          esize = 4; break;
+        case GL_UNSIGNED_BYTE:  fmt = GPU_UNSIGNED_BYTE;  esize = 1; break;
+        case GL_SHORT:          fmt = GPU_SHORT;          esize = 2; break;
+        case GL_BYTE:           fmt = GPU_BYTE;           esize = 1; break;
+        default:                return -1;
+    }
+    if (va->size < minComps || va->size > maxComps)
+        return -1;
+    int stride = va->stride ? va->stride : va->size * esize;
+    if (stride <= 0 || stride > 255)
+        return -1;
+    const uint8_t *p = (const uint8_t *) slot->data + (uintptr_t) va->pointer + (size_t) firstVertex * (size_t) stride;
+    /* PICA fetch wants element-aligned bases. */
+    if ((uintptr_t) p & (uintptr_t) (esize - 1))
+        return -1;
+    out->ptr = p;
+    out->stride = stride;
+    out->fmt = fmt;
+    out->comps = va->size;
+    return 1;
+}
+
+static int try_draw_multistream(GLenum mode, GPU_Primitive_t prim, GLint first, GLsizei count,
+                                int is_elements, GLenum type, const uint8_t *idx_src) {
+    if (mode != GL_TRIANGLES && mode != GL_TRIANGLE_STRIP && mode != GL_TRIANGLE_FAN)
+        return 0;
+    if (g.shade_model == GL_FLAT)
+        return 0;
+    if (g.active_shader == NOVA_SHADER_CLIPSPACE)
+        return 0;
+    if (is_elements && type == GL_UNSIGNED_INT)
+        return 0;
+
+    const int firstVertex = is_elements ? 0 : first;
+    MsAttr pos, uv, col, nrm;
+    if (ms_resolve_attr(&g.va_vertex, 3, 3, firstVertex, &pos) != 1)
+        return 0;
+    const int lit = g.lighting_active;
+    const int uvr = ms_resolve_attr(&g.va_texcoord, 2, 2, firstVertex, &uv);
+    const int colr = ms_resolve_attr(&g.va_color, 4, 4, firstVertex, &col);
+    const int nrmr = lit ? ms_resolve_attr(&g.va_normal, 3, 3, firstVertex, &nrm) : 0;
+    if (uvr < 0 || colr < 0 || nrmr < 0)
+        return 0;
+
+    const void *gpuIdx = NULL;
+    int c3dType = C3D_UNSIGNED_SHORT;
+    if (is_elements) {
+        const int esz = (type == GL_UNSIGNED_SHORT) ? 2 : 1;
+        c3dType = (type == GL_UNSIGNED_SHORT) ? C3D_UNSIGNED_SHORT : C3D_UNSIGNED_BYTE;
+        if (g.bound_element_array_buffer > 0 && g.bound_element_array_buffer < NOVA_MAX_VBOS) {
+            gpuIdx = idx_src; /* EBO storage: linear + flushed on upload */
+        } else {
+            const int ibytes = count * esz;
+            if (ibytes > g.index_buf_size)
+                return 0;
+            void *staged = linear_alloc_ring(g.index_buf, &g.index_buf_offset, ibytes, g.index_buf_size);
+            memcpy(staged, idx_src, ibytes);
+            GSPGPU_FlushDataCache(staged, (u32) ibytes);
+            gpuIdx = staged;
+        }
+    }
+
+    C3D_AttrInfo *ai = C3D_GetAttrInfo();
+    AttrInfo_Init(ai);
+    AttrInfo_AddLoader(ai, 0, pos.fmt, pos.comps);
+    if (uvr == 1)
+        AttrInfo_AddLoader(ai, 1, uv.fmt, uv.comps);
+    else
+        AttrInfo_AddFixed(ai, 1);
+    if (colr == 1)
+        AttrInfo_AddLoader(ai, 2, col.fmt, col.comps);
+    else
+        AttrInfo_AddFixed(ai, 2);
+    if (lit) {
+        if (nrmr == 1)
+            AttrInfo_AddLoader(ai, 3, nrm.fmt, nrm.comps);
+        else
+            AttrInfo_AddFixed(ai, 3);
+    }
+
+    C3D_BufInfo *bi = C3D_GetBufInfo();
+    BufInfo_Init(bi);
+    int ok = BufInfo_Add(bi, pos.ptr, pos.stride, 1, 0x0) >= 0;
+    if (ok && uvr == 1)
+        ok = BufInfo_Add(bi, uv.ptr, uv.stride, 1, 0x1) >= 0;
+    if (ok && colr == 1)
+        ok = BufInfo_Add(bi, col.ptr, col.stride, 1, 0x2) >= 0;
+    if (ok && lit && nrmr == 1)
+        ok = BufInfo_Add(bi, nrm.ptr, nrm.stride, 1, 0x3) >= 0;
+
+    /* Either way the shared AttrInfo/BufInfo no longer match the staged
+     * path's cached single-buffer layout. */
+    nova_invalidate_attr_cache();
+    nova_invalidate_buf_cache();
+    if (!ok)
+        return 0; /* staged fallback reprograms everything */
+
+    if (uvr != 1)
+        C3D_FixedAttribSet(1, 0.0f, 0.0f, 0.0f, 1.0f);
+    if (colr != 1)
+        C3D_FixedAttribSet(2, g.cur_color[0], g.cur_color[1], g.cur_color[2], g.cur_color[3]);
+    if (lit && nrmr != 1)
+        C3D_FixedAttribSet(3, g.cur_normal[0], g.cur_normal[1], g.cur_normal[2], 0.0f);
+
+    if (is_elements)
+        C3D_DrawElements(prim, count, c3dType, gpuIdx);
+    else
+        C3D_DrawArrays(prim, 0, count);
+
+    nova_wait_tag("[Draw] ms");
+    return 1;
+}
+
+
 void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements, GLenum type, const GLvoid *indices) {
     /* If this app mixes the clipspace fast-lane with the generic draw path,
      * commit any pending clipspace batch first so draw order is preserved.
@@ -1282,6 +1453,12 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
             return;
         }
     }
+
+    if (try_draw_multistream(mode, prim, first, count, is_elements, type, idx_src)) {
+        cleanup_vbo_stream();
+        return;
+    }
+    nova_wait_tag("[Draw] staged");
 
     // Position-element selection.
     //
@@ -1610,11 +1787,27 @@ void novaDrawClipspaceTris(const void *verts, int vertex_count) {
 
 void glFlush(void) {
     nova_batch_flush();   /* commit deferred draws before the split */
-    C3D_FrameSplit(0);
+    /* Empty split = no P3D interrupt; also nothing to flush. */
+    if (g.p3d_pending)
+        C3D_FrameSplit(0);
 }
 
 void glFinish(void) {
     nova_batch_flush();   /* commit deferred draws before the split */
-    C3D_FrameSplit(0);
-    gspWaitForP3D();
+    /* Wait ONLY when work was actually submitted: splitting an empty command
+     * list raises no P3D interrupt and gspWaitForP3D() then never returns
+     * (the previous frame's event was already consumed by novaSwapBuffers).
+     * OSG calls glFinish on RTT paths before any draw touched the frame. */
+    if (g.p3d_pending) {
+        nova_wait_tag("[W] glFinish>");
+        /* See linear_alloc_ring: raw gspWaitForP3D never wakes while the
+         * citro3d render queue owns the P3D callback. FrameEnd+SYNCDRAW
+         * begin is the sanctioned mid-stream drain. */
+        C3D_FrameEnd(0);
+        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+        if (g.current_target)
+            C3D_FrameDrawOn(g.current_target);
+        nova_wait_tag("[W] glFinish<");
+        g.p3d_pending = 0;
+    }
 }

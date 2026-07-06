@@ -37,9 +37,16 @@ static void nova_queue_render_target_delete(C3D_RenderTarget *target) {
     int s = g.frame_slot;
     if (s_fbo_gc_count[s] >= NOVA_FBO_GC_TARGETS) {
         /* Slot full (512 orphans in K frames — extreme). Sync the GPU so this
-         * slot's targets are safe to delete now, then reuse it. */
-        C3D_FrameSplit(0);
-        gspWaitForP3D();
+         * slot's targets are safe to delete now, then reuse it. No submitted
+         * work since the last wait -> GPU already idle, skip the split (an
+         * empty split raises no P3D interrupt and the wait would hang). */
+        if (g.p3d_pending) {
+            nova_wait_tag("[W] fbo-gc>");
+            C3D_FrameSplit(0);
+            gspWaitForP3D();
+            nova_wait_tag("[W] fbo-gc<");
+            g.p3d_pending = 0;
+        }
         fbo_gc_free_slot(s);
     }
     s_fbo_gc_targets[s][s_fbo_gc_count[s]++] = target;

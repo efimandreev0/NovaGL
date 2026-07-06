@@ -433,6 +433,16 @@ extern struct NovaState {
     int frame_buffers;        /* K = 1/2/3 */
     int frame_slot;           /* current ring/GC slot, 0..K-1 */
     int c3d_frame_flag;       /* C3D_FrameBegin flag: SYNCDRAW (K==1) or 0 (async) */
+    int swap_interval;        /* novaSetSwapInterval: 0 = free-run (no VBlank wait
+                               * at swap), N>0 = wait N VBlanks. Default comes from
+                               * the NOVAGL_VSYNC compile flag. */
+    int p3d_pending;          /* nonzero: draw commands were submitted since the
+                               * last completed gspWaitForP3D. Guards every
+                               * FrameSplit+WaitForP3D pair: splitting an EMPTY
+                               * command list raises no P3D interrupt, so an
+                               * unconditional wait after it hangs forever
+                               * (observed: OpenMW first world frame, main
+                               * thread parked in gspWaitForEvent for good). */
 
     /* Active ring (points at the current slot's buffer). client_array_buf_size /
      * index_buf_size are the PER-SLOT capacities. */
@@ -446,6 +456,11 @@ extern struct NovaState {
 
     void *client_array_buf_slots[3];
     void *index_buf_slots[3];
+    /* Per-slot capacities: rings grow adaptively (see linear_alloc_ring), so
+     * slots can have different sizes. client_array_buf_size/index_buf_size
+     * mirror the CURRENT slot's capacity. */
+    int client_array_buf_caps[3];
+    int index_buf_caps[3];
 
     int tev_dirty;
     int last_tex_state;
