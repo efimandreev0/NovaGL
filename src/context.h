@@ -338,6 +338,7 @@ extern struct NovaState {
     int tex_mtx_dirty;
 
     float cur_color[4];
+    uint32_t cur_color_packed;
     float cur_normal[3]; // current normal from glNormal*. no lighting yet but
                          // we keep it so the state is real and ready if lighting come
 

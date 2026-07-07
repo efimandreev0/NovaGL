@@ -418,6 +418,7 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.cur_color[1] = 1.0f;
     g.cur_color[2] = 1.0f;
     g.cur_color[3] = 1.0f;
+    g.cur_color_packed = 0xFFFFFFFF;
 
     // GL default current normal is (0,0,1), not zero
     g.cur_normal[0] = 0.0f;
@@ -1609,16 +1610,6 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
                                ? (const uint8_t *) g.vbos[g.va_color.vbo_id].data + (uintptr_t) g.va_color.pointer
                                : (const uint8_t *) g.va_color.pointer;
 
-    /* Spec: conversion to fixed-point framebuffer color clamps to [0,1].
-     * glColor4f itself must NOT clamp (current color is kept float), so the
-     * clamp belongs here at pack time. */
-    uint8_t def_col[4] = {
-        (uint8_t) (clampf(g.cur_color[0], 0.0f, 1.0f) * 255.0f + 0.5f),
-        (uint8_t) (clampf(g.cur_color[1], 0.0f, 1.0f) * 255.0f + 0.5f),
-        (uint8_t) (clampf(g.cur_color[2], 0.0f, 1.0f) * 255.0f + 0.5f),
-        (uint8_t) (clampf(g.cur_color[3], 0.0f, 1.0f) * 255.0f + 0.5f)
-    };
-
     for (int i = 0; i < count; i++) {
         int src_index = is_elements
                             ? (type == GL_UNSIGNED_INT
@@ -1705,7 +1696,7 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
                 }
             }
         } else {
-            memcpy(dst + col_offset, def_col, 4);
+            *(uint32_t*)(dst + col_offset) = g.cur_color_packed;
         }
 
         // Normal (lit draws only). Read as float3; falls back to the current
