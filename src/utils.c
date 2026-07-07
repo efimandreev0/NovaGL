@@ -2131,3 +2131,58 @@ void nova_hardware_swizzle(C3D_Tex *tex, const void *linear_pixels, int width, i
     C3D_SyncDisplayTransfer((u32 *) linear_pixels, GX_BUFFER_DIM(width, height),
                             (u32 *) tex->data, GX_BUFFER_DIM(tex->width, tex->height), transfer_flags);
 }
+
+/* =========================================================================
+ * PICA200 Hardware Profiler Implementation
+ * ========================================================================= */
+#define PICA_REG_PSC_BSYLOG_CTRL   0x400064
+#define PICA_REG_PSC_BSYLOG_READ   0x40006C
+#define PICA_REG_PSC_MEM_CNT_BASE  0x400078
+
+void novaBeginProfiling(void) {
+    uint32_t dummy[4];
+    for (int i = 0; i < 4; i++) {
+        GSPGPU_ReadHWRegs(PICA_REG_PSC_BSYLOG_READ, dummy, 4 * 4);
+    }
+    uint32_t ctrl = 0;
+    GSPGPU_ReadHWRegs(PICA_REG_PSC_BSYLOG_CTRL, &ctrl, 4);
+    ctrl = (ctrl & ~0xFF) | 1;
+    GSPGPU_WriteHWRegs(PICA_REG_PSC_BSYLOG_CTRL, &ctrl, 4);
+}
+
+void novaEndProfiling(void) {
+    uint32_t ctrl = 0;
+    GSPGPU_ReadHWRegs(PICA_REG_PSC_BSYLOG_CTRL, &ctrl, 4);
+    ctrl = (ctrl & ~0xFF) | 0;
+    GSPGPU_WriteHWRegs(PICA_REG_PSC_BSYLOG_CTRL, &ctrl, 4);
+}
+
+void novaGetProfileStats(NovaProfileStats *out_stats) {
+    if (!out_stats) return;
+
+    uint32_t bsy[4] = {0};
+    GSPGPU_ReadHWRegs(PICA_REG_PSC_BSYLOG_READ, bsy, 4 * 4);
+
+    out_stats->vertex_processor   = bsy[0] & 0xFFFF;
+    out_stats->command_interface  = (bsy[0] >> 16) & 0xFFFF;
+    out_stats->triangle_interface = bsy[1] & 0xFFFF;
+    out_stats->triangle_setup     = (bsy[1] >> 16) & 0xFFFF;
+    out_stats->light_reflection   = bsy[2] & 0xFFFF;
+    out_stats->texture_fetch      = (bsy[2] >> 16) & 0xFFFF;
+    out_stats->color_updater      = bsy[3] & 0xFFFF;
+    out_stats->texture_blender    = (bsy[3] >> 16) & 0xFFFF;
+
+    uint32_t mem[8] = {0};
+    for (int i = 0; i < 8; i++) {
+        GSPGPU_ReadHWRegs(PICA_REG_PSC_MEM_CNT_BASE + (i * 4), &mem[i], 4);
+    }
+
+    out_stats->mem_vram_0_read    = mem[0];
+    out_stats->mem_vram_0_write   = mem[1];
+    out_stats->mem_vram_1_read    = mem[2];
+    out_stats->mem_vram_1_write   = mem[3];
+    out_stats->mem_p3d_geo_read   = mem[4];
+    out_stats->mem_p3d_tex_read   = mem[5];
+    out_stats->mem_p3d_cu_0_read  = mem[6];
+    out_stats->mem_p3d_cu_0_write = mem[7];
+}

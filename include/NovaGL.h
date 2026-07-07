@@ -1675,6 +1675,33 @@ GLuint novaGetScreenTextureId(void);
  * Calls nest as a flat begin/end — only one level deep. */
 void novaBeginClipSpace2D(void);
 void novaEndClipSpace2D(void);
+
+/* =========================================================================
+ * PICA200 Hardware Profiler
+ * ========================================================================= */
+typedef struct {
+ unsigned int vertex_processor;    ///< VP: Vertex Shader workload
+ unsigned int command_interface;   ///< CI: Command Buffer reads
+ unsigned int triangle_interface;  ///< TI: Polygon interface
+ unsigned int triangle_setup;      ///< TS: Rasterizer (Fillrate)
+ unsigned int light_reflection;    ///< LR: Hardware lighting
+ unsigned int texture_fetch;       ///< TX: Texture fetch (TMU)
+ unsigned int color_updater;       ///< CU: Blending, Alpha test
+ unsigned int texture_blender;     ///< TB: Texture blending (TexEnv)
+
+ unsigned int mem_vram_0_read;
+ unsigned int mem_vram_0_write;
+ unsigned int mem_vram_1_read;
+ unsigned int mem_vram_1_write;
+ unsigned int mem_p3d_geo_read;    ///< Geometry DMA fetch
+ unsigned int mem_p3d_tex_read;    ///< Texture sampling fetch
+ unsigned int mem_p3d_cu_0_read;   ///< Framebuffer read (e.g., blending)
+ unsigned int mem_p3d_cu_0_write;  ///< Framebuffer write
+} NovaProfileStats;
+
+void novaBeginProfiling(void);
+void novaEndProfiling(void);
+void novaGetProfileStats(NovaProfileStats *out_stats);
 #ifdef __cplusplus
 }
 #endif
