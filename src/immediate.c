@@ -149,10 +149,7 @@ static inline void add_vertex(GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
     // Read color from global state directly so glColor* calls between vertices
     // take effect within the current glBegin/glEnd block. Clamp+round to match
     // the vertex-array draw path (out-of-[0,1] colours no longer wrap/garble).
-    out_c[0] = (uint8_t) (clampf(g.cur_color[0], 0.0f, 1.0f) * 255.0f + 0.5f);
-    out_c[1] = (uint8_t) (clampf(g.cur_color[1], 0.0f, 1.0f) * 255.0f + 0.5f);
-    out_c[2] = (uint8_t) (clampf(g.cur_color[2], 0.0f, 1.0f) * 255.0f + 0.5f);
-    out_c[3] = (uint8_t) (clampf(g.cur_color[3], 0.0f, 1.0f) * 255.0f + 0.5f);
+    *(uint32_t*)out_c = g.cur_color_packed;
 
     imm.vertex_count++;
 }

@@ -4,6 +4,90 @@
 
 #include "NovaGL.h"
 #include "utils.h"
+#include <string.h>
+
+/* ------------------------------------------------------------------------
+ * Asynchronous Quad Clear
+ * ------------------------------------------------------------------------
+ * A hardware GX memory fill requires a C3D_FrameSplit to ensure previously
+ * queued draws finish before the DMA wipes the buffer. If glClear is called
+ * mid-frame (g.p3d_pending != 0), this split causes a hard CPU stall.
+ *
+ * To prevent this, mid-frame color/depth clears are implemented as a
+ * fullscreen clip-space quad. The quad goes into the same command buffer
+ * as the geometry, avoiding the sync stall entirely and maintaining the
+ * pipeline flow.
+ * ------------------------------------------------------------------------ */
+static void nova_clear_quad(int clear_color, int clear_depth) {
+    C3D_TexEnv *env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+    C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+    for (int i = 1; i < 6; i++) {
+        C3D_TexEnvInit(C3D_GetTexEnv(i));
+    }
+
+    GPU_WRITEMASK write_mask = 0;
+    if (clear_color) write_mask |= GPU_WRITE_ALL;
+    if (clear_depth) write_mask |= GPU_WRITE_DEPTH;
+
+    C3D_DepthTest(clear_depth, GPU_ALWAYS, write_mask);
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    C3D_CullFace(GPU_CULL_NONE);
+
+    /* PICA200 clip-space Z is [-w, 0] (inverted vs GL).
+     * GL far plane (1.0) maps to PICA 0.0
+     * GL near plane (0.0) maps to PICA -1.0 */
+    float pica_z = g.clear_depth - 1.0f;
+    float r = g.clear_r, gc = g.clear_g, b = g.clear_b, a = g.clear_a;
+
+    float quad_verts[4 * 8] = {
+        /* x,     y,     z,      w,       r, g,  b, a */
+        -1.0f, -1.0f, pica_z, 1.0f,  r, gc, b, a,
+         1.0f, -1.0f, pica_z, 1.0f,  r, gc, b, a,
+         1.0f,  1.0f, pica_z, 1.0f,  r, gc, b, a,
+        -1.0f,  1.0f, pica_z, 1.0f,  r, gc, b, a,
+    };
+
+    int bytes = sizeof(quad_verts);
+    uint8_t *staged = (uint8_t *)linear_alloc_ring(g.client_array_buf, &g.client_array_buf_offset, bytes, g.client_array_buf_size);
+    if (!staged) return;
+    memcpy(staged, quad_verts, bytes);
+    GSPGPU_FlushDataCache(staged, bytes);
+
+    AttrInfo_Init(&g.attr_info);
+    AttrInfo_AddLoader(&g.attr_info, 0, GPU_FLOAT, 4); /* position */
+    AttrInfo_AddLoader(&g.attr_info, 1, GPU_FLOAT, 4); /* color */
+    C3D_SetAttrInfo(&g.attr_info);
+
+    C3D_BufInfo *bufInfo = C3D_GetBufInfo();
+    BufInfo_Init(bufInfo);
+    BufInfo_Add(bufInfo, staged, 8 * sizeof(float), 2, 0x10);
+
+    /* Bypass the heavy MVP transform by using the clipspace passthrough shader */
+    if (g.shader_clipspace_dvlb) {
+        C3D_BindProgram(&g.shader_clipspace_program);
+        C3D_Mtx id;
+        Mtx_Identity(&id);
+        if (g.uLoc_projection_clipspace >= 0) {
+            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection_clipspace, &id);
+        }
+    }
+
+    static const uint16_t indices[6] = {0, 1, 2, 0, 2, 3};
+    uint8_t *idx_staged = (uint8_t *)linear_alloc_ring(g.index_buf, &g.index_buf_offset, sizeof(indices), g.index_buf_size);
+    if (idx_staged) {
+        memcpy(idx_staged, indices, sizeof(indices));
+        GSPGPU_FlushDataCache(idx_staged, sizeof(indices));
+        C3D_DrawElements(GPU_TRIANGLES, 6, C3D_UNSIGNED_SHORT, idx_staged);
+        g.p3d_pending = 1;
+    }
+
+    /* The quad clear clobbered TEV, Depth, Blend, and Shader states.
+     * Invalidate the cache so the next draw forces a clean re-push. */
+    nova_invalidate_state_cache();
+}
 
 void glClear(GLbitfield mask) {
     /* Spec: any bit outside the three valid ones is GL_INVALID_VALUE and the
@@ -68,21 +152,23 @@ void glClear(GLbitfield mask) {
     }
 
     if (bits && g.current_target) {
-        /* Commit pending deferred draws into the command list BEFORE the split,
-         * so they execute ahead of this clear's GX fill (the clear must not
-         * wipe geometry that was logically issued before it). */
+        /* Commit pending deferred draws into the command list BEFORE clearing */
         nova_batch_flush();
-        /* C3D_RenderTargetClear is an IMMEDIATE GX memory-fill, while the
-         * draws recorded so far only reach the GPU at C3D_FrameEnd. Without
-         * a split, a mid-frame clear lands BEFORE this frame's earlier draws
-         * on the GPU timeline. PD's gun pass depends on the ordering:
-         * viPrepareZbuf clears depth BETWEEN the world and the viewmodel,
-         * and with the clear hoisted to frame start the gun was depth-tested
-         * against the world (gun rendered under the floor). The split pushes
-         * the recorded command list into the GX queue ahead of the fill —
-         * the queue executes FIFO, so no CPU-side wait is needed. */
-        C3D_FrameSplit(0);
-        C3D_RenderTargetClear(g.current_target, bits, color, depth);
+
+        /* If the command buffer already contains draws (a mid-frame clear),
+         * a hardware GX memory fill would require a FrameSplit, stalling the CPU.
+         * Use a fullscreen quad instead to keep the pipeline flowing.
+         *
+         * Note: Stencil clears fall back to the hardware fill to guarantee
+         * exact interleaved D24S8 semantics without mutating StencilOp state. */
+        if (g.p3d_pending && !want_stencil) {
+            int do_color = color_writable && (mask & GL_COLOR_BUFFER_BIT);
+            nova_clear_quad(do_color, want_depth);
+        } else {
+            /* Frame start: buffer is empty, so a GX memory fill is stall-free and much faster. */
+            C3D_FrameSplit(0);
+            C3D_RenderTargetClear(g.current_target, bits, color, depth);
+        }
     }
 }
 

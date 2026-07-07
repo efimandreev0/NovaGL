@@ -160,7 +160,7 @@ void nova_splash_run(void) {
 
         /* gentle breathing on the accent so it feels alive */
         const float phase = (float)elapsed * 0.0026f;
-        const float pulse = 0.5f + 0.5f * sinf(phase);
+        const float pulse = 0.5f + 0.5f * nova_fast_sinf(phase);
 
         /* ---- build this frame's geometry ---- */
         SplashVtx *w = buf;

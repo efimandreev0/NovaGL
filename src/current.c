@@ -5,6 +5,15 @@
 #include "NovaGL.h"
 #include "utils.h"
 
+static inline void update_packed_color() {
+    uint32_t r = (uint32_t)(clampf(g.cur_color[0], 0.0f, 1.0f) * 255.0f + 0.5f);
+    uint32_t gc = (uint32_t)(clampf(g.cur_color[1], 0.0f, 1.0f) * 255.0f + 0.5f);
+    uint32_t b = (uint32_t)(clampf(g.cur_color[2], 0.0f, 1.0f) * 255.0f + 0.5f);
+    uint32_t a = (uint32_t)(clampf(g.cur_color[3], 0.0f, 1.0f) * 255.0f + 0.5f);
+    // Для вершинных буферов PICA ожидается порядок RGBA в памяти
+    g.cur_color_packed = r | (gc << 8) | (b << 16) | (a << 24);
+}
+
 // signed color -> (2c+1)/max then clamp to [0,1] becouse our framebuffer is
 // unsigned. unsigned variants are already 0..1 so no clamp needed.
 static inline GLfloat norm_b(GLbyte c)   { return clampf((2.0f * (float)c + 1.0f) / 255.0f,        0.0f, 1.0f); }
@@ -23,6 +32,7 @@ void glColor4f(GLfloat r, GLfloat g_, GLfloat b, GLfloat a) {
     g.cur_color[1] = g_;
     g.cur_color[2] = b;
     g.cur_color[3] = a;
+    update_packed_color();
 }
 
 void glColor3f(GLfloat r, GLfloat g_, GLfloat b) {
@@ -34,6 +44,7 @@ void glColor3f(GLfloat r, GLfloat g_, GLfloat b) {
     g.cur_color[1] = g_;
     g.cur_color[2] = b;
     g.cur_color[3] = 1.0f;
+    update_packed_color();
 }
 
 void glColor4ub(GLubyte r, GLubyte g_, GLubyte b, GLubyte a) {
@@ -45,6 +56,7 @@ void glColor4ub(GLubyte r, GLubyte g_, GLubyte b, GLubyte a) {
     g.cur_color[1] = g_ / 255.0f;
     g.cur_color[2] = b / 255.0f;
     g.cur_color[3] = a / 255.0f;
+    update_packed_color();
 }
 
 void glColor3ub(GLubyte r, GLubyte g_, GLubyte b) {
@@ -56,6 +68,7 @@ void glColor3ub(GLubyte r, GLubyte g_, GLubyte b) {
     g.cur_color[1] = g_ / 255.0f;
     g.cur_color[2] = b / 255.0f;
     g.cur_color[3] = 1.0f;
+    update_packed_color();
 }
 
 /* Additional glColor variants */
@@ -64,6 +77,7 @@ void glColor3b(GLbyte r, GLbyte g_, GLbyte b) {
     g.cur_color[1] = norm_b(g_);
     g.cur_color[2] = norm_b(b);
     g.cur_color[3] = 1.0f;
+    update_packed_color();
 }
 
 void glColor3bv(const GLbyte *v) {
@@ -75,6 +89,7 @@ void glColor3d(GLdouble r, GLdouble g_, GLdouble b) {
     g.cur_color[1] = (GLfloat) g_;
     g.cur_color[2] = (GLfloat) b;
     g.cur_color[3] = 1.0f;
+    update_packed_color();
 }
 
 void glColor3dv(const GLdouble *v) {
@@ -90,6 +105,7 @@ void glColor3i(GLint r, GLint g_, GLint b) {
     g.cur_color[1] = norm_i(g_);
     g.cur_color[2] = norm_i(b);
     g.cur_color[3] = 1.0f;
+    update_packed_color();
 }
 
 void glColor3iv(const GLint *v) {
@@ -101,6 +117,7 @@ void glColor3s(GLshort r, GLshort g_, GLshort b) {
     g.cur_color[1] = norm_s(g_);
     g.cur_color[2] = norm_s(b);
     g.cur_color[3] = 1.0f;
+    update_packed_color();
 }
 
 void glColor3sv(const GLshort *v) {
@@ -116,6 +133,7 @@ void glColor3ui(GLuint r, GLuint g_, GLuint b) {
     g.cur_color[1] = norm_ui(g_);
     g.cur_color[2] = norm_ui(b);
     g.cur_color[3] = 1.0f;
+    update_packed_color();
 }
 
 void glColor3uiv(const GLuint *v) {
@@ -127,6 +145,7 @@ void glColor3us(GLushort r, GLushort g_, GLushort b) {
     g.cur_color[1] = norm_us(g_);
     g.cur_color[2] = norm_us(b);
     g.cur_color[3] = 1.0f;
+    update_packed_color();
 }
 
 void glColor3usv(const GLushort *v) {
@@ -138,6 +157,7 @@ void glColor4b(GLbyte r, GLbyte g_, GLbyte b, GLbyte a) {
     g.cur_color[1] = norm_b(g_);
     g.cur_color[2] = norm_b(b);
     g.cur_color[3] = norm_b(a);
+    update_packed_color();
 }
 
 void glColor4bv(const GLbyte *v) {
@@ -149,6 +169,7 @@ void glColor4d(GLdouble r, GLdouble g_, GLdouble b, GLdouble a) {
     g.cur_color[1] = (GLfloat) g_;
     g.cur_color[2] = (GLfloat) b;
     g.cur_color[3] = (GLfloat) a;
+    update_packed_color();
 }
 
 void glColor4dv(const GLdouble *v) {
@@ -164,6 +185,7 @@ void glColor4i(GLint r, GLint g_, GLint b, GLint a) {
     g.cur_color[1] = norm_i(g_);
     g.cur_color[2] = norm_i(b);
     g.cur_color[3] = norm_i(a);
+    update_packed_color();
 }
 
 void glColor4iv(const GLint *v) {
@@ -175,6 +197,7 @@ void glColor4s(GLshort r, GLshort g_, GLshort b, GLshort a) {
     g.cur_color[1] = norm_s(g_);
     g.cur_color[2] = norm_s(b);
     g.cur_color[3] = norm_s(a);
+    update_packed_color();
 }
 
 void glColor4sv(const GLshort *v) {
@@ -190,6 +213,7 @@ void glColor4ui(GLuint r, GLuint g_, GLuint b, GLuint a) {
     g.cur_color[1] = norm_ui(g_);
     g.cur_color[2] = norm_ui(b);
     g.cur_color[3] = norm_ui(a);
+    update_packed_color();
 }
 
 void glColor4uiv(const GLuint *v) {
@@ -201,6 +225,7 @@ void glColor4us(GLushort r, GLushort g_, GLushort b, GLushort a) {
     g.cur_color[1] = norm_us(g_);
     g.cur_color[2] = norm_us(b);
     g.cur_color[3] = norm_us(a);
+    update_packed_color();
 }
 
 void glColor4usv(const GLushort *v) {

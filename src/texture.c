@@ -596,32 +596,67 @@ static void upload_solid_texture(C3D_Tex *tex, GPU_TEXCOLOR fmt, const GLvoid *p
     C3D_TexFlush(tex);
 }
 
+/* Per-pixel morton offset inside an 8x8 tile, precomputed at file scope.
+ * Replaces 4 mul/shift ops with a single LUT read in the swizzle inner loop. */
+static const uint8_t k_tile_morton[64] = {
+    0,  1,  4,  5, 16, 17, 20, 21,
+    2,  3,  6,  7, 18, 19, 22, 23,
+    8,  9, 12, 13, 24, 25, 28, 29,
+   10, 11, 14, 15, 26, 27, 30, 31,
+   32, 33, 36, 37, 48, 49, 52, 53,
+   34, 35, 38, 39, 50, 51, 54, 55,
+   40, 41, 44, 45, 56, 57, 60, 61,
+   42, 43, 46, 47, 58, 59, 62, 63,
+};
+
+/* =========================================================================
+ * Optimized Tiled Texture Uploaders
+ * =========================================================================
+ * PICA200 textures are stored in Morton (Z-Curve) order. Writing to them
+ * using a standard linear (y, then x) loop causes massive L1 Cache Thrashing,
+ * as consecutive X pixels land in distant memory addresses.
+ *
+ * These optimized uploaders traverse the destination texture in 8x8 macroblocks.
+ * This guarantees sequential memory writes, saturating the memory bus and
+ * reducing texture upload times (stutters) by orders of magnitude.
+ * ========================================================================= */
+
 static void upload_page_rgba8(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t *pixels, int row_stride, int src_x0,
                               int src_y0, int copy_w, int copy_h, GLenum format) {
     uint32_t *dst = (uint32_t *) tex->data;
-    for (int y = 0; y < pot_h; y++) {
-        for (int x = 0; x < pot_w; x++) {
-            uint32_t out_pixel = 0;
-            if (x < copy_w && y < copy_h) {
-                const uint8_t *row = pixels + (src_y0 + y) * row_stride;
-                if (format == GL_RGB) {
-                    const uint8_t *px = row + (src_x0 + x) * 3;
-                    out_pixel = ((uint32_t) px[0] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[2] << 8) | 0xFFu;
-                } else if (format == GL_BGR) {
-                    /* 3 bytes B,G,R -> opaque RGBA8. */
-                    const uint8_t *px = row + (src_x0 + x) * 3;
-                    out_pixel = ((uint32_t) px[2] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[0] << 8) | 0xFFu;
-                } else if (format == GL_BGRA) {
-                    const uint8_t *px = row + (src_x0 + x) * 4;
-                    out_pixel = ((uint32_t) px[2] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[0] << 8) | (
-                                    uint32_t) px[3];
-                } else {
-                    const uint8_t *px = row + (src_x0 + x) * 4;
-                    out_pixel = ((uint32_t) px[0] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[2] << 8) | (
-                                    uint32_t) px[3];
+    for (int ty = 0; ty < pot_h; ty += 8) {
+        for (int tx = 0; tx < pot_w; tx += 8) {
+            uint32_t *tile = dst + ((pot_h - 8 - ty) >> 3) * (pot_w >> 3) * 64 + (tx >> 3) * 64;
+
+            for (int py = 0; py < 8; py++) {
+                int sy = ty + py;
+                int fy = 7 - py;
+                for (int px = 0; px < 8; px++) {
+                    int sx = tx + px;
+                    uint32_t out_pixel = 0;
+
+                    if (sx < copy_w && sy < copy_h) {
+                        const uint8_t *row = pixels + (src_y0 + sy) * row_stride;
+                        if (format == GL_RGB) {
+                            const uint8_t *px_ptr = row + (src_x0 + sx) * 3;
+                            out_pixel = ((uint32_t) px_ptr[0] << 24) | ((uint32_t) px_ptr[1] << 16) | ((uint32_t) px_ptr[2] << 8) | 0xFFu;
+                        } else if (format == GL_BGR) {
+                            /* 3 bytes B,G,R -> opaque RGBA8. */
+                            const uint8_t *px_ptr = row + (src_x0 + sx) * 3;
+                            out_pixel = ((uint32_t) px_ptr[2] << 24) | ((uint32_t) px_ptr[1] << 16) | ((uint32_t) px_ptr[0] << 8) | 0xFFu;
+                        } else if (format == GL_BGRA) {
+                            const uint8_t *px_ptr = row + (src_x0 + sx) * 4;
+                            out_pixel = ((uint32_t) px_ptr[2] << 24) | ((uint32_t) px_ptr[1] << 16) | ((uint32_t) px_ptr[0] << 8) | (
+                                            uint32_t) px_ptr[3];
+                        } else {
+                            const uint8_t *px_ptr = row + (src_x0 + sx) * 4;
+                            out_pixel = ((uint32_t) px_ptr[0] << 24) | ((uint32_t) px_ptr[1] << 16) | ((uint32_t) px_ptr[2] << 8) | (
+                                            uint32_t) px_ptr[3];
+                        }
+                    }
+                    tile[k_tile_morton[(fy << 3) | px]] = out_pixel;
                 }
             }
-            dst[morton_offset_local(x, y, pot_w, pot_h)] = out_pixel;
         }
     }
     C3D_TexFlush(tex);
@@ -641,18 +676,28 @@ static void upload_page_16bit(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t 
      *    (L<<8)|A), the same "first component in the MSBs" convention RGBA8
      *    uses. A raw copy would swap L and A. Reorder explicitly. */
     int is_la8 = (fmt == GPU_LA8);
-    for (int y = 0; y < pot_h; y++) {
-        for (int x = 0; x < pot_w; x++) {
-            uint16_t val = 0;
-            if (x < copy_w && y < copy_h) {
-                const uint8_t *row = pixels + (src_y0 + y) * row_stride;
-                const uint8_t *p = row + (src_x0 + x) * 2;
-                if (is_la8)
-                    val = ((uint16_t) p[0] << 8) | p[1];   /* [L,A] -> (L<<8)|A */
-                else
-                    memcpy(&val, p, sizeof(uint16_t));      /* packed short, layouts match */
+    for (int ty = 0; ty < pot_h; ty += 8) {
+        for (int tx = 0; tx < pot_w; tx += 8) {
+            uint16_t *tile = dst + ((pot_h - 8 - ty) >> 3) * (pot_w >> 3) * 64 + (tx >> 3) * 64;
+
+            for (int py = 0; py < 8; py++) {
+                int sy = ty + py;
+                int fy = 7 - py;
+                for (int px = 0; px < 8; px++) {
+                    int sx = tx + px;
+                    uint16_t val = 0;
+
+                    if (sx < copy_w && sy < copy_h) {
+                        const uint8_t *row = pixels + (src_y0 + sy) * row_stride;
+                        const uint8_t *p = row + (src_x0 + sx) * 2;
+                        if (is_la8)
+                            val = ((uint16_t) p[0] << 8) | p[1];   /* [L,A] -> (L<<8)|A */
+                        else
+                            memcpy(&val, p, sizeof(uint16_t));      /* packed short, layouts match */
+                    }
+                    tile[k_tile_morton[(fy << 3) | px]] = val;
+                }
             }
-            dst[morton_offset_local(x, y, pot_w, pot_h)] = val;
         }
     }
     C3D_TexFlush(tex);
@@ -661,14 +706,25 @@ static void upload_page_16bit(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t 
 static void upload_page_8bit(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t *pixels, int row_stride, int src_x0,
                              int src_y0, int copy_w, int copy_h) {
     uint8_t *dst = (uint8_t *) tex->data;
-    for (int y = 0; y < pot_h; y++) {
-        for (int x = 0; x < pot_w; x++) {
-            uint8_t val = 0;
-            if (x < copy_w && y < copy_h) {
-                const uint8_t *row = pixels + (src_y0 + y) * row_stride;
-                val = row[src_x0 + x];
+
+    for (int ty = 0; ty < pot_h; ty += 8) {
+        for (int tx = 0; tx < pot_w; tx += 8) {
+            uint8_t *tile = dst + ((pot_h - 8 - ty) >> 3) * (pot_w >> 3) * 64 + (tx >> 3) * 64;
+
+            for (int py = 0; py < 8; py++) {
+                int sy = ty + py;
+                int fy = 7 - py;
+                for (int px = 0; px < 8; px++) {
+                    int sx = tx + px;
+                    uint8_t val = 0;
+
+                    if (sx < copy_w && sy < copy_h) {
+                        const uint8_t *row = pixels + (src_y0 + sy) * row_stride;
+                        val = row[src_x0 + sx];
+                    }
+                    tile[k_tile_morton[(fy << 3) | px]] = val;
+                }
             }
-            dst[morton_offset_local(x, y, pot_w, pot_h)] = val;
         }
     }
     C3D_TexFlush(tex);
@@ -1928,6 +1984,96 @@ void glClientActiveTexture(GLenum texture) {
     else gl_set_error(GL_INVALID_ENUM);
 }
 
+/* =========================================================================
+ * Fast TexEnv Compiler
+ * =========================================================================
+ * Bakes the complex GL_COMBINE state into raw PICA200 register masks.
+ * This eliminates all branching and citro3d overhead during the draw loop.
+ * ========================================================================= */
+static inline uint8_t fast_tev_src(GLint gl_src, int unit) {
+    if (gl_src == GL_TEXTURE) return GPU_TEXTURE0 + unit;
+    if (gl_src == GL_PREVIOUS) return 0xFF; // 0xFF - это маркер для динамической замены
+    if (gl_src == GL_PRIMARY_COLOR) return GPU_PRIMARY_COLOR;
+    if (gl_src == GL_CONSTANT) return GPU_CONSTANT;
+    return GPU_PRIMARY_COLOR;
+}
+
+void nova_update_fast_tev(const int unit) {
+    FastTevConfig* tc = &g.fast_tev[unit];
+    GPU_TEVSRC tex_src = GPU_TEXTURE0 + unit;
+
+    if (g.tex_env_mode[unit] == GL_COMBINE) {
+        tc->src_rgb[0] = fast_tev_src(g.tex_env_src0_rgb[unit], unit);
+        tc->src_rgb[1] = fast_tev_src(g.tex_env_src1_rgb[unit], unit);
+        tc->src_rgb[2] = fast_tev_src(g.tex_env_src2_rgb[unit], unit);
+
+        GLint a_func = g.tex_env_combine_alpha[unit] ? g.tex_env_combine_alpha[unit] : g.tex_env_combine_rgb[unit];
+        tc->src_a[0] = fast_tev_src(g.tex_env_src0_alpha[unit] ? g.tex_env_src0_alpha[unit] : g.tex_env_src0_rgb[unit], unit);
+        tc->src_a[1] = fast_tev_src(g.tex_env_src1_alpha[unit] ? g.tex_env_src1_alpha[unit] : g.tex_env_src1_rgb[unit], unit);
+        tc->src_a[2] = fast_tev_src(g.tex_env_src2_alpha[unit] ? g.tex_env_src2_alpha[unit] : g.tex_env_src2_rgb[unit], unit);
+
+        int op0_r = get_tev_op_rgb(g.tex_env_operand0_rgb[unit]);
+        int op1_r = get_tev_op_rgb(g.tex_env_operand1_rgb[unit]);
+        int op2_r = get_tev_op_rgb(g.tex_env_operand2_rgb[unit]);
+        int op0_a = get_tev_op_alpha(g.tex_env_operand0_alpha[unit] ? g.tex_env_operand0_alpha[unit] : GL_SRC_ALPHA);
+        int op1_a = get_tev_op_alpha(g.tex_env_operand1_alpha[unit] ? g.tex_env_operand1_alpha[unit] : GL_SRC_ALPHA);
+        int op2_a = get_tev_op_alpha(g.tex_env_operand2_alpha[unit] ? g.tex_env_operand2_alpha[unit] : GL_SRC_ALPHA);
+
+        // Пакуем PICA-маску операций (env->op)
+        tc->op = op0_r | (op1_r << 4) | (op2_r << 8) | (op0_a << 12) | (op1_a << 16) | (op2_a << 20);
+
+        GPU_COMBINEFUNC c_rgb = gl_to_gpu_combinefunc(g.tex_env_combine_rgb[unit]);
+        GPU_COMBINEFUNC c_a   = gl_to_gpu_combinefunc(a_func);
+
+        // PICA игнорирует неиспользуемые источники, но для чистоты зануляем
+        if (c_rgb != GPU_INTERPOLATE && c_rgb != GPU_MULTIPLY_ADD) tc->src_rgb[2] = 0;
+        if (c_a != GPU_INTERPOLATE && c_a != GPU_MULTIPLY_ADD) tc->src_a[2] = 0;
+        if (c_rgb == GPU_REPLACE) tc->src_rgb[1] = 0;
+        if (c_a == GPU_REPLACE) tc->src_a[1] = 0;
+
+        // Пакуем PICA-маску функций (env->func)
+        tc->func = c_rgb | (c_a << 16);
+
+        tc->uses_const = (tc->src_rgb[0] == GPU_CONSTANT || tc->src_rgb[1] == GPU_CONSTANT || tc->src_rgb[2] == GPU_CONSTANT ||
+                          tc->src_a[0] == GPU_CONSTANT || tc->src_a[1] == GPU_CONSTANT || tc->src_a[2] == GPU_CONSTANT);
+    } else {
+        // Обычные режимы без GL_COMBINE
+        tc->uses_const = 0;
+        switch (g.tex_env_mode[unit]) {
+            case GL_REPLACE:
+                tc->src_rgb[0] = tex_src; tc->src_rgb[1] = 0; tc->src_rgb[2] = 0;
+                tc->src_a[0]   = tex_src; tc->src_a[1]   = 0; tc->src_a[2]   = 0;
+                tc->op = GPU_TEVOP_RGB_SRC_COLOR | (GPU_TEVOP_A_SRC_ALPHA << 12);
+                tc->func = GPU_REPLACE | (GPU_REPLACE << 16);
+                break;
+            case GL_ADD:
+                tc->src_rgb[0] = tex_src; tc->src_rgb[1] = 0xFF; tc->src_rgb[2] = 0;
+                tc->src_a[0]   = tex_src; tc->src_a[1]   = 0xFF; tc->src_a[2]   = 0;
+                tc->op = GPU_TEVOP_RGB_SRC_COLOR | (GPU_TEVOP_RGB_SRC_COLOR << 4) | (GPU_TEVOP_A_SRC_ALPHA << 12) | (GPU_TEVOP_A_SRC_ALPHA << 16);
+                tc->func = GPU_ADD | (GPU_ADD << 16);
+                break;
+            case GL_DECAL:
+                tc->src_rgb[0] = 0xFF; tc->src_rgb[1] = tex_src; tc->src_rgb[2] = tex_src;
+                tc->src_a[0]   = 0xFF; tc->src_a[1]   = 0; tc->src_a[2]   = 0;
+                tc->op = GPU_TEVOP_RGB_SRC_COLOR | (GPU_TEVOP_RGB_SRC_COLOR << 4) | (GPU_TEVOP_RGB_SRC_ALPHA << 8) | (GPU_TEVOP_A_SRC_ALPHA << 12);
+                tc->func = GPU_INTERPOLATE | (GPU_REPLACE << 16);
+                break;
+            case GL_MODULATE:
+            default:
+                tc->src_rgb[0] = tex_src; tc->src_rgb[1] = 0xFF; tc->src_rgb[2] = 0;
+                tc->src_a[0]   = tex_src; tc->src_a[1]   = 0xFF; tc->src_a[2]   = 0;
+                tc->op = GPU_TEVOP_RGB_SRC_COLOR | (GPU_TEVOP_RGB_SRC_COLOR << 4) | (GPU_TEVOP_A_SRC_ALPHA << 12) | (GPU_TEVOP_A_SRC_ALPHA << 16);
+                tc->func = GPU_MODULATE | (GPU_MODULATE << 16);
+                break;
+        }
+    }
+
+    // Пакуем масштаб
+    int scale_r = g.tex_env_rgb_scale[unit] == 2 ? GPU_TEVSCALE_2 : (g.tex_env_rgb_scale[unit] == 4 ? GPU_TEVSCALE_4 : GPU_TEVSCALE_1);
+    int scale_a = g.tex_env_alpha_scale[unit] == 2 ? GPU_TEVSCALE_2 : (g.tex_env_alpha_scale[unit] == 4 ? GPU_TEVSCALE_4 : GPU_TEVSCALE_1);
+    tc->scale = scale_r | (scale_a << 4);
+}
+
 void glTexEnvi(GLenum target, GLenum pname, GLint param) {
     /* GL_POINT_SPRITE / GL_TEXTURE_FILTER_CONTROL are valid glTexEnv targets we
      * don't implement — accept silently; anything else is GL_INVALID_ENUM. */
@@ -1983,6 +2129,7 @@ void glTexEnvi(GLenum target, GLenum pname, GLint param) {
             return;
     }
     g.tev_dirty = 1;
+    nova_update_fast_tev(unit);
 }
 
 void glTexEnvf(GLenum target, GLenum pname, GLfloat param) { glTexEnvi(target, pname, (GLint) param); }

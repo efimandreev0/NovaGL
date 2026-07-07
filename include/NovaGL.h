@@ -1675,6 +1675,130 @@ GLuint novaGetScreenTextureId(void);
  * Calls nest as a flat begin/end — only one level deep. */
 void novaBeginClipSpace2D(void);
 void novaEndClipSpace2D(void);
+
+void nova_update_fast_tev(int unit);
+
+/* =========================================================================
+ * PICA200 Hardware Profiler
+ * ========================================================================= */
+typedef struct {
+ unsigned int vertex_processor;    ///< VP: Vertex Shader workload
+ unsigned int command_interface;   ///< CI: Command Buffer reads
+ unsigned int triangle_interface;  ///< TI: Polygon interface
+ unsigned int triangle_setup;      ///< TS: Rasterizer (Fillrate)
+ unsigned int light_reflection;    ///< LR: Hardware lighting
+ unsigned int texture_fetch;       ///< TX: Texture fetch (TMU)
+ unsigned int color_updater;       ///< CU: Blending, Alpha test
+ unsigned int texture_blender;     ///< TB: Texture blending (TexEnv)
+
+ unsigned int mem_vram_0_read;
+ unsigned int mem_vram_0_write;
+ unsigned int mem_vram_1_read;
+ unsigned int mem_vram_1_write;
+ unsigned int mem_p3d_geo_read;    ///< Geometry DMA fetch
+ unsigned int mem_p3d_tex_read;    ///< Texture sampling fetch
+ unsigned int mem_p3d_cu_0_read;   ///< Framebuffer read (e.g., blending)
+ unsigned int mem_p3d_cu_0_write;  ///< Framebuffer write
+} NovaProfileStats;
+
+void novaBeginProfiling(void);
+void novaEndProfiling(void);
+void novaGetProfileStats(NovaProfileStats *out_stats);
+
+/* ------------------------------------------------------------------------
+ * NovaGL Fast Math API
+ * ------------------------------------------------------------------------
+ * Standard math functions (sinf, cosf, sqrtf) provided by newlib are slow
+ * on the 3DS ARM11 processor. They lack hardware VFPv2 vectorization and
+ * branch heavily.
+ *
+ * These functions provide extremely fast approximations suitable for games,
+ * using Quake-style bit hacks and DirectXMath minimax polynomials that
+ * compile directly into fused multiply-accumulate (vmla) instructions.
+ * ------------------------------------------------------------------------ */
+
+#define NOVA_PI       3.141592654f
+#define NOVA_2PI      6.283185307f
+#define NOVA_1DIV2PI  0.159154943f
+#define NOVA_PIDIV2   1.570796327f
+
+/* Fast Inverse Square Root (Quake 3 style)
+ * Avoids the slow VFPv2 hardware division and square root. */
+static inline float nova_fast_rsqrt(float number) {
+    float y;
+    constexpr float threehalfs = 1.5f;
+
+    const float x2 = number * 0.5f;
+    y  = number;
+    int32_t i = *(int32_t *)&y;
+    i  = 0x5f3759df - (i >> 1);
+    y  = *(float*)&i;
+    y  = y * (threehalfs - (x2 * y * y)); // 1st Newton-Raphson iteration
+    return y;
+}
+
+/* Fast Sine (11-degree minimax polynomial) */
+static inline float nova_fast_sinf(float value) {
+    float quotient = NOVA_1DIV2PI * value;
+    quotient = (float)(int)(quotient + (value >= 0.0f ? 0.5f : -0.5f));
+    float y = value - NOVA_2PI * quotient;
+
+    if (y > NOVA_PIDIV2) {
+        y = NOVA_PI - y;
+    } else if (y < -NOVA_PIDIV2) {
+        y = -NOVA_PI - y;
+    }
+
+    const float y2 = y * y;
+    return (((((-2.3889859e-08f * y2 + 2.7525562e-06f) * y2 - 0.00019840874f)
+              * y2 + 0.0083333310f) * y2 - 0.16666667f) * y2 + 1.0f) * y;
+}
+
+/* Fast Cosine (10-degree minimax polynomial) */
+static inline float nova_fast_cosf(float value) {
+    float quotient = NOVA_1DIV2PI * value;
+    quotient = (float)(int)(quotient + (value >= 0.0f ? 0.5f : -0.5f));
+    float y = value - NOVA_2PI * quotient;
+
+    float sign = 1.0f;
+    if (y > NOVA_PIDIV2) {
+        y = NOVA_PI - y;
+        sign = -1.0f;
+    } else if (y < -NOVA_PIDIV2) {
+        y = -NOVA_PI - y;
+        sign = -1.0f;
+    }
+
+    const float y2 = y * y;
+    float p = ((((-2.6051615e-07f * y2 + 2.4760495e-05f) * y2 - 0.0013888378f)
+              * y2 + 0.041666638f) * y2 - 0.5f) * y2 + 1.0f;
+    return sign * p;
+}
+
+/* Simultaneous Sine and Cosine (Extremely fast, calculates both in one pass) */
+static inline void nova_fast_sincosf(float value, float* pSin, float* pCos) {
+    float quotient = NOVA_1DIV2PI * value;
+    quotient = (float)(int)(quotient + (value >= 0.0f ? 0.5f : -0.5f));
+    float y = value - NOVA_2PI * quotient;
+
+    float sign = 1.0f;
+    if (y > NOVA_PIDIV2) {
+        y = NOVA_PI - y;
+        sign = -1.0f;
+    } else if (y < -NOVA_PIDIV2) {
+        y = -NOVA_PI - y;
+        sign = -1.0f;
+    }
+
+    const float y2 = y * y;
+
+    *pSin = (((((-2.3889859e-08f * y2 + 2.7525562e-06f) * y2 - 0.00019840874f)
+              * y2 + 0.0083333310f) * y2 - 0.16666667f) * y2 + 1.0f) * y;
+
+    float p = ((((-2.6051615e-07f * y2 + 2.4760495e-05f) * y2 - 0.0013888378f)
+              * y2 + 0.041666638f) * y2 - 0.5f) * y2 + 1.0f;
+    *pCos = sign * p;
+}
 #ifdef __cplusplus
 }
 #endif

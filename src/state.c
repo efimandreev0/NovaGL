@@ -189,17 +189,17 @@ static int cap_known_unimpl(GLenum cap) {
 
 void glEnable(GLenum cap) {
     switch (cap) {
-        case GL_DEPTH_TEST: g.depth_test_enabled = 1; break;
-        case GL_BLEND: g.blend_enabled = 1; break;
-        case GL_COLOR_LOGIC_OP: g.color_logic_op_enabled = 1; break;
-        case GL_ALPHA_TEST: g.alpha_test_enabled = 1; break;
-        case GL_CULL_FACE: g.cull_face_enabled = 1; break;
+        case GL_DEPTH_TEST: g.depth_test_enabled = 1; g.state_dirty_bits |= (NOVA_DIRTY_DEPTH_TEST | NOVA_DIRTY_EARLY_DEPTH); break;
+        case GL_BLEND: g.blend_enabled = 1; g.state_dirty_bits |= (NOVA_DIRTY_BLEND_STATE | NOVA_DIRTY_EARLY_DEPTH); break;
+        case GL_COLOR_LOGIC_OP: g.color_logic_op_enabled = 1; g.state_dirty_bits |= NOVA_DIRTY_BLEND_STATE; break;
+        case GL_ALPHA_TEST: g.alpha_test_enabled = 1; g.state_dirty_bits |= (NOVA_DIRTY_ALPHA_TEST | NOVA_DIRTY_EARLY_DEPTH); break;
+        case GL_CULL_FACE: g.cull_face_enabled = 1; g.state_dirty_bits |= NOVA_DIRTY_CULLING; break;
         case GL_TEXTURE_2D:
         case GL_TEXTURE_CUBE_MAP: /* shares the per-unit sampler enable */
             g.texture_2d_enabled_unit[g.active_texture_unit] = 1;
             g.tev_dirty = 1;
             break;
-        case GL_SCISSOR_TEST: g.scissor_test_enabled = 1; break;
+        case GL_SCISSOR_TEST: g.scissor_test_enabled = 1; g.state_dirty_bits |= NOVA_DIRTY_SCISSOR; break;
         case GL_STENCIL_TEST: g.stencil_test_enabled = 1;
             /* Re-push stencil state with enabled flag flipped. This is an EAGER
              * GPU command, so commit any pending clipspace batch first or the
@@ -239,17 +239,17 @@ void glEnable(GLenum cap) {
 
 void glDisable(GLenum cap) {
     switch (cap) {
-        case GL_DEPTH_TEST: g.depth_test_enabled = 0; break;
-        case GL_BLEND: g.blend_enabled = 0; break;
-        case GL_COLOR_LOGIC_OP: g.color_logic_op_enabled = 0; break;
-        case GL_ALPHA_TEST: g.alpha_test_enabled = 0; break;
-        case GL_CULL_FACE: g.cull_face_enabled = 0; break;
+        case GL_DEPTH_TEST: g.depth_test_enabled = 0; g.state_dirty_bits |= (NOVA_DIRTY_DEPTH_TEST | NOVA_DIRTY_EARLY_DEPTH); break;
+        case GL_BLEND: g.blend_enabled = 0; g.state_dirty_bits |= (NOVA_DIRTY_BLEND_STATE | NOVA_DIRTY_EARLY_DEPTH); break;
+        case GL_COLOR_LOGIC_OP: g.color_logic_op_enabled = 0; g.state_dirty_bits |= NOVA_DIRTY_BLEND_STATE; break;
+        case GL_ALPHA_TEST: g.alpha_test_enabled = 0; g.state_dirty_bits |= (NOVA_DIRTY_ALPHA_TEST | NOVA_DIRTY_EARLY_DEPTH); break;
+        case GL_CULL_FACE: g.cull_face_enabled = 0; g.state_dirty_bits |= NOVA_DIRTY_CULLING; break;
         case GL_TEXTURE_2D:
         case GL_TEXTURE_CUBE_MAP:
             g.texture_2d_enabled_unit[g.active_texture_unit] = 0;
             g.tev_dirty = 1;
             break;
-        case GL_SCISSOR_TEST: g.scissor_test_enabled = 0; break;
+        case GL_SCISSOR_TEST: g.scissor_test_enabled = 0; g.state_dirty_bits |= NOVA_DIRTY_SCISSOR; break;
         case GL_STENCIL_TEST: g.stencil_test_enabled = 0;
             nova_batch_flush();   /* eager C3D_StencilTest — see glEnable note */
             C3D_StencilTest(0, GPU_ALWAYS, 0, 0xFF, 0xFF);
@@ -646,15 +646,29 @@ void glPopAttrib(void) {
         touched_stencil = touched_depthmap = 1; g.light_dirty = 1;
     }
     if (m & GL_DEPTH_BUFFER_BIT) {
-        g.depth_test_enabled = s->depth_test; g.depth_func = s->depth_func; g.depth_mask = s->depth_mask;
+        g.depth_test_enabled = s->depth_test;
+        g.depth_func = s->depth_func;
+        g.gpu_depth_func = gl_to_gpu_depth_testfunc(g.depth_func);
+        g.gpu_early_depth_func = gl_to_gpu_earlydepthfunc(g.depth_func);
+        g.depth_mask = s->depth_mask;
     }
     if (m & GL_COLOR_BUFFER_BIT) {
         g.blend_enabled = s->blend; g.blend_src = s->blend_src; g.blend_dst = s->blend_dst;
         g.blend_src_alpha = s->blend_src_alpha; g.blend_dst_alpha = s->blend_dst_alpha;
+        g.gpu_blend_src = gl_to_gpu_blendfactor(g.blend_src);
+        g.gpu_blend_dst = gl_to_gpu_blendfactor(g.blend_dst);
+        g.gpu_blend_src_alpha = gl_to_gpu_blendfactor(g.blend_src_alpha);
+        g.gpu_blend_dst_alpha = gl_to_gpu_blendfactor(g.blend_dst_alpha);
         g.blend_eq_rgb = s->blend_eq_rgb; g.blend_eq_alpha = s->blend_eq_alpha;
+        g.gpu_blend_eq_rgb = gl_to_gpu_blendeq(g.blend_eq_rgb);
+        g.gpu_blend_eq_alpha = gl_to_gpu_blendeq(g.blend_eq_alpha);
         for (int i = 0; i < 4; i++) g.blend_color[i] = s->blend_color[i];
-        g.alpha_test_enabled = s->alpha_test; g.alpha_func = s->alpha_func; g.alpha_ref = s->alpha_ref;
+        g.alpha_test_enabled = s->alpha_test;
+        g.alpha_func = s->alpha_func;
+        g.gpu_alpha_func = gl_to_gpu_testfunc(g.alpha_func);
+        g.alpha_ref = s->alpha_ref;
         g.color_logic_op_enabled = s->color_logic_op; g.logic_op = s->logic_op;
+        g.gpu_logic_op = gl_to_gpu_logicop(g.logic_op);
         g.color_mask_r = s->color_mask[0]; g.color_mask_g = s->color_mask[1];
         g.color_mask_b = s->color_mask[2]; g.color_mask_a = s->color_mask[3];
     }
@@ -677,9 +691,13 @@ void glPopAttrib(void) {
     }
     if (m & GL_STENCIL_BUFFER_BIT) {
         g.stencil_test_enabled = s->stencil_test; g.stencil_func = s->stencil_func;
+        g.gpu_stencil_func = stencil_func_to_gpu(g.stencil_func);
         g.stencil_ref = s->stencil_ref; g.stencil_mask = s->stencil_mask;
         g.stencil_write_mask = s->stencil_write_mask; g.stencil_op_fail = s->stencil_op_fail;
         g.stencil_op_zfail = s->stencil_op_zfail; g.stencil_op_zpass = s->stencil_op_zpass;
+        g.gpu_stencil_op_fail = stencil_op_to_gpu(g.stencil_op_fail);
+        g.gpu_stencil_op_zfail = stencil_op_to_gpu(g.stencil_op_zfail);
+        g.gpu_stencil_op_zpass = stencil_op_to_gpu(g.stencil_op_zpass);
         g.clear_stencil = s->clear_stencil; touched_stencil = 1;
     }
     if (m & GL_LIGHTING_BIT) {
@@ -706,6 +724,7 @@ void glPopAttrib(void) {
 #endif
     if (touched_depthmap) apply_depth_map();
     g.tev_dirty = 1;
+    g.state_dirty_bits = NOVA_DIRTY_ALL;
 }
 
 typedef struct {

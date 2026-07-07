@@ -418,6 +418,7 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.cur_color[1] = 1.0f;
     g.cur_color[2] = 1.0f;
     g.cur_color[3] = 1.0f;
+    g.cur_color_packed = 0xFFFFFFFF;
 
     // GL default current normal is (0,0,1), not zero
     g.cur_normal[0] = 0.0f;
@@ -437,6 +438,9 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.depth_test_enabled = 1;
     g.depth_func = GL_LEQUAL;
 #endif
+    g.gpu_depth_func = gl_to_gpu_depth_testfunc(g.depth_func);
+    g.gpu_early_depth_func = gl_to_gpu_earlydepthfunc(g.depth_func);
+
     g.depth_mask = GL_TRUE;
     g.clear_depth = 1.0f;
 
@@ -444,27 +448,45 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
      * glEnable(GL_STENCIL_TEST) pushes sane values to PICA. */
     g.stencil_test_enabled = 0;
     g.stencil_func = GL_ALWAYS;
+    g.gpu_stencil_func = GPU_ALWAYS;
     g.stencil_ref = 0;
     g.stencil_mask = 0xFF;
     g.stencil_write_mask = 0xFF;
+
     g.stencil_op_fail  = GL_KEEP;
     g.stencil_op_zfail = GL_KEEP;
     g.stencil_op_zpass = GL_KEEP;
+    g.gpu_stencil_op_fail = GPU_STENCIL_KEEP;
+    g.gpu_stencil_op_zfail = GPU_STENCIL_KEEP;
+    g.gpu_stencil_op_zpass = GPU_STENCIL_KEEP;
+
     g.clear_stencil = 0;
+
     g.blend_src = GL_ONE;
     g.blend_dst = GL_ZERO;
     g.blend_src_alpha = GL_ONE;
     g.blend_dst_alpha = GL_ZERO;
+    g.gpu_blend_src = GPU_ONE;
+    g.gpu_blend_dst = GPU_ZERO;
+    g.gpu_blend_src_alpha = GPU_ONE;
+    g.gpu_blend_dst_alpha = GPU_ZERO;
+
     g.blend_eq_rgb = GL_FUNC_ADD;
     g.blend_eq_alpha = GL_FUNC_ADD;
+    g.gpu_blend_eq_rgb = GPU_BLEND_ADD;
+    g.gpu_blend_eq_alpha = GPU_BLEND_ADD;
+
     /* glBlendColor default is transparent black; logic op default GL_COPY. */
     g.blend_color[0] = g.blend_color[1] = g.blend_color[2] = g.blend_color[3] = 0.0f;
+    g.blend_color_packed = 0x0;
     g.color_logic_op_enabled = 0;
     g.logic_op = GL_COPY;
+    g.gpu_logic_op = GPU_LOGICOP_COPY;
     /* GL_RGB_SCALE / GL_ALPHA_SCALE default to 1 on every texture unit. */
     for (int u = 0; u < 3; u++) {
         g.tex_env_rgb_scale[u] = 1;
         g.tex_env_alpha_scale[u] = 1;
+        nova_update_fast_tev(u);
     }
     /* GL default material: ambient (0.2,0.2,0.2,1), diffuse (0.8,0.8,0.8,1),
      * specular/emission (0,0,0,1), shininess 0. */
@@ -494,9 +516,13 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.light_model_ambient[0] = g.light_model_ambient[1] = g.light_model_ambient[2] = 0.2f;
     g.light_model_ambient[3] = 1.0f;
     g.alpha_func = GL_ALWAYS;
+    g.gpu_alpha_func = GPU_ALWAYS;
     g.alpha_ref = 0.0f;
+    g.alpha_ref8 = 0x0;
     g.cull_face_mode = GL_BACK;
     g.front_face = GL_CCW;
+
+    g.state_dirty_bits = NOVA_DIRTY_ALL;
 
     g.shade_model = GL_SMOOTH;
     g.fog_mode = GL_LINEAR;
@@ -1428,6 +1454,19 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
             uint8_t *base = (uint8_t *) vbo->data + first * 24;
             draw_packed_run(mode, prim, base, count, 24, 3);
         }
+        /*
+        * Deferred FBO Synchronization (Deferred RAW Hazard Resolution)
+        * If we have just rendered geometry into the FBO, we mark its
+        * texture as "dirty". We do NOT flush the pipeline immediately,
+        * so that the GPU can process the command buffer uninterrupted.
+        */
+        if (g.bound_fbo != 0 && g.bound_fbo < NOVA_MAX_FBOS) {
+            GLuint ctex = g.fbos[g.bound_fbo].color_tex_id;
+            if (ctex > 0 && ctex < NOVA_MAX_TEXTURES) {
+                g.textures[ctex].written_pending_split = 1;
+            }
+        }
+
         cleanup_vbo_stream();
         return;
     }
@@ -1596,16 +1635,6 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
                                ? (const uint8_t *) g.vbos[g.va_color.vbo_id].data + (uintptr_t) g.va_color.pointer
                                : (const uint8_t *) g.va_color.pointer;
 
-    /* Spec: conversion to fixed-point framebuffer color clamps to [0,1].
-     * glColor4f itself must NOT clamp (current color is kept float), so the
-     * clamp belongs here at pack time. */
-    uint8_t def_col[4] = {
-        (uint8_t) (clampf(g.cur_color[0], 0.0f, 1.0f) * 255.0f + 0.5f),
-        (uint8_t) (clampf(g.cur_color[1], 0.0f, 1.0f) * 255.0f + 0.5f),
-        (uint8_t) (clampf(g.cur_color[2], 0.0f, 1.0f) * 255.0f + 0.5f),
-        (uint8_t) (clampf(g.cur_color[3], 0.0f, 1.0f) * 255.0f + 0.5f)
-    };
-
     for (int i = 0; i < count; i++) {
         int src_index = is_elements
                             ? (type == GL_UNSIGNED_INT
@@ -1692,7 +1721,7 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
                 }
             }
         } else {
-            memcpy(dst + col_offset, def_col, 4);
+            *(uint32_t*)(dst + col_offset) = g.cur_color_packed;
         }
 
         // Normal (lit draws only). Read as float3; falls back to the current

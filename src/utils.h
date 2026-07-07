@@ -49,15 +49,23 @@ void dl_execute(GLuint list);
 
 GPU_TESTFUNC gl_to_gpu_alpha_testfunc(GLenum func);
 
+GPU_EARLYDEPTHFUNC gl_to_gpu_earlydepthfunc(GLenum func);
+
 GPU_TESTFUNC gl_to_gpu_depth_testfunc(GLenum func);
 
 GPU_TESTFUNC gl_to_gpu_testfunc(GLenum func);
+
+GPU_TESTFUNC stencil_func_to_gpu(GLenum f);
+
+GPU_STENCILOP stencil_op_to_gpu(GLenum op);
 
 GPU_BLENDFACTOR gl_to_gpu_blendfactor(GLenum factor);
 
 GPU_BLENDEQUATION gl_to_gpu_blendeq(GLenum mode);
 
 GPU_LOGICOP gl_to_gpu_logicop(GLenum op);
+
+GPU_COMBINEFUNC gl_to_gpu_combinefunc(GLenum gl_func);
 
 int gl_type_size(GLenum type);
 
@@ -79,11 +87,29 @@ void vbo_decode_packed_ptc_span(const VBOSlot *slot, int first_vertex, int verte
 
 void vbo_convert_slot_to_raw(VBOSlot *slot);
 
-C3D_Mtx *cur_mtx(void);
+static inline C3D_Mtx *cur_mtx(void) {
+ switch (g.matrix_mode) {
+ case GL_PROJECTION: return &g.proj_stack[g.proj_sp];
+ case GL_TEXTURE: return &g.tex_stack[g.tex_sp];
+ default: return &g.mv_stack[g.mv_sp];
+ }
+}
 
-int *cur_sp(void);
+static inline int *cur_sp(void) {
+ switch (g.matrix_mode) {
+ case GL_PROJECTION: return &g.proj_sp;
+ case GL_TEXTURE: return &g.tex_sp;
+ default: return &g.mv_sp;
+ }
+}
 
-C3D_Mtx *cur_stack(void);
+static inline C3D_Mtx *cur_stack(void) {
+ switch (g.matrix_mode) {
+ case GL_PROJECTION: return g.proj_stack;
+ case GL_TEXTURE: return g.tex_stack;
+ default: return g.mv_stack;
+ }
+}
 
 void *get_tex_staging(int size);
 
@@ -122,6 +148,29 @@ void downscale_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src_h, i
 void downscale_16bit(uint16_t *dst, const uint16_t *src, int src_w, int src_h, int dst_w, int dst_h);
 
 void downscale_8bit(uint8_t *dst, const uint8_t *src, int src_w, int src_h, int dst_w, int dst_h);
+
+/* Alpha-channel TEV operand. PICA's alpha unit is one-component only, so its
+ * operand enum is smaller than the RGB one (SRC_ALPHA / ONE_MINUS_SRC_ALPHA /
+ * SRC_R / SRC_G / SRC_B / their complements). For our use case we only need
+ * the (1-)alpha forms — the R/G/B-broadcast variants are unused. */
+static inline int get_tev_op_alpha(GLint gl_op) {
+ if (gl_op == GL_ONE_MINUS_SRC_ALPHA) return GPU_TEVOP_A_ONE_MINUS_SRC_ALPHA;
+ return GPU_TEVOP_A_SRC_ALPHA;
+}
+
+static inline int get_tev_op_rgb(GLint gl_op) {
+ /* NB: the operand VALUES are GL_SRC_COLOR..GL_ONE_MINUS_SRC_ALPHA
+  * (0x0300..0x0303, NovaGL.h). The old code compared against 0x8590/
+  * 0x8598/0x859A — those are the OPERANDn_RGB *pname* constants, not
+  * values — so ONE_MINUS_* silently decoded as plain SRC_COLOR. */
+ switch (gl_op) {
+  case GL_SRC_COLOR: return GPU_TEVOP_RGB_SRC_COLOR; break;
+  case GL_ONE_MINUS_SRC_COLOR: return GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR; break;
+  case GL_SRC_ALPHA: return GPU_TEVOP_RGB_SRC_ALPHA; break;
+  case GL_ONE_MINUS_SRC_ALPHA: return GPU_TEVOP_RGB_ONE_MINUS_SRC_ALPHA; break;
+  default: return GPU_TEVOP_RGB_SRC_COLOR; break;
+ }
+}
 
 void apply_depth_map(void);
 

@@ -23,32 +23,6 @@
  * Reset via nova_invalidate_state_cache() — required on world reload because
  * texture/VBO ids get recycled, and a cached "tex unit 0 already bound to id
  * 7" would skip the necessary re-bind to a deleted slot. */
-static GPU_WRITEMASK s_last_writemask          = (GPU_WRITEMASK)-1;
-static int           s_last_depth_test_enabled = -1;
-static GLenum        s_last_depth_func         = 0;
-static int           s_last_alpha_test_enabled = -1;
-static GLenum        s_last_alpha_func         = 0;
-static u8            s_last_alpha_ref8         = 0xFF;
-static int           s_last_blend_enabled      = -1;
-static GLenum        s_last_blend_src          = 0;
-static GLenum        s_last_blend_dst          = 0;
-static GLenum        s_last_blend_src_alpha    = 0;
-static GLenum        s_last_blend_dst_alpha    = 0;
-static GLenum        s_last_blend_eq_rgb       = 0;
-static GLenum        s_last_blend_eq_alpha     = 0;
-static int           s_last_logic_op_enabled   = -1;
-static GLenum        s_last_logic_op           = 0;
-static u32           s_last_blend_color        = 0xDEADBEEFu;
-static int           s_last_cull_enabled       = -1;
-static GLenum        s_last_cull_mode          = 0;
-static GLenum        s_last_front_face         = 0;
-static int           s_last_scissor_enabled    = -1;
-static int           s_last_scissor_x          = -1;
-static int           s_last_scissor_y          = -1;
-static int           s_last_scissor_w          = -1;
-static int           s_last_scissor_h          = -1;
-static int           s_last_scissor_fbo        = -1;
-static C3D_RenderTarget *s_last_scissor_target = NULL;
 static GLuint        s_last_tex_bound[3]       = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
 
 /* attr/buf cache used by nova_setup_attr_info / nova_setup_buf_info */
@@ -351,6 +325,16 @@ GPU_TESTFUNC gl_to_gpu_alpha_testfunc(GLenum func) {
     }
 }
 
+GPU_EARLYDEPTHFUNC gl_to_gpu_earlydepthfunc(GLenum func) {
+    switch (func) {
+    case GL_LESS:    return GPU_EARLYDEPTH_GREATER;
+    case GL_LEQUAL:  return GPU_EARLYDEPTH_GEQUAL;
+    case GL_GREATER: return GPU_EARLYDEPTH_LESS;
+    case GL_GEQUAL:  return GPU_EARLYDEPTH_LEQUAL;
+    default:         return GPU_EARLYDEPTH_GEQUAL;
+    }
+}
+
 GPU_TESTFUNC gl_to_gpu_depth_testfunc(GLenum func) {
     switch (func) {
         case GL_NEVER: return GPU_NEVER;
@@ -376,6 +360,36 @@ GPU_TESTFUNC gl_to_gpu_testfunc(GLenum func) {
         case GL_GEQUAL: return GPU_GEQUAL;
         case GL_ALWAYS:
         default: return GPU_ALWAYS;
+    }
+}
+
+GPU_TESTFUNC stencil_func_to_gpu(GLenum f) {
+    switch (f) {
+    case GL_NEVER:    return GPU_NEVER;
+    case GL_LESS:     return GPU_LESS;
+    case GL_LEQUAL:   return GPU_LEQUAL;
+    case GL_GREATER:  return GPU_GREATER;
+    case GL_GEQUAL:   return GPU_GEQUAL;
+    case GL_EQUAL:    return GPU_EQUAL;
+    case GL_NOTEQUAL: return GPU_NOTEQUAL;
+    case GL_ALWAYS:
+    default:          return GPU_ALWAYS;
+    }
+}
+
+GPU_STENCILOP stencil_op_to_gpu(GLenum op) {
+    switch (op) {
+    case GL_ZERO:      return GPU_STENCIL_ZERO;
+    case GL_REPLACE:   return GPU_STENCIL_REPLACE;
+    case GL_INCR:      return GPU_STENCIL_INCR;      /* saturating */
+    case GL_DECR:      return GPU_STENCIL_DECR;      /* saturating */
+        /* PICA HAS distinct wrapping ops — use them so GL_*_WRAP semantics are
+         * exact (wrap at 0/255 instead of saturating). */
+    case GL_INCR_WRAP: return GPU_STENCIL_INCR_WRAP;
+    case GL_DECR_WRAP: return GPU_STENCIL_DECR_WRAP;
+    case GL_INVERT:    return GPU_STENCIL_INVERT;
+    case GL_KEEP:
+    default:           return GPU_STENCIL_KEEP;
     }
 }
 
@@ -532,30 +546,6 @@ int gpu_texfmt_bpp(GPU_TEXCOLOR fmt) {
         case GPU_A8:
         case GPU_LA4: return 1;
         default: return 4;
-    }
-}
-
-C3D_Mtx *cur_mtx(void) {
-    switch (g.matrix_mode) {
-        case GL_PROJECTION: return &g.proj_stack[g.proj_sp];
-        case GL_TEXTURE: return &g.tex_stack[g.tex_sp];
-        default: return &g.mv_stack[g.mv_sp];
-    }
-}
-
-int *cur_sp(void) {
-    switch (g.matrix_mode) {
-        case GL_PROJECTION: return &g.proj_sp;
-        case GL_TEXTURE: return &g.tex_sp;
-        default: return &g.mv_sp;
-    }
-}
-
-C3D_Mtx *cur_stack(void) {
-    switch (g.matrix_mode) {
-        case GL_PROJECTION: return g.proj_stack;
-        case GL_TEXTURE: return g.tex_stack;
-        default: return g.mv_stack;
     }
 }
 
@@ -855,27 +845,6 @@ static GPU_TEVSRC get_tev_src(GLint gl_src, GPU_TEVSRC tex_src, GPU_TEVSRC prev_
     return GPU_PRIMARY_COLOR;
 }
 
-static int get_tev_op_rgb(GLint gl_op) {
-    /* NB: the operand VALUES are GL_SRC_COLOR..GL_ONE_MINUS_SRC_ALPHA
-     * (0x0300..0x0303, NovaGL.h). The old code compared against 0x8590/
-     * 0x8598/0x859A — those are the OPERANDn_RGB *pname* constants, not
-     * values — so ONE_MINUS_* silently decoded as plain SRC_COLOR. */
-    if (gl_op == GL_SRC_COLOR) return GPU_TEVOP_RGB_SRC_COLOR;
-    if (gl_op == GL_ONE_MINUS_SRC_COLOR) return GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR;
-    if (gl_op == GL_SRC_ALPHA) return GPU_TEVOP_RGB_SRC_ALPHA;
-    if (gl_op == GL_ONE_MINUS_SRC_ALPHA) return GPU_TEVOP_RGB_ONE_MINUS_SRC_ALPHA;
-    return GPU_TEVOP_RGB_SRC_COLOR;
-}
-
-/* Alpha-channel TEV operand. PICA's alpha unit is one-component only, so its
- * operand enum is smaller than the RGB one (SRC_ALPHA / ONE_MINUS_SRC_ALPHA /
- * SRC_R / SRC_G / SRC_B / their complements). For our use case we only need
- * the (1-)alpha forms — the R/G/B-broadcast variants are unused. */
-static int get_tev_op_alpha(GLint gl_op) {
-    if (gl_op == GL_ONE_MINUS_SRC_ALPHA) return GPU_TEVOP_A_ONE_MINUS_SRC_ALPHA;
-    return GPU_TEVOP_A_SRC_ALPHA;
-}
-
 /* Pack a 0..1 RGBA into PICA's 0xAABBGGRR layout (high byte = alpha) consumed
  * by C3D_TexEnvColor. */
 static u32 pack_tev_color(const float c[4]) {
@@ -914,7 +883,7 @@ static GPU_TEVSRC get_tev_src_explicit(GLenum gl_src) {
     }
 }
 
-static GPU_COMBINEFUNC gl_to_gpu_combinefunc(GLenum gl_func) {
+GPU_COMBINEFUNC gl_to_gpu_combinefunc(GLenum gl_func) {
     switch (gl_func) {
         case GL_REPLACE:     return GPU_REPLACE;
         case GL_MODULATE:    return GPU_MODULATE;
@@ -1053,29 +1022,34 @@ void novaClearExplicitTevStages(void) {
 }
 
 
-// ==== ИЗМЕНЕНИЯ APPLY GPU STATE ====
-// Вынесена логика переворота матрицы и Scissor Box'а
-// Теперь FBO (g.bound_fbo != 0) не крутит камеру!
-
+/* =========================================================================
+ * CORE RENDER STATE APPLICATION
+ * =========================================================================
+ * Translates the high-level OpenGL state machine into PICA200 hardware
+ * registers. This function sits in the absolute hottest path of the engine.
+ *
+ * To maximize performance on the 268MHz ARM11, this function employs:
+ *  - State Dirty Bitmasks (bypassing branch-heavy state checks).
+ *  - Fast TexEnv Compiler (direct 32-bit register writes).
+ *  - Deferred RAW Hazard Resolution (avoiding pipeline stalls).
+ *  - Hardware Early-Z Culling (boosting fillrate).
+ * ========================================================================= */
 void apply_gpu_state(void) {
-    /* --- Shader selector --------------------------------------------------
+    /* --- 1. Shader Selector -----------------------------------------------
      * Pick the cheapest shader that satisfies the current state:
      *   clipspace : explicit (set by novaBeginClipSpace2D)
+     *   lighting  : HW fragment lighting enabled + normal array present
      *   basic     : no VERTEX fog + identity tex matrix
      *   texmtx    : no VERTEX fog + non-identity tex matrix
      *   full      : vertex fog needed (GL_LINEAR fog enabled)
-     * Vertex fog is only required for GL_LINEAR — GL_EXP/GL_EXP2 run on the
-     * per-pixel hardware fog LUT (bound below regardless of shader), so EXP
-     * fog games stay on the fast basic/texmtx path. The FULL shader's fog
-     * uniforms carry a precomputed 1/(end-start); inv == 0 disables the blend.
+     *
      * Switching shaders invalidates the GPU's uniform state, so we force all
-     * matrix stacks + fog dirty when the active program changes. */
+     * matrix stacks + fog to be marked dirty upon change. */
     int vertex_fog_needed = g.fog_enabled && g.fog_mode == GL_LINEAR;
-    /* Lit when GL_LIGHTING is on AND the caller bound a normal array (no normals
-     * => nothing to light, stay on the normal fast path). */
     int lit = g.lighting_enabled && g.va_normal.enabled && g.shader_lighting_dvlb
               && !g.clipspace_mode_enabled;
     g.lighting_active = lit;
+
     int desired;
     if (g.clipspace_mode_enabled && g.shader_clipspace_dvlb) {
         desired = NOVA_SHADER_CLIPSPACE;
@@ -1088,6 +1062,7 @@ void apply_gpu_state(void) {
     } else {
         desired = NOVA_SHADER_FULL;
     }
+
     if (desired != g.active_shader) {
         switch (desired) {
             case NOVA_SHADER_CLIPSPACE: C3D_BindProgram(&g.shader_clipspace_program); break;
@@ -1102,25 +1077,13 @@ void apply_gpu_state(void) {
         g.fog_dirty = 1;
     }
 
+    /* --- 2. Matrices & Uniforms ------------------------------------------- */
     if (g.matrices_dirty) {
-        /* NOTE: the old `if (g.fog_enabled) g.fog_dirty = 1;` here is gone.
-         * Fog depends only on fog params (shader computes distance from the
-         * per-vertex eye position, no fog uniform involves matrices), and the
-         * forced dirty was rebuilding the 128-entry EXP fog LUT (128x expf on
-         * a 268MHz ARM11) every frame the camera moved. */
-
-        /* Stereo slider changes per frame; if 3D is active we must re-run the
-         * projection rebuild even when only modelview changed (offset depends
-         * on eye). Otherwise honour the per-stack flag. */
         int force_proj_upload = (osGet3DSliderState() > 0.0f && g.stereo_depth != 0.0f);
         int need_proj_rebuild = (g.proj_dirty || force_proj_upload || !g.final_proj_cached_valid);
-        /* On the full shader the projection uniform is only re-uploaded when
-         * rebuilt; on the basic shader we always need final_proj available to
-         * combine with modelview, so we use the cached one when not rebuilt. */
         int uploaded_proj_this_call = 0;
 
         C3D_Mtx final_proj;
-        int final_proj_built = 0;
 
         if (need_proj_rebuild) {
             C3D_Mtx adj_proj = g.proj_stack[g.proj_sp];
@@ -1133,7 +1096,8 @@ void apply_gpu_state(void) {
                 C3D_Mtx temp_proj; Mtx_Multiply(&temp_proj, &trans, &adj_proj);
                 adj_proj = temp_proj;
             }
-            // hack for PICA200 (3DS Z-range)
+
+            // PICA200 Clip-Space Z-range fixup (GL [-w, w] -> PICA [-w, 0])
             adj_proj.r[2].x = adj_proj.r[2].x * 0.4999f - adj_proj.r[3].x * 0.5f;
             adj_proj.r[2].y = adj_proj.r[2].y * 0.4999f - adj_proj.r[3].y * 0.5f;
             adj_proj.r[2].z = adj_proj.r[2].z * 0.4999f - adj_proj.r[3].z * 0.5f;
@@ -1142,46 +1106,29 @@ void apply_gpu_state(void) {
             C3D_Mtx tilt;
             Mtx_Identity(&tilt);
 
-            // ФИКС ФРЕЙМБУФЕРОВ ЗДЕСЬ: ЭКРАН КРУТИТСЯ, А FBO - НЕТ!
-            // The on-screen frame (app surface OR direct LCD) is rendered
-            // sideways via this per-draw tilt; FBOs stay landscape.
+            // Screen frame (app surface or direct LCD) is rendered sideways. FBOs stay landscape.
             #ifndef NOVAGL_TILT_VARIANT
             #define NOVAGL_TILT_VARIANT 1
             #endif
             if (g.bound_fbo == 0) {
                 #if NOVAGL_TILT_VARIANT == 1
-                tilt.r[0].x = 0.0f; tilt.r[0].y =  1.0f;
-                tilt.r[1].x = -1.0f; tilt.r[1].y = 0.0f;
+                tilt.r[0].x = 0.0f; tilt.r[0].y =  1.0f; tilt.r[1].x = -1.0f; tilt.r[1].y = 0.0f;
                 #elif NOVAGL_TILT_VARIANT == 2
-                tilt.r[0].x = 0.0f; tilt.r[0].y = -1.0f;
-                tilt.r[1].x = 1.0f;  tilt.r[1].y = 0.0f;
+                tilt.r[0].x = 0.0f; tilt.r[0].y = -1.0f; tilt.r[1].x = 1.0f;  tilt.r[1].y = 0.0f;
                 #elif NOVAGL_TILT_VARIANT == 3
-                tilt.r[0].x = -1.0f; tilt.r[0].y = 0.0f;
-                tilt.r[1].x = 0.0f;  tilt.r[1].y = -1.0f;
+                tilt.r[0].x = -1.0f; tilt.r[0].y = 0.0f; tilt.r[1].x = 0.0f;  tilt.r[1].y = -1.0f;
                 #endif
             }
 
             Mtx_Multiply(&final_proj, &tilt, &adj_proj);
-            final_proj_built = 1;
             g.final_proj_cached = final_proj;
             g.final_proj_cached_valid = 1;
         } else {
             final_proj = g.final_proj_cached;
-            final_proj_built = 1;
         }
 
         switch (g.active_shader) {
             case NOVA_SHADER_CLIPSPACE:
-                /* The clipspace shader does NOT force w=1 (unlike full/basic/
-                 * texmtx). Upload final_proj — same matrix the full shader
-                 * uses — so post-clip rotation + Z-range fixup get applied
-                 * while the perspective divide keeps a real w. This is what
-                 * makes 3D geometry survive on top of fast3d, which already
-                 * does the MVP transform on the CPU and hands us clip-space.
-                 *
-                 * The shader-switch path forces proj_dirty=1, so on the
-                 * first call after novaBeginClipSpace2D the uniform gets
-                 * (re-)bound at its new location. */
                 if (g.uLoc_projection_clipspace >= 0 && need_proj_rebuild) {
                     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection_clipspace, &final_proj);
                 }
@@ -1203,9 +1150,6 @@ void apply_gpu_state(void) {
                     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_texmtx_texmtx, &g.tex_stack[g.tex_sp]);
                 break;
             case NOVA_SHADER_LIGHTING:
-                /* Like FULL: separate proj + modelview. The lighting unit needs
-                 * the eye-space pos/normal the modelview produces, so we MUST
-                 * upload modelview raw (not pre-combined into MVP). */
                 if (need_proj_rebuild && g.uLoc_projection_lighting >= 0) {
                     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection_lighting, &final_proj);
                     uploaded_proj_this_call = 1;
@@ -1229,27 +1173,80 @@ void apply_gpu_state(void) {
         g.proj_dirty = g.mv_dirty = g.tex_mtx_dirty = 0;
     }
 
-    /* --- Fragment lighting --------------------------------------------------
-     * Bind the HW light env on lit draws (rebuilding it from GL state when
-     * dirty); explicitly unbind on everything else so non-lit geometry isn't
-     * tinted by a stale env. */
+    /* --- 3. Render State Application (Dirty Bitmask) ----------------------
+     * By tracking dirty state via a 32-bit bitmask, we bypass hundreds of
+     * branch instructions. The variables used below (g.gpu_blend_src, etc.)
+     * were pre-translated from GL enums to PICA enums during API calls. */
+    if (g.state_dirty_bits & NOVA_DIRTY_DEPTH_TEST) {
+        GPU_WRITEMASK writemask = 0;
+        if (g.color_mask_r) writemask |= GPU_WRITE_RED;
+        if (g.color_mask_g) writemask |= GPU_WRITE_GREEN;
+        if (g.color_mask_b) writemask |= GPU_WRITE_BLUE;
+        if (g.color_mask_a) writemask |= GPU_WRITE_ALPHA;
+        if (g.depth_mask && g.depth_test_enabled) writemask |= GPU_WRITE_DEPTH;
+
+        // C3D_DepthTest uses inverted semantics (GL_LESS -> PICA GREATER) internally mapped via gpu_depth_func
+        C3D_DepthTest(g.depth_test_enabled, g.gpu_depth_func, writemask);
+    }
+
+    /* Hardware Early Z-Culling: Rejects occluded fragments before TMU sampling,
+     * saving massive fillrate. Must be disabled if alpha test or blending modifies visibility. */
+    if (g.state_dirty_bits & NOVA_DIRTY_EARLY_DEPTH) {
+        int want_early_z = g.depth_test_enabled && !g.alpha_test_enabled && !g.blend_enabled;
+        C3D_EarlyDepthTest(want_early_z, g.gpu_early_depth_func, 0);
+    }
+
+    if (g.state_dirty_bits & NOVA_DIRTY_ALPHA_TEST) {
+        C3D_AlphaTest(g.alpha_test_enabled, g.gpu_alpha_func, g.alpha_ref8); // alpha_ref8 pre-packed
+    }
+
+    if (g.state_dirty_bits & NOVA_DIRTY_BLEND_STATE) {
+        if (g.color_logic_op_enabled) {
+            C3D_ColorLogicOp(g.gpu_logic_op);
+        } else if (g.blend_enabled) {
+            C3D_BlendingColor(g.blend_color_packed); // Pre-packed 0xAABBGGRR
+            C3D_AlphaBlend(g.gpu_blend_eq_rgb, g.gpu_blend_eq_alpha,
+                           g.gpu_blend_src, g.gpu_blend_dst,
+                           g.gpu_blend_src_alpha, g.gpu_blend_dst_alpha);
+        } else {
+            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+        }
+    }
+
+    if (g.state_dirty_bits & NOVA_DIRTY_CULLING) {
+        if (g.cull_face_enabled) {
+            GPU_CULLMODE cull;
+            if (g.cull_face_mode == GL_FRONT || g.cull_face_mode == GL_FRONT_AND_BACK)
+                cull = (g.front_face == GL_CCW) ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW;
+            else
+                cull = (g.front_face == GL_CCW) ? GPU_CULL_BACK_CCW : GPU_CULL_FRONT_CCW;
+            C3D_CullFace(cull);
+        } else {
+            C3D_CullFace(GPU_CULL_NONE);
+        }
+    }
+
+    if (g.state_dirty_bits & NOVA_DIRTY_SCISSOR) {
+        if (g.scissor_test_enabled) {
+            apply_scissor_box();
+        } else {
+            C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+        }
+    }
+
+    // Clear processed bits. Safe because all dependent state has been flushed to PICA.
+    g.state_dirty_bits &= ~(NOVA_DIRTY_DEPTH_TEST | NOVA_DIRTY_EARLY_DEPTH |
+                            NOVA_DIRTY_ALPHA_TEST | NOVA_DIRTY_BLEND_STATE |
+                            NOVA_DIRTY_CULLING | NOVA_DIRTY_SCISSOR);
+
+
+    /* --- 4. Fragment Lighting & Fog --------------------------------------- */
     if (g.lighting_active) {
         nova_apply_light_env();
     } else {
         C3D_LightEnvBind(NULL);
     }
 
-    /* --- Fog --------------------------------------------------------------
-     * Two independent mechanisms:
-     *  (a) Vertex fog uniforms — only the FULL shader has them, and only
-     *      GL_LINEAR uses them. fogparams[0] = (start, end, 1/(end-start));
-     *      the shader computes f = 1 - (d - start) * inv. Uploading inv = 0
-     *      forces f = 1 (no fog) — also used for EXP modes so the vertex
-     *      blend never double-applies on top of the hardware LUT (the old
-     *      code DID double-apply: vertex linear blend + per-pixel EXP LUT).
-     *  (b) Hardware per-pixel fog LUT for GL_EXP/GL_EXP2 — shader-
-     *      independent, so EXP fog now also works on basic/texmtx (the
-     *      selector above no longer forces FULL for EXP modes). */
     if (g.fog_dirty) {
         if (g.active_shader == NOVA_SHADER_FULL && g.uLoc_fogparams >= 0) {
             int vertex_fog = g.fog_enabled && g.fog_mode == GL_LINEAR;
@@ -1260,32 +1257,24 @@ void apply_gpu_state(void) {
                 C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams, g.fog_start, safe_end, inv_range, 0.0f);
                 C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams + 1, g.fog_color[0], g.fog_color[1], g.fog_color[2], g.fog_color[3]);
             } else {
-                /* inv = 0 -> f = 1 -> pure vertex color. */
                 C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams, 0.0f, 0.0f, 0.0f, 0.0f);
                 C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uLoc_fogparams + 1, 1.0f, 1.0f, 1.0f, 1.0f);
             }
         }
 
-        /* fog_color goes through the dedicated FogColor register on the LUT
-         * path so nothing is multiplied on the vertex side. */
 #ifdef NOVAGL_DISABLE_FOG_LUT
         if (0) {
 #else
         if (g.fog_enabled && (g.fog_mode == GL_EXP || g.fog_mode == GL_EXP2)) {
 #endif
-            /* Rebuild LUT only when the parameters actually changed —
-             * fog_dirty also fires on shader switches and glPopAttrib, and
-             * FogLut_Exp is 128x expf on a 268MHz ARM11. */
             static GLenum s_lut_mode = 0;
             static float s_lut_density = -1.0f, s_lut_start = 0.0f, s_lut_end = 0.0f;
             if (s_lut_mode != g.fog_mode || s_lut_density != g.fog_density ||
                 s_lut_start != g.fog_start || s_lut_end != g.fog_end) {
                 if (g.fog_mode == GL_EXP) {
-                    FogLut_Exp(&g.fog_lut, g.fog_density, 1.0f,
-                               g.fog_start, g.fog_end);
+                    FogLut_Exp(&g.fog_lut, g.fog_density, 1.0f, g.fog_start, g.fog_end);
                 } else {
-                    FogLut_Exp(&g.fog_lut, g.fog_density * g.fog_density, 2.0f,
-                               g.fog_start, g.fog_end);
+                    FogLut_Exp(&g.fog_lut, g.fog_density * g.fog_density, 2.0f, g.fog_start, g.fog_end);
                 }
                 s_lut_mode = g.fog_mode;
                 s_lut_density = g.fog_density;
@@ -1304,123 +1293,8 @@ void apply_gpu_state(void) {
         g.fog_dirty = 0;
     }
 
-    /* The state cache vars live at file scope below — see s_last_*. The old
-     * code re-declared them as `extern` inside this function (legal C but
-     * misleading); since they're in the same TU, file-scope forward
-     * declarations are enough and we just use them directly. */
 
-    GPU_WRITEMASK writemask = 0;
-    if (g.color_mask_r) writemask |= GPU_WRITE_RED;
-    if (g.color_mask_g) writemask |= GPU_WRITE_GREEN;
-    if (g.color_mask_b) writemask |= GPU_WRITE_BLUE;
-    if (g.color_mask_a) writemask |= GPU_WRITE_ALPHA;
-    if (g.depth_mask && g.depth_test_enabled) writemask |= GPU_WRITE_DEPTH;
-    if (writemask != s_last_writemask ||
-        s_last_depth_test_enabled != g.depth_test_enabled ||
-        s_last_depth_func != g.depth_func) {
-        /* MUST be the depth-specific (inverting) mapping: PICA's buffer is
-         * near=high/far=low (see apply_depth_map), so GL_LESS runs as
-         * GPU_GREATER. The plain gl_to_gpu_testfunc here z-rejected every
-         * fragment against the far-plane clear (LESS vs cleared 0). */
-        C3D_DepthTest(g.depth_test_enabled, gl_to_gpu_depth_testfunc(g.depth_func), writemask);
-        s_last_writemask = writemask;
-        s_last_depth_test_enabled = g.depth_test_enabled;
-        s_last_depth_func = g.depth_func;
-    }
-
-    u8 alpha_ref8 = (u8)(clampf(g.alpha_ref, 0.0f, 1.0f) * 255.0f + 0.5f);
-    if (s_last_alpha_test_enabled != g.alpha_test_enabled ||
-        s_last_alpha_func != g.alpha_func ||
-        s_last_alpha_ref8 != alpha_ref8) {
-        C3D_AlphaTest(g.alpha_test_enabled, gl_to_gpu_testfunc(g.alpha_func), alpha_ref8);
-        s_last_alpha_test_enabled = g.alpha_test_enabled;
-        s_last_alpha_func = g.alpha_func;
-        s_last_alpha_ref8 = alpha_ref8;
-    }
-
-    /* Colour-stage selection: logic op OR blend (mutually exclusive on PICA,
-     * and per the GL spec GL_COLOR_LOGIC_OP overrides blending when enabled).
-     * C3D_ColorLogicOp / C3D_AlphaBlend each flip the fragOpMode select bit, so
-     * toggling between them re-pushes correctly. blend_color feeds the
-     * GL_CONSTANT_COLOR/ALPHA factors via C3D_BlendingColor. */
-    u32 blend_col_packed = pack_tev_color(g.blend_color);
-    if (s_last_blend_enabled != g.blend_enabled ||
-        s_last_blend_src != g.blend_src ||
-        s_last_blend_dst != g.blend_dst ||
-        s_last_blend_src_alpha != g.blend_src_alpha ||
-        s_last_blend_dst_alpha != g.blend_dst_alpha ||
-        s_last_blend_eq_rgb != g.blend_eq_rgb ||
-        s_last_blend_eq_alpha != g.blend_eq_alpha ||
-        s_last_logic_op_enabled != g.color_logic_op_enabled ||
-        s_last_logic_op != g.logic_op ||
-        s_last_blend_color != blend_col_packed) {
-        if (g.color_logic_op_enabled) {
-            C3D_ColorLogicOp(gl_to_gpu_logicop(g.logic_op));
-        } else if (g.blend_enabled) {
-            C3D_BlendingColor(blend_col_packed);
-            C3D_AlphaBlend(gl_to_gpu_blendeq(g.blend_eq_rgb), gl_to_gpu_blendeq(g.blend_eq_alpha),
-                           gl_to_gpu_blendfactor(g.blend_src), gl_to_gpu_blendfactor(g.blend_dst),
-                           gl_to_gpu_blendfactor(g.blend_src_alpha), gl_to_gpu_blendfactor(g.blend_dst_alpha));
-        } else {
-            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
-        }
-        s_last_blend_enabled = g.blend_enabled;
-        s_last_blend_src = g.blend_src;
-        s_last_blend_dst = g.blend_dst;
-        s_last_blend_src_alpha = g.blend_src_alpha;
-        s_last_blend_dst_alpha = g.blend_dst_alpha;
-        s_last_blend_eq_rgb = g.blend_eq_rgb;
-        s_last_blend_eq_alpha = g.blend_eq_alpha;
-        s_last_logic_op_enabled = g.color_logic_op_enabled;
-        s_last_logic_op = g.logic_op;
-        s_last_blend_color = blend_col_packed;
-    }
-
-    if (s_last_cull_enabled != g.cull_face_enabled ||
-        s_last_cull_mode != g.cull_face_mode ||
-        s_last_front_face != g.front_face) {
-        if (g.cull_face_enabled) {
-            GPU_CULLMODE cull;
-            /* GL_FRONT_AND_BACK is emulated in nova_draw_internal (the draw
-             * is skipped entirely, per spec). If a draw somehow reaches here
-             * with that mode (custom nova* fast paths), the closest GPU state
-             * is front-culling — but the draw-skip is the real mechanism. */
-            if (g.cull_face_mode == GL_FRONT || g.cull_face_mode == GL_FRONT_AND_BACK)
-                cull = (g.front_face == GL_CCW) ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW;
-            else
-                cull = (g.front_face == GL_CCW) ? GPU_CULL_BACK_CCW : GPU_CULL_FRONT_CCW;
-            C3D_CullFace(cull);
-        } else {
-            C3D_CullFace(GPU_CULL_NONE);
-        }
-        s_last_cull_enabled = g.cull_face_enabled;
-        s_last_cull_mode = g.cull_face_mode;
-        s_last_front_face = g.front_face;
-    }
-
-    // ВТОРОЙ ФИКС: SCISSOR
-    if (g.scissor_test_enabled) {
-        // Меняем при смене параметров ИЛИ при смене целевого FBO (там ориентация другая).
-        if (s_last_scissor_enabled != 1 ||
-            s_last_scissor_x != g.scissor_x || s_last_scissor_y != g.scissor_y ||
-            s_last_scissor_w != g.scissor_w || s_last_scissor_h != g.scissor_h ||
-            s_last_scissor_fbo != (g.bound_fbo == 0) ||
-            s_last_scissor_target != g.current_target) {
-            apply_scissor_box();
-            s_last_scissor_enabled = 1;
-            s_last_scissor_x = g.scissor_x;
-            s_last_scissor_y = g.scissor_y;
-            s_last_scissor_w = g.scissor_w;
-            s_last_scissor_h = g.scissor_h;
-            s_last_scissor_fbo = (g.bound_fbo == 0);
-            s_last_scissor_target = g.current_target;
-        }
-    } else if (s_last_scissor_enabled != 0) {
-        C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
-        s_last_scissor_enabled = 0;
-        s_last_scissor_target = NULL;
-    }
-
+    /* --- 5. Texture Environment (TEV) Compiler ---------------------------- */
     int current_tex_state = 0;
     for (int i = 0; i < 3; i++) {
         if (g.texture_2d_enabled_unit[i] && g.bound_texture[i] > 0) current_tex_state |= (1 << i);
@@ -1435,12 +1309,8 @@ void apply_gpu_state(void) {
     }
 
     if (g.tev_dirty || g.last_tex_state != current_tex_state) {
-        // ── Explicit-stage path ────────────────────────────────────────
-        // When the caller has installed an explicit TEV stage list via
-        // novaSetExplicitTevStages, emit those stages verbatim and skip
-        // the per-unit GL_COMBINE machinery entirely. This is the path
-        // gfx_novagl uses for 2-cycle CCs / TRILERP / anything that
-        // doesn't map 1:1 to "one stage per texture unit".
+
+        // Explicit-stage path (for multi-pass custom CCs like fast3d)
         if (g.explicit_tev_count > 0) {
             int n = g.explicit_tev_count;
             for (int i = 0; i < n; i++) {
@@ -1475,8 +1345,7 @@ void apply_gpu_state(void) {
                 // adds branches without saving meaningful work).
                 C3D_TexEnvColor(env, pack_tev_color(s->constant_color));
             }
-            // Pad remaining slots with passthrough so leftover state from
-            // a prior frame doesn't pollute the chain.
+            // Pad remaining
             for (int i = n; i < 6; i++) {
                 C3D_TexEnv *env = C3D_GetTexEnv(i);
                 C3D_TexEnvInit(env);
@@ -1489,140 +1358,38 @@ void apply_gpu_state(void) {
         }
 
         int tev_stage = 0;
+        GPU_TEVSRC base_prim = g.lighting_active ? GPU_FRAGMENT_PRIMARY_COLOR : GPU_PRIMARY_COLOR;
+
         for (int unit = 0; unit < 3; unit++) {
             if (!(current_tex_state & (1 << unit))) continue;
 
-            C3D_TexEnv *env = C3D_GetTexEnv(tev_stage);
-            C3D_TexEnvInit(env);
+            FastTevConfig* tc = &g.fast_tev[unit];
+            C3D_TexEnv* env = C3D_GetTexEnv(tev_stage);
 
-            GPU_TEVSRC tex_src = (unit == 0) ? GPU_TEXTURE0 : ((unit == 1) ? GPU_TEXTURE1 : GPU_TEXTURE2);
-            /* On lit draws the "vertex colour" the chain modulates against is
-             * the HW lighting output (GPU_FRAGMENT_PRIMARY_COLOR) instead of the
-             * interpolated GPU_PRIMARY_COLOR — so texture * light works. */
-            GPU_TEVSRC base_prim = g.lighting_active ? GPU_FRAGMENT_PRIMARY_COLOR : GPU_PRIMARY_COLOR;
+            // Re-map 0xFF marker to runtime base/previous source
             GPU_TEVSRC prev_src = (tev_stage == 0) ? base_prim : GPU_PREVIOUS;
 
-            /* Track whether the configured stage references GPU_CONSTANT on
-             * either the RGB or Alpha side — if it does, push the unit's
-             * tex_env_color into the C3D stage. We do this for the per-unit
-             * "const" colour, not the global TexEnvBufColor, which is a
-             * different thing (used as a CC scratch register for fast3d-style
-             * combiners not represented in legacy GL_COMBINE). */
-            int uses_const = 0;
+            uint32_t s0_r = (tc->src_rgb[0] == 0xFF) ? prev_src : tc->src_rgb[0];
+            uint32_t s1_r = (tc->src_rgb[1] == 0xFF) ? prev_src : tc->src_rgb[1];
+            uint32_t s2_r = (tc->src_rgb[2] == 0xFF) ? prev_src : tc->src_rgb[2];
+            uint32_t s0_a = (tc->src_a[0]   == 0xFF) ? prev_src : tc->src_a[0];
+            uint32_t s1_a = (tc->src_a[1]   == 0xFF) ? prev_src : tc->src_a[1];
+            uint32_t s2_a = (tc->src_a[2]   == 0xFF) ? prev_src : tc->src_a[2];
 
-            if (g.tex_env_mode[unit] == GL_COMBINE) {
-                /* RGB combiner. */
-                GPU_TEVSRC s0_rgb = get_tev_src(g.tex_env_src0_rgb[unit], tex_src, prev_src);
-                GPU_TEVSRC s1_rgb = get_tev_src(g.tex_env_src1_rgb[unit], tex_src, prev_src);
-                GPU_TEVSRC s2_rgb = get_tev_src(g.tex_env_src2_rgb[unit], tex_src, prev_src);
-                int op0_rgb = get_tev_op_rgb(g.tex_env_operand0_rgb[unit]);
-                int op1_rgb = get_tev_op_rgb(g.tex_env_operand1_rgb[unit]);
-                int op2_rgb = get_tev_op_rgb(g.tex_env_operand2_rgb[unit]);
+            // Map into citro3d's C3D_TexEnv fields
+            env->srcRgb     = s0_r | (s1_r << 4) | (s2_r << 8);
+            env->srcAlpha   = s0_a | (s1_a << 4) | (s2_a << 8);
+            env->opAll      = tc->op;
+            env->funcRgb    = tc->func & 0xFFFF;
+            env->funcAlpha  = tc->func >> 16;
+            env->scaleRgb   = tc->scale & 0xF;
+            env->scaleAlpha = tc->scale >> 4;
 
-                if (g.tex_env_src0_rgb[unit] == GL_CONSTANT ||
-                    g.tex_env_src1_rgb[unit] == GL_CONSTANT ||
-                    g.tex_env_src2_rgb[unit] == GL_CONSTANT) uses_const = 1;
-
-                switch (g.tex_env_combine_rgb[unit]) {
-                    case GL_DOT3_RGBA_ARB:
-                        C3D_TexEnvSrc(env, C3D_RGB, s0_rgb, s1_rgb, (GPU_TEVSRC) 0);
-                        C3D_TexEnvOpRgb(env, op0_rgb, op1_rgb, 0);
-                        C3D_TexEnvFunc(env, C3D_RGB, GPU_DOT3_RGBA); break;
-                    case GL_REPLACE:
-                        C3D_TexEnvSrc(env, C3D_RGB, s0_rgb, (GPU_TEVSRC) 0, (GPU_TEVSRC) 0);
-                        C3D_TexEnvOpRgb(env, op0_rgb, 0, 0);
-                        C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE); break;
-                    case GL_ADD:
-                        C3D_TexEnvSrc(env, C3D_RGB, s0_rgb, s1_rgb, (GPU_TEVSRC) 0);
-                        C3D_TexEnvOpRgb(env, op0_rgb, op1_rgb, 0);
-                        C3D_TexEnvFunc(env, C3D_RGB, GPU_ADD); break;
-                    case GL_INTERPOLATE:
-                        C3D_TexEnvSrc(env, C3D_RGB, s0_rgb, s1_rgb, s2_rgb);
-                        C3D_TexEnvOpRgb(env, op0_rgb, op1_rgb, op2_rgb);
-                        C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE); break;
-                    case GL_MODULATE:
-                    default:
-                        C3D_TexEnvSrc(env, C3D_RGB, s0_rgb, s1_rgb, (GPU_TEVSRC) 0);
-                        C3D_TexEnvOpRgb(env, op0_rgb, op1_rgb, 0);
-                        C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE); break;
-                }
-
-                /* Alpha combiner. If combine_alpha is unset (0) we mirror the
-                 * RGB function with sources mapped to the alpha equivalents
-                 * (SRC_ALPHA op), which matches the OpenGL ES 1.1 default
-                 * before any explicit GL_COMBINE_ALPHA call. */
-                GLint alpha_func = g.tex_env_combine_alpha[unit];
-                if (alpha_func == 0) alpha_func = g.tex_env_combine_rgb[unit];
-
-                GPU_TEVSRC s0_a = get_tev_src(
-                    g.tex_env_src0_alpha[unit] ? g.tex_env_src0_alpha[unit] : g.tex_env_src0_rgb[unit],
-                    tex_src, prev_src);
-                GPU_TEVSRC s1_a = get_tev_src(
-                    g.tex_env_src1_alpha[unit] ? g.tex_env_src1_alpha[unit] : g.tex_env_src1_rgb[unit],
-                    tex_src, prev_src);
-                GPU_TEVSRC s2_a = get_tev_src(
-                    g.tex_env_src2_alpha[unit] ? g.tex_env_src2_alpha[unit] : g.tex_env_src2_rgb[unit],
-                    tex_src, prev_src);
-                int op0_a = get_tev_op_alpha(g.tex_env_operand0_alpha[unit]
-                                                ? g.tex_env_operand0_alpha[unit] : GL_SRC_ALPHA);
-                int op1_a = get_tev_op_alpha(g.tex_env_operand1_alpha[unit]
-                                                ? g.tex_env_operand1_alpha[unit] : GL_SRC_ALPHA);
-                int op2_a = get_tev_op_alpha(g.tex_env_operand2_alpha[unit]
-                                                ? g.tex_env_operand2_alpha[unit] : GL_SRC_ALPHA);
-
-                if ((g.tex_env_src0_alpha[unit] ? g.tex_env_src0_alpha[unit] : g.tex_env_src0_rgb[unit]) == GL_CONSTANT ||
-                    (g.tex_env_src1_alpha[unit] ? g.tex_env_src1_alpha[unit] : g.tex_env_src1_rgb[unit]) == GL_CONSTANT ||
-                    (g.tex_env_src2_alpha[unit] ? g.tex_env_src2_alpha[unit] : g.tex_env_src2_rgb[unit]) == GL_CONSTANT)
-                    uses_const = 1;
-
-                switch (alpha_func) {
-                    case GL_REPLACE:
-                        C3D_TexEnvSrc(env, C3D_Alpha, s0_a, (GPU_TEVSRC) 0, (GPU_TEVSRC) 0);
-                        C3D_TexEnvOpAlpha(env, op0_a, 0, 0);
-                        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE); break;
-                    case GL_ADD:
-                        C3D_TexEnvSrc(env, C3D_Alpha, s0_a, s1_a, (GPU_TEVSRC) 0);
-                        C3D_TexEnvOpAlpha(env, op0_a, op1_a, 0);
-                        C3D_TexEnvFunc(env, C3D_Alpha, GPU_ADD); break;
-                    case GL_INTERPOLATE:
-                        C3D_TexEnvSrc(env, C3D_Alpha, s0_a, s1_a, s2_a);
-                        C3D_TexEnvOpAlpha(env, op0_a, op1_a, op2_a);
-                        C3D_TexEnvFunc(env, C3D_Alpha, GPU_INTERPOLATE); break;
-                    case GL_MODULATE:
-                    default:
-                        C3D_TexEnvSrc(env, C3D_Alpha, s0_a, s1_a, (GPU_TEVSRC) 0);
-                        C3D_TexEnvOpAlpha(env, op0_a, op1_a, 0);
-                        C3D_TexEnvFunc(env, C3D_Alpha, GPU_MODULATE); break;
-                }
-            } else {
-                switch (g.tex_env_mode[unit]) {
-                    case GL_REPLACE:
-                        C3D_TexEnvSrc(env, C3D_Both, tex_src, (GPU_TEVSRC) 0, (GPU_TEVSRC) 0);
-                        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE); break;
-                    case GL_ADD:
-                        C3D_TexEnvSrc(env, C3D_Both, tex_src, prev_src, (GPU_TEVSRC) 0);
-                        C3D_TexEnvFunc(env, C3D_Both, GPU_ADD); break;
-                    case GL_DECAL:
-                        C3D_TexEnvSrc(env, C3D_RGB, prev_src, tex_src, tex_src);
-                        C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA);
-                        C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
-                        C3D_TexEnvSrc(env, C3D_Alpha, prev_src, (GPU_TEVSRC) 0, (GPU_TEVSRC) 0);
-                        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE); break;
-                    case GL_MODULATE:
-                    default:
-                        C3D_TexEnvSrc(env, C3D_Both, tex_src, prev_src, (GPU_TEVSRC) 0);
-                        C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE); break;
-                }
+            if (tc->uses_const) {
+                env->color = pack_tev_color(g.tex_env_color[unit]);
             }
 
-            if (uses_const) {
-                C3D_TexEnvColor(env, pack_tev_color(g.tex_env_color[unit]));
-            }
-
-            /* GL_RGB_SCALE / GL_ALPHA_SCALE: post-combine multiplier (1/2/4). */
-            C3D_TexEnvScale(env, C3D_RGB,   gl_to_gpu_tevscale(g.tex_env_rgb_scale[unit]));
-            C3D_TexEnvScale(env, C3D_Alpha, gl_to_gpu_tevscale(g.tex_env_alpha_scale[unit]));
-
+            C3D_DirtyTexEnv(env); // Уведомляем citro3d, что стейт нужно отправить в GPU!
             tev_stage++;
         }
 
@@ -1630,24 +1397,50 @@ void apply_gpu_state(void) {
             /* No texture units active: emit the base colour directly. Lit draws
              * show the HW lighting result; everything else the vertex colour. */
             C3D_TexEnv *env = C3D_GetTexEnv(0);
-            C3D_TexEnvInit(env);
-            GPU_TEVSRC base_prim = g.lighting_active ? GPU_FRAGMENT_PRIMARY_COLOR : GPU_PRIMARY_COLOR;
-            C3D_TexEnvSrc(env, C3D_Both, base_prim, (GPU_TEVSRC) 0, (GPU_TEVSRC) 0);
-            C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+            env->srcRgb     = base_prim | (GPU_PRIMARY_COLOR << 4) | (GPU_PRIMARY_COLOR << 8);
+            env->srcAlpha   = base_prim | (GPU_PRIMARY_COLOR << 4) | (GPU_PRIMARY_COLOR << 8);
+            env->opAll      = GPU_TEVOP_RGB_SRC_COLOR | (GPU_TEVOP_A_SRC_ALPHA << 12);
+            env->funcRgb    = GPU_REPLACE;
+            env->funcAlpha  = GPU_REPLACE;
+            env->scaleRgb   = GPU_TEVSCALE_1;
+            env->scaleAlpha = GPU_TEVSCALE_1;
+            C3D_DirtyTexEnv(env);
             tev_stage++;
         }
 
         for (int i = tev_stage; i < 6; i++) {
             C3D_TexEnv *env = C3D_GetTexEnv(i);
-            C3D_TexEnvInit(env);
-            C3D_TexEnvSrc(env, C3D_Both, GPU_PREVIOUS, (GPU_TEVSRC) 0, (GPU_TEVSRC) 0);
-            C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+            env->srcRgb     = GPU_PREVIOUS | (GPU_PRIMARY_COLOR << 4) | (GPU_PRIMARY_COLOR << 8);
+            env->srcAlpha   = GPU_PREVIOUS | (GPU_PRIMARY_COLOR << 4) | (GPU_PRIMARY_COLOR << 8);
+            env->opAll      = GPU_TEVOP_RGB_SRC_COLOR | (GPU_TEVOP_A_SRC_ALPHA << 12);
+            env->funcRgb    = GPU_REPLACE;
+            env->funcAlpha  = GPU_REPLACE;
+            env->scaleRgb   = GPU_TEVSCALE_1;
+            env->scaleAlpha = GPU_TEVSCALE_1;
+            C3D_DirtyTexEnv(env);
         }
 
         g.last_tex_state = current_tex_state;
         g.tev_dirty = 0;
     }
 tev_done:;
+
+    /* --- 6. Texture Binding & Deferred RAW Hazard Resolution --------------
+     * Detect if we are binding a texture that was rendered to earlier in
+     * this exact frame (FBO). Emit C3D_FrameSplit(0) just-in-time to flush
+     * the pipeline, avoiding unnecessary stalls. */
+    int raw_hazard = 0;
+    for (int unit = 0; unit < 3; unit++) {
+        if ((current_tex_state & (1 << unit)) && g.bound_texture[unit] < NOVA_MAX_TEXTURES) {
+            if (g.textures[g.bound_texture[unit]].written_pending_split) {
+                raw_hazard = 1;
+                g.textures[g.bound_texture[unit]].written_pending_split = 0;
+            }
+        }
+    }
+    if (raw_hazard) {
+        C3D_FrameSplit(0);
+    }
 
     // Бинд текстуры — самая частая команда (терен, частицы, hud).
     // Пропускаем повторный C3D_TexBind с тем же id. Сброс происходит когда
@@ -1730,32 +1523,7 @@ void nova_invalidate_tex_bind(GLuint tex_id) {
 }
 
 void nova_invalidate_state_cache(void) {
-    s_last_writemask          = (GPU_WRITEMASK)-1;
-    s_last_depth_test_enabled = -1;
-    s_last_depth_func         = 0;
-    s_last_alpha_test_enabled = -1;
-    s_last_alpha_func         = 0;
-    s_last_alpha_ref8         = 0xFF;
-    s_last_blend_enabled      = -1;
-    s_last_blend_src          = 0;
-    s_last_blend_dst          = 0;
-    s_last_blend_src_alpha    = 0;
-    s_last_blend_dst_alpha    = 0;
-    s_last_blend_eq_rgb       = 0;
-    s_last_blend_eq_alpha     = 0;
-    s_last_logic_op_enabled   = -1;
-    s_last_logic_op           = 0;
-    s_last_blend_color        = 0xDEADBEEFu;
-    s_last_cull_enabled       = -1;
-    s_last_cull_mode          = 0;
-    s_last_front_face         = 0;
-    s_last_scissor_enabled    = -1;
-    s_last_scissor_x          = -1;
-    s_last_scissor_y          = -1;
-    s_last_scissor_w          = -1;
-    s_last_scissor_h          = -1;
-    s_last_scissor_fbo        = -1;
-    s_last_scissor_target     = NULL;
+    g.state_dirty_bits = NOVA_DIRTY_ALL;
     s_last_tex_bound[0]       = 0xFFFFFFFFu;
     s_last_tex_bound[1]       = 0xFFFFFFFFu;
     s_last_tex_bound[2]       = 0xFFFFFFFFu;
@@ -2093,4 +1861,59 @@ void nova_hardware_swizzle(C3D_Tex *tex, const void *linear_pixels, int width, i
 
     C3D_SyncDisplayTransfer((u32 *) linear_pixels, GX_BUFFER_DIM(width, height),
                             (u32 *) tex->data, GX_BUFFER_DIM(tex->width, tex->height), transfer_flags);
+}
+
+/* =========================================================================
+ * PICA200 Hardware Profiler Implementation
+ * ========================================================================= */
+#define PICA_REG_PSC_BSYLOG_CTRL   0x400064
+#define PICA_REG_PSC_BSYLOG_READ   0x40006C
+#define PICA_REG_PSC_MEM_CNT_BASE  0x400078
+
+void novaBeginProfiling(void) {
+    uint32_t dummy[4];
+    for (int i = 0; i < 4; i++) {
+        GSPGPU_ReadHWRegs(PICA_REG_PSC_BSYLOG_READ, dummy, 4 * 4);
+    }
+    uint32_t ctrl = 0;
+    GSPGPU_ReadHWRegs(PICA_REG_PSC_BSYLOG_CTRL, &ctrl, 4);
+    ctrl = (ctrl & ~0xFF) | 1;
+    GSPGPU_WriteHWRegs(PICA_REG_PSC_BSYLOG_CTRL, &ctrl, 4);
+}
+
+void novaEndProfiling(void) {
+    uint32_t ctrl = 0;
+    GSPGPU_ReadHWRegs(PICA_REG_PSC_BSYLOG_CTRL, &ctrl, 4);
+    ctrl = (ctrl & ~0xFF) | 0;
+    GSPGPU_WriteHWRegs(PICA_REG_PSC_BSYLOG_CTRL, &ctrl, 4);
+}
+
+void novaGetProfileStats(NovaProfileStats *out_stats) {
+    if (!out_stats) return;
+
+    uint32_t bsy[4] = {0};
+    GSPGPU_ReadHWRegs(PICA_REG_PSC_BSYLOG_READ, bsy, 4 * 4);
+
+    out_stats->vertex_processor   = bsy[0] & 0xFFFF;
+    out_stats->command_interface  = (bsy[0] >> 16) & 0xFFFF;
+    out_stats->triangle_interface = bsy[1] & 0xFFFF;
+    out_stats->triangle_setup     = (bsy[1] >> 16) & 0xFFFF;
+    out_stats->light_reflection   = bsy[2] & 0xFFFF;
+    out_stats->texture_fetch      = (bsy[2] >> 16) & 0xFFFF;
+    out_stats->color_updater      = bsy[3] & 0xFFFF;
+    out_stats->texture_blender    = (bsy[3] >> 16) & 0xFFFF;
+
+    uint32_t mem[8] = {0};
+    for (int i = 0; i < 8; i++) {
+        GSPGPU_ReadHWRegs(PICA_REG_PSC_MEM_CNT_BASE + (i * 4), &mem[i], 4);
+    }
+
+    out_stats->mem_vram_0_read    = mem[0];
+    out_stats->mem_vram_0_write   = mem[1];
+    out_stats->mem_vram_1_read    = mem[2];
+    out_stats->mem_vram_1_write   = mem[3];
+    out_stats->mem_p3d_geo_read   = mem[4];
+    out_stats->mem_p3d_tex_read   = mem[5];
+    out_stats->mem_p3d_cu_0_read  = mem[6];
+    out_stats->mem_p3d_cu_0_write = mem[7];
 }
