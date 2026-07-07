@@ -93,6 +93,8 @@ typedef struct {
     int allocated;
     int bound_once; // set on first glBindTexture; glIsTexture tests this, not in_use
 
+    int written_pending_split; // ДОБАВЛЕНО: Флаг для отслеживания RAW-конфликтов FBO
+
     int width, height;
     int pot_w, pot_h;
 

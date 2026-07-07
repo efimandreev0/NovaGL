@@ -222,12 +222,6 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
         return;
     }
 
-    // Splitting the GPU command buffer when switching render targets so the
-    // previous target's writes commit to memory before any later sampling.
-    if (g.current_target != new_target) {
-        C3D_FrameSplit(0);
-    }
-
     g.bound_fbo = new_bound;
     C3D_FrameDrawOn(new_target);
     g.current_target = new_target;
@@ -910,11 +904,6 @@ static int nova_gpu_blit_quad(C3D_Tex *src_tex, const float uv[4][2],
         drew = 1;
     }
 
-    /* Resolve the write into dst BEFORE we switch away / it gets sampled. PICA
-     * render-to-texture is only visible to a later texture fetch after the color
-     * buffer is flushed — without this split the capture's pixels are read back
-     * as stale/uninitialised VRAM (the rainbow-garbage damage/menu symptom). */
-    C3D_FrameSplit(0);
 
     g.active_shader = prev_shader;
     g.clipspace_mode_enabled = prev_clipspace;
@@ -1146,8 +1135,12 @@ int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
      * is really the previous-frame texture, not the live target. */
     if (src_fbo_id == dst_fbo_id && !s_blit_src_override) return 0;
 
-    /* --- Commit any pending draws so source is in VRAM ------------------ */
-    C3D_FrameSplit(0);
+    /* --- Resolve RAW Hazard for Source ------------------ */
+    GLuint src_tex_id = (src_fbo_id == 0) ? g.app_screen_tex_id : g.fbos[src_fbo_id].color_tex_id;
+    if (src_tex_id > 0 && src_tex_id < NOVA_MAX_TEXTURES && g.textures[src_tex_id].written_pending_split) {
+        C3D_FrameSplit(0);
+        g.textures[src_tex_id].written_pending_split = 0;
+    }
 
     /* --- Save state we're about to clobber ------------------------------ */
     C3D_RenderTarget *saved_target = g.current_target;
@@ -1183,6 +1176,12 @@ int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
 
     int ok = nova_gpu_blit_quad(bind_tex, uv, dst_tgt,
                                 0, 0, dst_logical_w, dst_logical_h, dst_is_screen);
+
+    /* Mark destination texture as written so future samples know to flush */
+    GLuint dst_tex_id = (dst_fbo_id == 0) ? g.app_screen_tex_id : g.fbos[dst_fbo_id].color_tex_id;
+    if (dst_tex_id > 0 && dst_tex_id < NOVA_MAX_TEXTURES) {
+        g.textures[dst_tex_id].written_pending_split = 1;
+    }
 
     /* --- Restore --------------------------------------------------------- *
      * The blit trashed render target, viewport, depth/blend/alpha/cull/

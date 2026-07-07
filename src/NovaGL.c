@@ -1428,6 +1428,19 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
             uint8_t *base = (uint8_t *) vbo->data + first * 24;
             draw_packed_run(mode, prim, base, count, 24, 3);
         }
+        /*
+        * Deferred FBO Synchronization (Deferred RAW Hazard Resolution)
+        * If we have just rendered geometry into the FBO, we mark its
+        * texture as "dirty". We do NOT flush the pipeline immediately,
+        * so that the GPU can process the command buffer uninterrupted.
+        */
+        if (g.bound_fbo != 0 && g.bound_fbo < NOVA_MAX_FBOS) {
+            GLuint ctex = g.fbos[g.bound_fbo].color_tex_id;
+            if (ctex > 0 && ctex < NOVA_MAX_TEXTURES) {
+                g.textures[ctex].written_pending_split = 1;
+            }
+        }
+
         cleanup_vbo_stream();
         return;
     }

@@ -1660,6 +1660,24 @@ void apply_gpu_state(void) {
     }
 tev_done:;
 
+    /* --- Resolve Read-After-Write (RAW) Hazards --------------------------- *
+     * PICA200 requires a pipeline flush if we are about to sample from a
+     * texture that was rendered to earlier in the SAME command buffer.
+     * Instead of stalling on every glBindFramebuffer, we check the dirty
+     * flags here and split the frame ONLY if a hazard is imminent. */
+    int raw_hazard = 0;
+    for (int unit = 0; unit < 3; unit++) {
+        if ((current_tex_state & (1 << unit)) && g.bound_texture[unit] < NOVA_MAX_TEXTURES) {
+            if (g.textures[g.bound_texture[unit]].written_pending_split) {
+                raw_hazard = 1;
+                g.textures[g.bound_texture[unit]].written_pending_split = 0;
+            }
+        }
+    }
+    if (raw_hazard) {
+        C3D_FrameSplit(0);
+    }
+
     // Бинд текстуры — самая частая команда (терен, частицы, hud).
     // Пропускаем повторный C3D_TexBind с тем же id. Сброс происходит когда
     // юнит отключается, чтобы при повторном включении бинд гарантированно
