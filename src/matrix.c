@@ -6,22 +6,6 @@
 #include "vfp_math.h"
 #include <math.h>
 
-/* Fast Inverse Square Root (Quake 3 style) for 3DS
- * Avoids the slow VFPv2 hardware division and square root. */
-static inline float q_rsqrt(float number) {
-    int32_t i;
-    float x2, y;
-    const float threehalfs = 1.5f;
-
-    x2 = number * 0.5f;
-    y  = number;
-    i  = *(int32_t*)&y;
-    i  = 0x5f3759df - (i >> 1);
-    y  = *(float*)&i;
-    y  = y * (threehalfs - (x2 * y * y)); // 1st iteration
-    return y;
-}
-
 /* Mark only the stack of the currently active matrix mode as dirty, plus the
  * union flag for code paths that just check `matrices_dirty`.
  *
@@ -99,21 +83,25 @@ void glTranslatef(GLfloat x, GLfloat y, GLfloat z) {
 }
 
 void glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z) {
-    float rad = angle * (float)M_PI / 180.0f;
-    float c = cosf(rad), s = sinf(rad);
+    // Convert to radians (angle * PI / 180)
+    float rad = angle * 0.0174532925f;
+    float c, s;
 
     // Fast path: Single-axis rotations (No sqrt or division needed)
     if (x == 1.0f && y == 0.0f && z == 0.0f) {
+        nova_fast_sincosf(rad, &s, &c);
         vfp_rotate_x(cur_mtx(), c, s);
         mark_cur_dirty();
         return;
     }
     if (x == 0.0f && y == 1.0f && z == 0.0f) {
+        nova_fast_sincosf(rad, &s, &c);
         vfp_rotate_y(cur_mtx(), c, s);
         mark_cur_dirty();
         return;
     }
     if (x == 0.0f && y == 0.0f && z == 1.0f) {
+        nova_fast_sincosf(rad, &s, &c);
         vfp_rotate_z(cur_mtx(), c, s);
         mark_cur_dirty();
         return;
@@ -124,7 +112,8 @@ void glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z) {
     if (len_sq < 0.0001f * 0.0001f)
         return; // degenerate vector
 
-    float inv_len = q_rsqrt(len_sq);
+    nova_fast_sincosf(rad, &s, &c);
+    float inv_len = nova_fast_rsqrt(len_sq);
     x *= inv_len;
     y *= inv_len;
     z *= inv_len;
@@ -141,6 +130,7 @@ void glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z) {
     rot.r[2].x = z * x * ic - y * s;
     rot.r[2].y = z * y * ic + x * s;
     rot.r[2].z = z * z * ic + c;
+    
     vfp_mult_mtx_mtx(cur_mtx(), &rot);
     mark_cur_dirty();
 }

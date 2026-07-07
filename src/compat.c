@@ -183,7 +183,11 @@ void glGetBufferParameteriv(GLenum target, GLenum pname, GLint *params) {
 /* ── GLU helpers ───────────────────────────────────────────────────────────
  * Commonly used by desktop ports for camera/projection setup. */
 void gluPerspective(GLdouble fovy, GLdouble aspect, GLdouble zNear, GLdouble zFar) {
-    GLdouble ymax = zNear * tan(fovy * (GL_PI / 360.0));
+    float rad = (float)(fovy * (NOVA_PI / 360.0));
+    float s, c;
+    nova_fast_sincosf(rad, &s, &c);
+
+    GLdouble ymax = zNear * (GLdouble)(s / c);
     GLdouble ymin = -ymax;
     glFrustum(ymin * aspect, ymax * aspect, ymin, ymax, zNear, zFar);
 }
@@ -192,20 +196,34 @@ void gluLookAt(GLdouble eyeX, GLdouble eyeY, GLdouble eyeZ,
                GLdouble centerX, GLdouble centerY, GLdouble centerZ,
                GLdouble upX, GLdouble upY, GLdouble upZ) {
     GLfloat fwd[3] = { (GLfloat)(centerX - eyeX), (GLfloat)(centerY - eyeY), (GLfloat)(centerZ - eyeZ) };
-    GLfloat fl = sqrtf(fwd[0]*fwd[0] + fwd[1]*fwd[1] + fwd[2]*fwd[2]);
-    if (fl < 1e-8f) fl = 1.0f;
-    fwd[0] /= fl; fwd[1] /= fl; fwd[2] /= fl;
+
+    // Fast normalization
+    GLfloat fl_sq = fwd[0]*fwd[0] + fwd[1]*fwd[1] + fwd[2]*fwd[2];
+    if (fl_sq > 1e-8f) {
+        GLfloat fl_inv = nova_fast_rsqrt(fl_sq);
+        fwd[0] *= fl_inv; fwd[1] *= fl_inv; fwd[2] *= fl_inv;
+    } else {
+        fwd[0] = 0.0f; fwd[1] = 0.0f; fwd[2] = 1.0f; // fallback
+    }
 
     GLfloat up[3] = { (GLfloat) upX, (GLfloat) upY, (GLfloat) upZ };
+
     /* side = fwd x up */
     GLfloat side[3] = {
         fwd[1]*up[2] - fwd[2]*up[1],
         fwd[2]*up[0] - fwd[0]*up[2],
         fwd[0]*up[1] - fwd[1]*up[0]
     };
-    GLfloat sl = sqrtf(side[0]*side[0] + side[1]*side[1] + side[2]*side[2]);
-    if (sl < 1e-8f) sl = 1.0f;
-    side[0] /= sl; side[1] /= sl; side[2] /= sl;
+
+    // Fast normalization
+    GLfloat sl_sq = side[0]*side[0] + side[1]*side[1] + side[2]*side[2];
+    if (sl_sq > 1e-8f) {
+        GLfloat sl_inv = nova_fast_rsqrt(sl_sq);
+        side[0] *= sl_inv; side[1] *= sl_inv; side[2] *= sl_inv;
+    } else {
+        side[0] = 1.0f; side[1] = 0.0f; side[2] = 0.0f; // fallback
+    }
+
     /* recomputed up = side x fwd */
     GLfloat u[3] = {
         side[1]*fwd[2] - side[2]*fwd[1],
