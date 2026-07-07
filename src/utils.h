@@ -81,11 +81,29 @@ void vbo_decode_packed_ptc_span(const VBOSlot *slot, int first_vertex, int verte
 
 void vbo_convert_slot_to_raw(VBOSlot *slot);
 
-C3D_Mtx *cur_mtx(void);
+static inline C3D_Mtx *cur_mtx(void) {
+ switch (g.matrix_mode) {
+ case GL_PROJECTION: return &g.proj_stack[g.proj_sp];
+ case GL_TEXTURE: return &g.tex_stack[g.tex_sp];
+ default: return &g.mv_stack[g.mv_sp];
+ }
+}
 
-int *cur_sp(void);
+static inline int *cur_sp(void) {
+ switch (g.matrix_mode) {
+ case GL_PROJECTION: return &g.proj_sp;
+ case GL_TEXTURE: return &g.tex_sp;
+ default: return &g.mv_sp;
+ }
+}
 
-C3D_Mtx *cur_stack(void);
+static inline C3D_Mtx *cur_stack(void) {
+ switch (g.matrix_mode) {
+ case GL_PROJECTION: return g.proj_stack;
+ case GL_TEXTURE: return g.tex_stack;
+ default: return g.mv_stack;
+ }
+}
 
 void *get_tex_staging(int size);
 

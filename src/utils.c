@@ -547,30 +547,6 @@ int gpu_texfmt_bpp(GPU_TEXCOLOR fmt) {
     }
 }
 
-C3D_Mtx *cur_mtx(void) {
-    switch (g.matrix_mode) {
-        case GL_PROJECTION: return &g.proj_stack[g.proj_sp];
-        case GL_TEXTURE: return &g.tex_stack[g.tex_sp];
-        default: return &g.mv_stack[g.mv_sp];
-    }
-}
-
-int *cur_sp(void) {
-    switch (g.matrix_mode) {
-        case GL_PROJECTION: return &g.proj_sp;
-        case GL_TEXTURE: return &g.tex_sp;
-        default: return &g.mv_sp;
-    }
-}
-
-C3D_Mtx *cur_stack(void) {
-    switch (g.matrix_mode) {
-        case GL_PROJECTION: return g.proj_stack;
-        case GL_TEXTURE: return g.tex_stack;
-        default: return g.mv_stack;
-    }
-}
-
 /* Persistent texture staging buffer. Capped at 1MB (change 5): the previous
  * unbounded growth let a single 1024x1024 RGBA8 downscale (4MB) permanently
  * inflate this buffer, holding 4MB of RAM for the rest of the run for what is a
