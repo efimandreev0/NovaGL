@@ -214,6 +214,14 @@ typedef struct {
     GLuint element_buffer;
 } VAOSlot;
 
+#define NOVA_DIRTY_DEPTH_TEST  (1 << 0)
+#define NOVA_DIRTY_EARLY_DEPTH (1 << 1)
+#define NOVA_DIRTY_ALPHA_TEST  (1 << 2)
+#define NOVA_DIRTY_BLEND_STATE (1 << 3)
+#define NOVA_DIRTY_CULLING     (1 << 4)
+#define NOVA_DIRTY_SCISSOR     (1 << 5)
+#define NOVA_DIRTY_ALL         0xFFFFFFFF
+
 extern struct NovaState {
     //C3D targets
     C3D_RenderTarget *render_target_top; // physical top LCD (left eye)
@@ -400,6 +408,7 @@ extern struct NovaState {
      * inverse blend factors. Pushed via C3D_BlendingColor when blending is on
      * and a constant factor is in use. */
     float blend_color[4];
+    uint32_t blend_color_packed;
     /* glLogicOp / GL_COLOR_LOGIC_OP. On PICA the colour stage is EITHER blend
      * OR logic op (selected by the same fragOpMode bit), so when this is on we
      * emit C3D_ColorLogicOp instead of C3D_AlphaBlend. */
@@ -411,6 +420,9 @@ extern struct NovaState {
     GLenum alpha_func;
     GPU_TESTFUNC gpu_alpha_func;
     float alpha_ref;
+    uint8_t alpha_ref8;
+
+    uint32_t state_dirty_bits;
 
     int cull_face_enabled;
     GLenum cull_face_mode;

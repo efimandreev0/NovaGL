@@ -258,6 +258,7 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
 
     // Форсируем обновление матриц, чтобы снялась/оделась матрица 'tilt'
     g.matrices_dirty = 1;
+    g.state_dirty_bits |= NOVA_DIRTY_SCISSOR;
 }
 
 GLuint novaGetScreenTextureId(void) { return g.app_screen_tex_id; }

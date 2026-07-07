@@ -478,6 +478,7 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
 
     /* glBlendColor default is transparent black; logic op default GL_COPY. */
     g.blend_color[0] = g.blend_color[1] = g.blend_color[2] = g.blend_color[3] = 0.0f;
+    g.blend_color_packed = 0x0;
     g.color_logic_op_enabled = 0;
     g.logic_op = GL_COPY;
     g.gpu_logic_op = GPU_LOGICOP_COPY;
@@ -516,8 +517,11 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.alpha_func = GL_ALWAYS;
     g.gpu_alpha_func = GPU_ALWAYS;
     g.alpha_ref = 0.0f;
+    g.alpha_ref8 = 0x0;
     g.cull_face_mode = GL_BACK;
     g.front_face = GL_CCW;
+
+    g.state_dirty_bits = NOVA_DIRTY_ALL;
 
     g.shade_model = GL_SMOOTH;
     g.fog_mode = GL_LINEAR;

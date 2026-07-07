@@ -40,6 +40,7 @@ void glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
     g.scissor_y = y;
     g.scissor_w = width;
     g.scissor_h = height;
+    g.state_dirty_bits |= NOVA_DIRTY_SCISSOR;
 }
 
 /* Shared validator: the eight GL comparison funcs used by depth/alpha/stencil. */
@@ -81,9 +82,13 @@ void glDepthFunc(GLenum func) {
     g.depth_func = func;
     g.gpu_depth_func = gl_to_gpu_depth_testfunc(func);
     g.gpu_early_depth_func = gl_to_gpu_earlydepthfunc(func);
+    g.state_dirty_bits |= (NOVA_DIRTY_DEPTH_TEST | NOVA_DIRTY_EARLY_DEPTH);
 }
 
-void glDepthMask(GLboolean flag) { g.depth_mask = flag; }
+void glDepthMask(GLboolean flag) {
+    g.depth_mask = flag;
+    g.state_dirty_bits |= NOVA_DIRTY_DEPTH_TEST;
+}
 
 void glDepthRangef(GLclampf near_val, GLclampf far_val) {
     nova_batch_flush();   /* apply_depth_map changes depth state for later draws */
@@ -107,6 +112,7 @@ void glBlendFunc(GLenum sfactor, GLenum dfactor) {
     g.gpu_blend_dst = gl_to_gpu_blendfactor(dfactor);
     g.gpu_blend_src_alpha = g.gpu_blend_src;
     g.gpu_blend_dst_alpha = g.gpu_blend_dst;
+    g.state_dirty_bits |= NOVA_DIRTY_BLEND_STATE;
 }
 
 /* glBlendFuncSeparate: independent colour/alpha blend factors. PICA supports
@@ -125,6 +131,7 @@ void glBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum d
     g.gpu_blend_dst = gl_to_gpu_blendfactor(dstRGB);
     g.gpu_blend_src_alpha = gl_to_gpu_blendfactor(srcAlpha);
     g.gpu_blend_dst_alpha = gl_to_gpu_blendfactor(dstAlpha);
+    g.state_dirty_bits |= NOVA_DIRTY_BLEND_STATE;
 }
 
 /* glBlendColor: the constant for GL_CONSTANT_COLOR/ALPHA factors. Stored as
@@ -135,6 +142,15 @@ void glBlendColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha) {
     g.blend_color[1] = clampf(green, 0.0f, 1.0f);
     g.blend_color[2] = clampf(blue, 0.0f, 1.0f);
     g.blend_color[3] = clampf(alpha, 0.0f, 1.0f);
+
+    // (Format 0xAABBGGRR)
+    uint32_t r = (uint32_t)(g.blend_color[0] * 255.0f + 0.5f);
+    uint32_t gc = (uint32_t)(g.blend_color[1] * 255.0f + 0.5f);
+    uint32_t b = (uint32_t)(g.blend_color[2] * 255.0f + 0.5f);
+    uint32_t a = (uint32_t)(g.blend_color[3] * 255.0f + 0.5f);
+    g.blend_color_packed = r | (gc << 8) | (b << 16) | (a << 24);
+
+    g.state_dirty_bits |= NOVA_DIRTY_BLEND_STATE;
 }
 
 /* glLogicOp: records the colour logic opcode. Only takes effect while
@@ -148,6 +164,7 @@ void glLogicOp(GLenum opcode) {
         case GL_COPY_INVERTED: case GL_OR_INVERTED: case GL_NAND: case GL_SET:
             g.logic_op = opcode;
             g.gpu_logic_op = gl_to_gpu_logicop(opcode);
+            g.state_dirty_bits |= NOVA_DIRTY_BLEND_STATE;
             break;
         default:
             gl_set_error(GL_INVALID_ENUM);
@@ -178,6 +195,7 @@ void glBlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha) {
 
     g.gpu_blend_eq_rgb = gl_to_gpu_blendeq(modeRGB);
     g.gpu_blend_eq_alpha = gl_to_gpu_blendeq(modeAlpha);
+    g.state_dirty_bits |= NOVA_DIRTY_BLEND_STATE;
 }
 
 void glBlendEquation(GLenum mode) {
@@ -202,6 +220,9 @@ void glAlphaFunc(GLenum func, GLclampf ref) {
     g.gpu_alpha_func = gl_to_gpu_testfunc(func);
     /* Spec: ref is clamped to [0,1] at specification time. */
     g.alpha_ref = clampf(ref, 0.0f, 1.0f);
+    g.alpha_ref8 = (uint8_t)(g.alpha_ref * 255.0f + 0.5f);
+
+    g.state_dirty_bits |= (NOVA_DIRTY_ALPHA_TEST | NOVA_DIRTY_EARLY_DEPTH);
 }
 
 void glCullFace(GLenum mode) {
@@ -210,6 +231,7 @@ void glCullFace(GLenum mode) {
         return;
     }
     g.cull_face_mode = mode;
+    g.state_dirty_bits |= NOVA_DIRTY_CULLING;
 }
 
 void glFrontFace(GLenum mode) {
@@ -218,6 +240,7 @@ void glFrontFace(GLenum mode) {
         return;
     }
     g.front_face = mode;
+    g.state_dirty_bits |= NOVA_DIRTY_CULLING;
 }
 
 void glColorMask(GLboolean r, GLboolean g_, GLboolean b, GLboolean a) {
@@ -225,6 +248,7 @@ void glColorMask(GLboolean r, GLboolean g_, GLboolean b, GLboolean a) {
     g.color_mask_g = g_;
     g.color_mask_b = b;
     g.color_mask_a = a;
+    g.state_dirty_bits |= NOVA_DIRTY_DEPTH_TEST;
 }
 
 void glShadeModel(GLenum mode) {

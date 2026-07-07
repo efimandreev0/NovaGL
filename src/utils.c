@@ -23,34 +23,6 @@
  * Reset via nova_invalidate_state_cache() — required on world reload because
  * texture/VBO ids get recycled, and a cached "tex unit 0 already bound to id
  * 7" would skip the necessary re-bind to a deleted slot. */
-static GPU_WRITEMASK s_last_writemask          = (GPU_WRITEMASK)-1;
-static int           s_last_depth_test_enabled = -1;
-static GLenum        s_last_depth_func         = 0;
-static int           s_last_alpha_test_enabled = -1;
-static GLenum        s_last_alpha_func         = 0;
-static u8            s_last_alpha_ref8         = 0xFF;
-static int           s_last_blend_enabled      = -1;
-static GLenum        s_last_blend_src          = 0;
-static GLenum        s_last_blend_dst          = 0;
-static GLenum        s_last_blend_src_alpha    = 0;
-static GLenum        s_last_blend_dst_alpha    = 0;
-static GLenum        s_last_blend_eq_rgb       = 0;
-static GLenum        s_last_blend_eq_alpha     = 0;
-static int           s_last_logic_op_enabled   = -1;
-static GLenum        s_last_logic_op           = 0;
-static u32           s_last_blend_color        = 0xDEADBEEFu;
-static int           s_last_cull_enabled       = -1;
-static GLenum        s_last_cull_mode          = 0;
-static GLenum        s_last_front_face         = 0;
-static int           s_last_scissor_enabled    = -1;
-static int           s_last_scissor_x          = -1;
-static int           s_last_scissor_y          = -1;
-static int           s_last_scissor_w          = -1;
-static int           s_last_scissor_h          = -1;
-static int           s_last_scissor_fbo        = -1;
-static C3D_RenderTarget *s_last_scissor_target = NULL;
-static int           s_last_early_depth        = -1;
-static GLenum        s_last_early_depth_func   = 0;
 static GLuint        s_last_tex_bound[3]       = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
 
 /* attr/buf cache used by nova_setup_attr_info / nova_setup_buf_info */
@@ -1076,21 +1048,8 @@ void novaClearExplicitTevStages(void) {
 // Теперь FBO (g.bound_fbo != 0) не крутит камеру!
 
 void apply_gpu_state(void) {
-    /* --- Shader selector --------------------------------------------------
-     * Pick the cheapest shader that satisfies the current state:
-     *   clipspace : explicit (set by novaBeginClipSpace2D)
-     *   basic     : no VERTEX fog + identity tex matrix
-     *   texmtx    : no VERTEX fog + non-identity tex matrix
-     *   full      : vertex fog needed (GL_LINEAR fog enabled)
-     * Vertex fog is only required for GL_LINEAR — GL_EXP/GL_EXP2 run on the
-     * per-pixel hardware fog LUT (bound below regardless of shader), so EXP
-     * fog games stay on the fast basic/texmtx path. The FULL shader's fog
-     * uniforms carry a precomputed 1/(end-start); inv == 0 disables the blend.
-     * Switching shaders invalidates the GPU's uniform state, so we force all
-     * matrix stacks + fog dirty when the active program changes. */
+    /* --- Shader selector -------------------------------------------------- */
     int vertex_fog_needed = g.fog_enabled && g.fog_mode == GL_LINEAR;
-    /* Lit when GL_LIGHTING is on AND the caller bound a normal array (no normals
-     * => nothing to light, stay on the normal fast path). */
     int lit = g.lighting_enabled && g.va_normal.enabled && g.shader_lighting_dvlb
               && !g.clipspace_mode_enabled;
     g.lighting_active = lit;
@@ -1106,6 +1065,7 @@ void apply_gpu_state(void) {
     } else {
         desired = NOVA_SHADER_FULL;
     }
+
     if (desired != g.active_shader) {
         switch (desired) {
             case NOVA_SHADER_CLIPSPACE: C3D_BindProgram(&g.shader_clipspace_program); break;
@@ -1121,20 +1081,8 @@ void apply_gpu_state(void) {
     }
 
     if (g.matrices_dirty) {
-        /* NOTE: the old `if (g.fog_enabled) g.fog_dirty = 1;` here is gone.
-         * Fog depends only on fog params (shader computes distance from the
-         * per-vertex eye position, no fog uniform involves matrices), and the
-         * forced dirty was rebuilding the 128-entry EXP fog LUT (128x expf on
-         * a 268MHz ARM11) every frame the camera moved. */
-
-        /* Stereo slider changes per frame; if 3D is active we must re-run the
-         * projection rebuild even when only modelview changed (offset depends
-         * on eye). Otherwise honour the per-stack flag. */
         int force_proj_upload = (osGet3DSliderState() > 0.0f && g.stereo_depth != 0.0f);
         int need_proj_rebuild = (g.proj_dirty || force_proj_upload || !g.final_proj_cached_valid);
-        /* On the full shader the projection uniform is only re-uploaded when
-         * rebuilt; on the basic shader we always need final_proj available to
-         * combine with modelview, so we use the cached one when not rebuilt. */
         int uploaded_proj_this_call = 0;
 
         C3D_Mtx final_proj;
@@ -1160,9 +1108,6 @@ void apply_gpu_state(void) {
             C3D_Mtx tilt;
             Mtx_Identity(&tilt);
 
-            // ФИКС ФРЕЙМБУФЕРОВ ЗДЕСЬ: ЭКРАН КРУТИТСЯ, А FBO - НЕТ!
-            // The on-screen frame (app surface OR direct LCD) is rendered
-            // sideways via this per-draw tilt; FBOs stay landscape.
             #ifndef NOVAGL_TILT_VARIANT
             #define NOVAGL_TILT_VARIANT 1
             #endif
@@ -1190,16 +1135,6 @@ void apply_gpu_state(void) {
 
         switch (g.active_shader) {
             case NOVA_SHADER_CLIPSPACE:
-                /* The clipspace shader does NOT force w=1 (unlike full/basic/
-                 * texmtx). Upload final_proj — same matrix the full shader
-                 * uses — so post-clip rotation + Z-range fixup get applied
-                 * while the perspective divide keeps a real w. This is what
-                 * makes 3D geometry survive on top of fast3d, which already
-                 * does the MVP transform on the CPU and hands us clip-space.
-                 *
-                 * The shader-switch path forces proj_dirty=1, so on the
-                 * first call after novaBeginClipSpace2D the uniform gets
-                 * (re-)bound at its new location. */
                 if (g.uLoc_projection_clipspace >= 0 && need_proj_rebuild) {
                     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection_clipspace, &final_proj);
                 }
@@ -1221,9 +1156,6 @@ void apply_gpu_state(void) {
                     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_texmtx_texmtx, &g.tex_stack[g.tex_sp]);
                 break;
             case NOVA_SHADER_LIGHTING:
-                /* Like FULL: separate proj + modelview. The lighting unit needs
-                 * the eye-space pos/normal the modelview produces, so we MUST
-                 * upload modelview raw (not pre-combined into MVP). */
                 if (need_proj_rebuild && g.uLoc_projection_lighting >= 0) {
                     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uLoc_projection_lighting, &final_proj);
                     uploaded_proj_this_call = 1;
@@ -1246,6 +1178,84 @@ void apply_gpu_state(void) {
         g.matrices_dirty = 0;
         g.proj_dirty = g.mv_dirty = g.tex_mtx_dirty = 0;
     }
+
+    /* ======================================================================
+     * RENDER STATE APPLICATION (Dirty Bitmask)
+     * ====================================================================== */
+    if (g.state_dirty_bits & NOVA_DIRTY_DEPTH_TEST) {
+        GPU_WRITEMASK writemask = 0;
+        if (g.color_mask_r) writemask |= GPU_WRITE_RED;
+        if (g.color_mask_g) writemask |= GPU_WRITE_GREEN;
+        if (g.color_mask_b) writemask |= GPU_WRITE_BLUE;
+        if (g.color_mask_a) writemask |= GPU_WRITE_ALPHA;
+        if (g.depth_mask && g.depth_test_enabled) writemask |= GPU_WRITE_DEPTH;
+
+        C3D_DepthTest(g.depth_test_enabled, g.gpu_depth_func, writemask);
+    }
+
+    /* --- Hardware Early Z-Culling ----------------------------------------- *
+     * PICA200 supports early depth testing, rejecting occluded fragments
+     * BEFORE texture fetch and TEV execution. This saves massive memory
+     * bandwidth and fillrate, especially on heavily overdrawn scenes (e.g.
+     * Minecraft caves/forests).
+     *
+     * Early-Z is automatically enabled for opaque geometry (depth test ON,
+     * alpha test OFF, blending OFF). If a fragment's visibility can be
+     * altered by alpha-testing, or if it requires blending, Early-Z MUST
+     * be disabled to prevent premature Z-buffer writes from fragments that
+     * might eventually be discarded or blended. */
+    if (g.state_dirty_bits & NOVA_DIRTY_EARLY_DEPTH) {
+        int want_early_z = g.depth_test_enabled && !g.alpha_test_enabled && !g.blend_enabled;
+        C3D_EarlyDepthTest(want_early_z, g.gpu_early_depth_func, 0);
+    }
+
+    if (g.state_dirty_bits & NOVA_DIRTY_ALPHA_TEST) {
+        C3D_AlphaTest(g.alpha_test_enabled, g.gpu_alpha_func, g.alpha_ref8);
+    }
+
+    if (g.state_dirty_bits & NOVA_DIRTY_BLEND_STATE) {
+        if (g.color_logic_op_enabled) {
+            C3D_ColorLogicOp(g.gpu_logic_op);
+        } else if (g.blend_enabled) {
+            C3D_BlendingColor(g.blend_color_packed);
+            C3D_AlphaBlend(g.gpu_blend_eq_rgb, g.gpu_blend_eq_alpha,
+                           g.gpu_blend_src, g.gpu_blend_dst,
+                           g.gpu_blend_src_alpha, g.gpu_blend_dst_alpha);
+        } else {
+            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+        }
+    }
+
+    if (g.state_dirty_bits & NOVA_DIRTY_CULLING) {
+        if (g.cull_face_enabled) {
+            /* GL_FRONT_AND_BACK is emulated in nova_draw_internal (the draw
+             * is skipped entirely, per spec). If a draw somehow reaches here
+             * with that mode (custom nova* fast paths), the closest GPU state
+             * is front-culling — but the draw-skip is the real mechanism. */
+            GPU_CULLMODE cull;
+            if (g.cull_face_mode == GL_FRONT || g.cull_face_mode == GL_FRONT_AND_BACK)
+                cull = (g.front_face == GL_CCW) ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW;
+            else
+                cull = (g.front_face == GL_CCW) ? GPU_CULL_BACK_CCW : GPU_CULL_FRONT_CCW;
+            C3D_CullFace(cull);
+        } else {
+            C3D_CullFace(GPU_CULL_NONE);
+        }
+    }
+
+    if (g.state_dirty_bits & NOVA_DIRTY_SCISSOR) {
+        if (g.scissor_test_enabled) {
+            apply_scissor_box();
+        } else {
+            C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+        }
+    }
+
+    // Сбрасываем обработанные биты.
+    g.state_dirty_bits &= ~(NOVA_DIRTY_DEPTH_TEST | NOVA_DIRTY_EARLY_DEPTH |
+                            NOVA_DIRTY_ALPHA_TEST | NOVA_DIRTY_BLEND_STATE |
+                            NOVA_DIRTY_CULLING | NOVA_DIRTY_SCISSOR);
+
 
     /* --- Fragment lighting --------------------------------------------------
      * Bind the HW light env on lit draws (rebuilding it from GL state when
@@ -1320,146 +1330,6 @@ void apply_gpu_state(void) {
             C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
         }
         g.fog_dirty = 0;
-    }
-
-    /* The state cache vars live at file scope below — see s_last_*. The old
-     * code re-declared them as `extern` inside this function (legal C but
-     * misleading); since they're in the same TU, file-scope forward
-     * declarations are enough and we just use them directly. */
-
-    GPU_WRITEMASK writemask = 0;
-    if (g.color_mask_r) writemask |= GPU_WRITE_RED;
-    if (g.color_mask_g) writemask |= GPU_WRITE_GREEN;
-    if (g.color_mask_b) writemask |= GPU_WRITE_BLUE;
-    if (g.color_mask_a) writemask |= GPU_WRITE_ALPHA;
-    if (g.depth_mask && g.depth_test_enabled) writemask |= GPU_WRITE_DEPTH;
-    if (writemask != s_last_writemask ||
-        s_last_depth_test_enabled != g.depth_test_enabled ||
-        s_last_depth_func != g.depth_func) {
-        /* MUST be the depth-specific (inverting) mapping: PICA's buffer is
-         * near=high/far=low (see apply_depth_map), so GL_LESS runs as
-         * GPU_GREATER. The plain gl_to_gpu_testfunc here z-rejected every
-         * fragment against the far-plane clear (LESS vs cleared 0). */
-        C3D_DepthTest(g.depth_test_enabled, g.gpu_depth_func, writemask);
-        s_last_writemask = writemask;
-        s_last_depth_test_enabled = g.depth_test_enabled;
-        s_last_depth_func = g.depth_func;
-    }
-
-    /* --- Hardware Early Z-Culling ----------------------------------------- *
-     * PICA200 supports early depth testing, rejecting occluded fragments
-     * BEFORE texture fetch and TEV execution. This saves massive memory
-     * bandwidth and fillrate, especially on heavily overdrawn scenes (e.g.
-     * Minecraft caves/forests).
-     *
-     * Early-Z is automatically enabled for opaque geometry (depth test ON,
-     * alpha test OFF, blending OFF). If a fragment's visibility can be
-     * altered by alpha-testing, or if it requires blending, Early-Z MUST
-     * be disabled to prevent premature Z-buffer writes from fragments that
-     * might eventually be discarded or blended. */
-    int want_early_z = g.depth_test_enabled && !g.alpha_test_enabled && !g.blend_enabled;
-
-    if (s_last_early_depth != want_early_z || (want_early_z && s_last_early_depth_func != g.depth_func)) {
-
-        /* The 'ref' parameter is only used for specific early-depth functions
-         * (e.g., matching a constant). For standard Z-buffer testing, pass 0. */
-        C3D_EarlyDepthTest(want_early_z, g.gpu_early_depth_func, 0);
-
-        s_last_early_depth = want_early_z;
-        s_last_early_depth_func = g.depth_func;
-    }
-
-    u8 alpha_ref8 = (u8)(clampf(g.alpha_ref, 0.0f, 1.0f) * 255.0f + 0.5f);
-    if (s_last_alpha_test_enabled != g.alpha_test_enabled ||
-        s_last_alpha_func != g.alpha_func ||
-        s_last_alpha_ref8 != alpha_ref8) {
-        C3D_AlphaTest(g.alpha_test_enabled, g.gpu_alpha_func, alpha_ref8);
-        s_last_alpha_test_enabled = g.alpha_test_enabled;
-        s_last_alpha_func = g.alpha_func;
-        s_last_alpha_ref8 = alpha_ref8;
-    }
-
-    /* Colour-stage selection: logic op OR blend (mutually exclusive on PICA,
-     * and per the GL spec GL_COLOR_LOGIC_OP overrides blending when enabled).
-     * C3D_ColorLogicOp / C3D_AlphaBlend each flip the fragOpMode select bit, so
-     * toggling between them re-pushes correctly. blend_color feeds the
-     * GL_CONSTANT_COLOR/ALPHA factors via C3D_BlendingColor. */
-    u32 blend_col_packed = pack_tev_color(g.blend_color);
-    if (s_last_blend_enabled != g.blend_enabled ||
-        s_last_blend_src != g.blend_src ||
-        s_last_blend_dst != g.blend_dst ||
-        s_last_blend_src_alpha != g.blend_src_alpha ||
-        s_last_blend_dst_alpha != g.blend_dst_alpha ||
-        s_last_blend_eq_rgb != g.blend_eq_rgb ||
-        s_last_blend_eq_alpha != g.blend_eq_alpha ||
-        s_last_logic_op_enabled != g.color_logic_op_enabled ||
-        s_last_logic_op != g.logic_op ||
-        s_last_blend_color != blend_col_packed) {
-        if (g.color_logic_op_enabled) {
-            C3D_ColorLogicOp(g.gpu_logic_op);
-        } else if (g.blend_enabled) {
-            C3D_BlendingColor(blend_col_packed);
-            C3D_AlphaBlend(g.gpu_blend_eq_rgb, g.gpu_blend_eq_alpha,
-                           g.gpu_blend_src, g.gpu_blend_dst,
-                           g.gpu_blend_src_alpha, g.gpu_blend_dst_alpha);
-        } else {
-            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
-        }
-        s_last_blend_enabled = g.blend_enabled;
-        s_last_blend_src = g.blend_src;
-        s_last_blend_dst = g.blend_dst;
-        s_last_blend_src_alpha = g.blend_src_alpha;
-        s_last_blend_dst_alpha = g.blend_dst_alpha;
-        s_last_blend_eq_rgb = g.blend_eq_rgb;
-        s_last_blend_eq_alpha = g.blend_eq_alpha;
-        s_last_logic_op_enabled = g.color_logic_op_enabled;
-        s_last_logic_op = g.logic_op;
-        s_last_blend_color = blend_col_packed;
-    }
-
-    if (s_last_cull_enabled != g.cull_face_enabled ||
-        s_last_cull_mode != g.cull_face_mode ||
-        s_last_front_face != g.front_face) {
-        if (g.cull_face_enabled) {
-            GPU_CULLMODE cull;
-            /* GL_FRONT_AND_BACK is emulated in nova_draw_internal (the draw
-             * is skipped entirely, per spec). If a draw somehow reaches here
-             * with that mode (custom nova* fast paths), the closest GPU state
-             * is front-culling — but the draw-skip is the real mechanism. */
-            if (g.cull_face_mode == GL_FRONT || g.cull_face_mode == GL_FRONT_AND_BACK)
-                cull = (g.front_face == GL_CCW) ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW;
-            else
-                cull = (g.front_face == GL_CCW) ? GPU_CULL_BACK_CCW : GPU_CULL_FRONT_CCW;
-            C3D_CullFace(cull);
-        } else {
-            C3D_CullFace(GPU_CULL_NONE);
-        }
-        s_last_cull_enabled = g.cull_face_enabled;
-        s_last_cull_mode = g.cull_face_mode;
-        s_last_front_face = g.front_face;
-    }
-
-    // ВТОРОЙ ФИКС: SCISSOR
-    if (g.scissor_test_enabled) {
-        // Меняем при смене параметров ИЛИ при смене целевого FBO (там ориентация другая).
-        if (s_last_scissor_enabled != 1 ||
-            s_last_scissor_x != g.scissor_x || s_last_scissor_y != g.scissor_y ||
-            s_last_scissor_w != g.scissor_w || s_last_scissor_h != g.scissor_h ||
-            s_last_scissor_fbo != (g.bound_fbo == 0) ||
-            s_last_scissor_target != g.current_target) {
-            apply_scissor_box();
-            s_last_scissor_enabled = 1;
-            s_last_scissor_x = g.scissor_x;
-            s_last_scissor_y = g.scissor_y;
-            s_last_scissor_w = g.scissor_w;
-            s_last_scissor_h = g.scissor_h;
-            s_last_scissor_fbo = (g.bound_fbo == 0);
-            s_last_scissor_target = g.current_target;
-        }
-    } else if (s_last_scissor_enabled != 0) {
-        C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
-        s_last_scissor_enabled = 0;
-        s_last_scissor_target = NULL;
     }
 
     int current_tex_state = 0;
@@ -1789,34 +1659,7 @@ void nova_invalidate_tex_bind(GLuint tex_id) {
 }
 
 void nova_invalidate_state_cache(void) {
-    s_last_writemask          = (GPU_WRITEMASK)-1;
-    s_last_depth_test_enabled = -1;
-    s_last_depth_func         = 0;
-    s_last_alpha_test_enabled = -1;
-    s_last_alpha_func         = 0;
-    s_last_alpha_ref8         = 0xFF;
-    s_last_blend_enabled      = -1;
-    s_last_blend_src          = 0;
-    s_last_blend_dst          = 0;
-    s_last_blend_src_alpha    = 0;
-    s_last_blend_dst_alpha    = 0;
-    s_last_blend_eq_rgb       = 0;
-    s_last_blend_eq_alpha     = 0;
-    s_last_logic_op_enabled   = -1;
-    s_last_logic_op           = 0;
-    s_last_blend_color        = 0xDEADBEEFu;
-    s_last_cull_enabled       = -1;
-    s_last_cull_mode          = 0;
-    s_last_front_face         = 0;
-    s_last_scissor_enabled    = -1;
-    s_last_scissor_x          = -1;
-    s_last_scissor_y          = -1;
-    s_last_scissor_w          = -1;
-    s_last_scissor_h          = -1;
-    s_last_scissor_fbo        = -1;
-    s_last_scissor_target     = NULL;
-    s_last_early_depth        = -1;
-    s_last_early_depth_func   = 0;
+    g.state_dirty_bits = NOVA_DIRTY_ALL;
     s_last_tex_bound[0]       = 0xFFFFFFFFu;
     s_last_tex_bound[1]       = 0xFFFFFFFFu;
     s_last_tex_bound[2]       = 0xFFFFFFFFu;
