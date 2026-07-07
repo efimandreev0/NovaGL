@@ -596,32 +596,67 @@ static void upload_solid_texture(C3D_Tex *tex, GPU_TEXCOLOR fmt, const GLvoid *p
     C3D_TexFlush(tex);
 }
 
+/* Per-pixel morton offset inside an 8x8 tile, precomputed at file scope.
+ * Replaces 4 mul/shift ops with a single LUT read in the swizzle inner loop. */
+static const uint8_t k_tile_morton[64] = {
+    0,  1,  4,  5, 16, 17, 20, 21,
+    2,  3,  6,  7, 18, 19, 22, 23,
+    8,  9, 12, 13, 24, 25, 28, 29,
+   10, 11, 14, 15, 26, 27, 30, 31,
+   32, 33, 36, 37, 48, 49, 52, 53,
+   34, 35, 38, 39, 50, 51, 54, 55,
+   40, 41, 44, 45, 56, 57, 60, 61,
+   42, 43, 46, 47, 58, 59, 62, 63,
+};
+
+/* =========================================================================
+ * Optimized Tiled Texture Uploaders
+ * =========================================================================
+ * PICA200 textures are stored in Morton (Z-Curve) order. Writing to them
+ * using a standard linear (y, then x) loop causes massive L1 Cache Thrashing,
+ * as consecutive X pixels land in distant memory addresses.
+ *
+ * These optimized uploaders traverse the destination texture in 8x8 macroblocks.
+ * This guarantees sequential memory writes, saturating the memory bus and
+ * reducing texture upload times (stutters) by orders of magnitude.
+ * ========================================================================= */
+
 static void upload_page_rgba8(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t *pixels, int row_stride, int src_x0,
                               int src_y0, int copy_w, int copy_h, GLenum format) {
     uint32_t *dst = (uint32_t *) tex->data;
-    for (int y = 0; y < pot_h; y++) {
-        for (int x = 0; x < pot_w; x++) {
-            uint32_t out_pixel = 0;
-            if (x < copy_w && y < copy_h) {
-                const uint8_t *row = pixels + (src_y0 + y) * row_stride;
-                if (format == GL_RGB) {
-                    const uint8_t *px = row + (src_x0 + x) * 3;
-                    out_pixel = ((uint32_t) px[0] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[2] << 8) | 0xFFu;
-                } else if (format == GL_BGR) {
-                    /* 3 bytes B,G,R -> opaque RGBA8. */
-                    const uint8_t *px = row + (src_x0 + x) * 3;
-                    out_pixel = ((uint32_t) px[2] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[0] << 8) | 0xFFu;
-                } else if (format == GL_BGRA) {
-                    const uint8_t *px = row + (src_x0 + x) * 4;
-                    out_pixel = ((uint32_t) px[2] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[0] << 8) | (
-                                    uint32_t) px[3];
-                } else {
-                    const uint8_t *px = row + (src_x0 + x) * 4;
-                    out_pixel = ((uint32_t) px[0] << 24) | ((uint32_t) px[1] << 16) | ((uint32_t) px[2] << 8) | (
-                                    uint32_t) px[3];
+    for (int ty = 0; ty < pot_h; ty += 8) {
+        for (int tx = 0; tx < pot_w; tx += 8) {
+            uint32_t *tile = dst + ((pot_h - 8 - ty) >> 3) * (pot_w >> 3) * 64 + (tx >> 3) * 64;
+
+            for (int py = 0; py < 8; py++) {
+                int sy = ty + py;
+                int fy = 7 - py;
+                for (int px = 0; px < 8; px++) {
+                    int sx = tx + px;
+                    uint32_t out_pixel = 0;
+
+                    if (sx < copy_w && sy < copy_h) {
+                        const uint8_t *row = pixels + (src_y0 + sy) * row_stride;
+                        if (format == GL_RGB) {
+                            const uint8_t *px_ptr = row + (src_x0 + sx) * 3;
+                            out_pixel = ((uint32_t) px_ptr[0] << 24) | ((uint32_t) px_ptr[1] << 16) | ((uint32_t) px_ptr[2] << 8) | 0xFFu;
+                        } else if (format == GL_BGR) {
+                            /* 3 bytes B,G,R -> opaque RGBA8. */
+                            const uint8_t *px_ptr = row + (src_x0 + sx) * 3;
+                            out_pixel = ((uint32_t) px_ptr[2] << 24) | ((uint32_t) px_ptr[1] << 16) | ((uint32_t) px_ptr[0] << 8) | 0xFFu;
+                        } else if (format == GL_BGRA) {
+                            const uint8_t *px_ptr = row + (src_x0 + sx) * 4;
+                            out_pixel = ((uint32_t) px_ptr[2] << 24) | ((uint32_t) px_ptr[1] << 16) | ((uint32_t) px_ptr[0] << 8) | (
+                                            uint32_t) px_ptr[3];
+                        } else {
+                            const uint8_t *px_ptr = row + (src_x0 + sx) * 4;
+                            out_pixel = ((uint32_t) px_ptr[0] << 24) | ((uint32_t) px_ptr[1] << 16) | ((uint32_t) px_ptr[2] << 8) | (
+                                            uint32_t) px_ptr[3];
+                        }
+                    }
+                    tile[k_tile_morton[(fy << 3) | px]] = out_pixel;
                 }
             }
-            dst[morton_offset_local(x, y, pot_w, pot_h)] = out_pixel;
         }
     }
     C3D_TexFlush(tex);
@@ -641,18 +676,28 @@ static void upload_page_16bit(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t 
      *    (L<<8)|A), the same "first component in the MSBs" convention RGBA8
      *    uses. A raw copy would swap L and A. Reorder explicitly. */
     int is_la8 = (fmt == GPU_LA8);
-    for (int y = 0; y < pot_h; y++) {
-        for (int x = 0; x < pot_w; x++) {
-            uint16_t val = 0;
-            if (x < copy_w && y < copy_h) {
-                const uint8_t *row = pixels + (src_y0 + y) * row_stride;
-                const uint8_t *p = row + (src_x0 + x) * 2;
-                if (is_la8)
-                    val = ((uint16_t) p[0] << 8) | p[1];   /* [L,A] -> (L<<8)|A */
-                else
-                    memcpy(&val, p, sizeof(uint16_t));      /* packed short, layouts match */
+    for (int ty = 0; ty < pot_h; ty += 8) {
+        for (int tx = 0; tx < pot_w; tx += 8) {
+            uint16_t *tile = dst + ((pot_h - 8 - ty) >> 3) * (pot_w >> 3) * 64 + (tx >> 3) * 64;
+
+            for (int py = 0; py < 8; py++) {
+                int sy = ty + py;
+                int fy = 7 - py;
+                for (int px = 0; px < 8; px++) {
+                    int sx = tx + px;
+                    uint16_t val = 0;
+
+                    if (sx < copy_w && sy < copy_h) {
+                        const uint8_t *row = pixels + (src_y0 + sy) * row_stride;
+                        const uint8_t *p = row + (src_x0 + sx) * 2;
+                        if (is_la8)
+                            val = ((uint16_t) p[0] << 8) | p[1];   /* [L,A] -> (L<<8)|A */
+                        else
+                            memcpy(&val, p, sizeof(uint16_t));      /* packed short, layouts match */
+                    }
+                    tile[k_tile_morton[(fy << 3) | px]] = val;
+                }
             }
-            dst[morton_offset_local(x, y, pot_w, pot_h)] = val;
         }
     }
     C3D_TexFlush(tex);
@@ -661,14 +706,25 @@ static void upload_page_16bit(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t 
 static void upload_page_8bit(C3D_Tex *tex, int pot_w, int pot_h, const uint8_t *pixels, int row_stride, int src_x0,
                              int src_y0, int copy_w, int copy_h) {
     uint8_t *dst = (uint8_t *) tex->data;
-    for (int y = 0; y < pot_h; y++) {
-        for (int x = 0; x < pot_w; x++) {
-            uint8_t val = 0;
-            if (x < copy_w && y < copy_h) {
-                const uint8_t *row = pixels + (src_y0 + y) * row_stride;
-                val = row[src_x0 + x];
+
+    for (int ty = 0; ty < pot_h; ty += 8) {
+        for (int tx = 0; tx < pot_w; tx += 8) {
+            uint8_t *tile = dst + ((pot_h - 8 - ty) >> 3) * (pot_w >> 3) * 64 + (tx >> 3) * 64;
+
+            for (int py = 0; py < 8; py++) {
+                int sy = ty + py;
+                int fy = 7 - py;
+                for (int px = 0; px < 8; px++) {
+                    int sx = tx + px;
+                    uint8_t val = 0;
+
+                    if (sx < copy_w && sy < copy_h) {
+                        const uint8_t *row = pixels + (src_y0 + sy) * row_stride;
+                        val = row[src_x0 + sx];
+                    }
+                    tile[k_tile_morton[(fy << 3) | px]] = val;
+                }
             }
-            dst[morton_offset_local(x, y, pot_w, pot_h)] = val;
         }
     }
     C3D_TexFlush(tex);
