@@ -27,10 +27,6 @@ static void nova_clear_quad(int clear_color, int clear_depth) {
         C3D_TexEnvInit(C3D_GetTexEnv(i));
     }
 
-    C3D_TexBind(0, NULL);
-    C3D_TexBind(1, NULL);
-    C3D_TexBind(2, NULL);
-
     GPU_WRITEMASK write_mask = 0;
     if (clear_color) write_mask |= GPU_WRITE_ALL;
     if (clear_depth) write_mask |= GPU_WRITE_DEPTH;
