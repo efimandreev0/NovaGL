@@ -486,6 +486,7 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     for (int u = 0; u < 3; u++) {
         g.tex_env_rgb_scale[u] = 1;
         g.tex_env_alpha_scale[u] = 1;
+        nova_update_fast_tev(u);
     }
     /* GL default material: ambient (0.2,0.2,0.2,1), diffuse (0.8,0.8,0.8,1),
      * specular/emission (0,0,0,1), shininess 0. */

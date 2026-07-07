@@ -1984,6 +1984,96 @@ void glClientActiveTexture(GLenum texture) {
     else gl_set_error(GL_INVALID_ENUM);
 }
 
+/* =========================================================================
+ * Fast TexEnv Compiler
+ * =========================================================================
+ * Bakes the complex GL_COMBINE state into raw PICA200 register masks.
+ * This eliminates all branching and citro3d overhead during the draw loop.
+ * ========================================================================= */
+static inline uint8_t fast_tev_src(GLint gl_src, int unit) {
+    if (gl_src == GL_TEXTURE) return GPU_TEXTURE0 + unit;
+    if (gl_src == GL_PREVIOUS) return 0xFF; // 0xFF - это маркер для динамической замены
+    if (gl_src == GL_PRIMARY_COLOR) return GPU_PRIMARY_COLOR;
+    if (gl_src == GL_CONSTANT) return GPU_CONSTANT;
+    return GPU_PRIMARY_COLOR;
+}
+
+void nova_update_fast_tev(const int unit) {
+    FastTevConfig* tc = &g.fast_tev[unit];
+    GPU_TEVSRC tex_src = GPU_TEXTURE0 + unit;
+
+    if (g.tex_env_mode[unit] == GL_COMBINE) {
+        tc->src_rgb[0] = fast_tev_src(g.tex_env_src0_rgb[unit], unit);
+        tc->src_rgb[1] = fast_tev_src(g.tex_env_src1_rgb[unit], unit);
+        tc->src_rgb[2] = fast_tev_src(g.tex_env_src2_rgb[unit], unit);
+
+        GLint a_func = g.tex_env_combine_alpha[unit] ? g.tex_env_combine_alpha[unit] : g.tex_env_combine_rgb[unit];
+        tc->src_a[0] = fast_tev_src(g.tex_env_src0_alpha[unit] ? g.tex_env_src0_alpha[unit] : g.tex_env_src0_rgb[unit], unit);
+        tc->src_a[1] = fast_tev_src(g.tex_env_src1_alpha[unit] ? g.tex_env_src1_alpha[unit] : g.tex_env_src1_rgb[unit], unit);
+        tc->src_a[2] = fast_tev_src(g.tex_env_src2_alpha[unit] ? g.tex_env_src2_alpha[unit] : g.tex_env_src2_rgb[unit], unit);
+
+        int op0_r = get_tev_op_rgb(g.tex_env_operand0_rgb[unit]);
+        int op1_r = get_tev_op_rgb(g.tex_env_operand1_rgb[unit]);
+        int op2_r = get_tev_op_rgb(g.tex_env_operand2_rgb[unit]);
+        int op0_a = get_tev_op_alpha(g.tex_env_operand0_alpha[unit] ? g.tex_env_operand0_alpha[unit] : GL_SRC_ALPHA);
+        int op1_a = get_tev_op_alpha(g.tex_env_operand1_alpha[unit] ? g.tex_env_operand1_alpha[unit] : GL_SRC_ALPHA);
+        int op2_a = get_tev_op_alpha(g.tex_env_operand2_alpha[unit] ? g.tex_env_operand2_alpha[unit] : GL_SRC_ALPHA);
+
+        // Пакуем PICA-маску операций (env->op)
+        tc->op = op0_r | (op1_r << 4) | (op2_r << 8) | (op0_a << 12) | (op1_a << 16) | (op2_a << 20);
+
+        GPU_COMBINEFUNC c_rgb = gl_to_gpu_combinefunc(g.tex_env_combine_rgb[unit]);
+        GPU_COMBINEFUNC c_a   = gl_to_gpu_combinefunc(a_func);
+
+        // PICA игнорирует неиспользуемые источники, но для чистоты зануляем
+        if (c_rgb != GPU_INTERPOLATE && c_rgb != GPU_MULTIPLY_ADD) tc->src_rgb[2] = 0;
+        if (c_a != GPU_INTERPOLATE && c_a != GPU_MULTIPLY_ADD) tc->src_a[2] = 0;
+        if (c_rgb == GPU_REPLACE) tc->src_rgb[1] = 0;
+        if (c_a == GPU_REPLACE) tc->src_a[1] = 0;
+
+        // Пакуем PICA-маску функций (env->func)
+        tc->func = c_rgb | (c_a << 16);
+
+        tc->uses_const = (tc->src_rgb[0] == GPU_CONSTANT || tc->src_rgb[1] == GPU_CONSTANT || tc->src_rgb[2] == GPU_CONSTANT ||
+                          tc->src_a[0] == GPU_CONSTANT || tc->src_a[1] == GPU_CONSTANT || tc->src_a[2] == GPU_CONSTANT);
+    } else {
+        // Обычные режимы без GL_COMBINE
+        tc->uses_const = 0;
+        switch (g.tex_env_mode[unit]) {
+            case GL_REPLACE:
+                tc->src_rgb[0] = tex_src; tc->src_rgb[1] = 0; tc->src_rgb[2] = 0;
+                tc->src_a[0]   = tex_src; tc->src_a[1]   = 0; tc->src_a[2]   = 0;
+                tc->op = GPU_TEVOP_RGB_SRC_COLOR | (GPU_TEVOP_A_SRC_ALPHA << 12);
+                tc->func = GPU_REPLACE | (GPU_REPLACE << 16);
+                break;
+            case GL_ADD:
+                tc->src_rgb[0] = tex_src; tc->src_rgb[1] = 0xFF; tc->src_rgb[2] = 0;
+                tc->src_a[0]   = tex_src; tc->src_a[1]   = 0xFF; tc->src_a[2]   = 0;
+                tc->op = GPU_TEVOP_RGB_SRC_COLOR | (GPU_TEVOP_RGB_SRC_COLOR << 4) | (GPU_TEVOP_A_SRC_ALPHA << 12) | (GPU_TEVOP_A_SRC_ALPHA << 16);
+                tc->func = GPU_ADD | (GPU_ADD << 16);
+                break;
+            case GL_DECAL:
+                tc->src_rgb[0] = 0xFF; tc->src_rgb[1] = tex_src; tc->src_rgb[2] = tex_src;
+                tc->src_a[0]   = 0xFF; tc->src_a[1]   = 0; tc->src_a[2]   = 0;
+                tc->op = GPU_TEVOP_RGB_SRC_COLOR | (GPU_TEVOP_RGB_SRC_COLOR << 4) | (GPU_TEVOP_RGB_SRC_ALPHA << 8) | (GPU_TEVOP_A_SRC_ALPHA << 12);
+                tc->func = GPU_INTERPOLATE | (GPU_REPLACE << 16);
+                break;
+            case GL_MODULATE:
+            default:
+                tc->src_rgb[0] = tex_src; tc->src_rgb[1] = 0xFF; tc->src_rgb[2] = 0;
+                tc->src_a[0]   = tex_src; tc->src_a[1]   = 0xFF; tc->src_a[2]   = 0;
+                tc->op = GPU_TEVOP_RGB_SRC_COLOR | (GPU_TEVOP_RGB_SRC_COLOR << 4) | (GPU_TEVOP_A_SRC_ALPHA << 12) | (GPU_TEVOP_A_SRC_ALPHA << 16);
+                tc->func = GPU_MODULATE | (GPU_MODULATE << 16);
+                break;
+        }
+    }
+
+    // Пакуем масштаб
+    int scale_r = g.tex_env_rgb_scale[unit] == 2 ? GPU_TEVSCALE_2 : (g.tex_env_rgb_scale[unit] == 4 ? GPU_TEVSCALE_4 : GPU_TEVSCALE_1);
+    int scale_a = g.tex_env_alpha_scale[unit] == 2 ? GPU_TEVSCALE_2 : (g.tex_env_alpha_scale[unit] == 4 ? GPU_TEVSCALE_4 : GPU_TEVSCALE_1);
+    tc->scale = scale_r | (scale_a << 4);
+}
+
 void glTexEnvi(GLenum target, GLenum pname, GLint param) {
     /* GL_POINT_SPRITE / GL_TEXTURE_FILTER_CONTROL are valid glTexEnv targets we
      * don't implement — accept silently; anything else is GL_INVALID_ENUM. */
@@ -2039,6 +2129,7 @@ void glTexEnvi(GLenum target, GLenum pname, GLint param) {
             return;
     }
     g.tev_dirty = 1;
+    nova_update_fast_tev(unit);
 }
 
 void glTexEnvf(GLenum target, GLenum pname, GLfloat param) { glTexEnvi(target, pname, (GLint) param); }

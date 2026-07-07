@@ -1676,6 +1676,8 @@ GLuint novaGetScreenTextureId(void);
 void novaBeginClipSpace2D(void);
 void novaEndClipSpace2D(void);
 
+void nova_update_fast_tev(int unit);
+
 /* =========================================================================
  * PICA200 Hardware Profiler
  * ========================================================================= */

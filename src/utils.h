@@ -65,6 +65,8 @@ GPU_BLENDEQUATION gl_to_gpu_blendeq(GLenum mode);
 
 GPU_LOGICOP gl_to_gpu_logicop(GLenum op);
 
+GPU_COMBINEFUNC gl_to_gpu_combinefunc(GLenum gl_func);
+
 int gl_type_size(GLenum type);
 
 int calc_stride(GLsizei stride, GLint size, GLenum type);
@@ -146,6 +148,29 @@ void downscale_rgba8(uint32_t *dst, const uint32_t *src, int src_w, int src_h, i
 void downscale_16bit(uint16_t *dst, const uint16_t *src, int src_w, int src_h, int dst_w, int dst_h);
 
 void downscale_8bit(uint8_t *dst, const uint8_t *src, int src_w, int src_h, int dst_w, int dst_h);
+
+/* Alpha-channel TEV operand. PICA's alpha unit is one-component only, so its
+ * operand enum is smaller than the RGB one (SRC_ALPHA / ONE_MINUS_SRC_ALPHA /
+ * SRC_R / SRC_G / SRC_B / their complements). For our use case we only need
+ * the (1-)alpha forms — the R/G/B-broadcast variants are unused. */
+static inline int get_tev_op_alpha(GLint gl_op) {
+ if (gl_op == GL_ONE_MINUS_SRC_ALPHA) return GPU_TEVOP_A_ONE_MINUS_SRC_ALPHA;
+ return GPU_TEVOP_A_SRC_ALPHA;
+}
+
+static inline int get_tev_op_rgb(GLint gl_op) {
+ /* NB: the operand VALUES are GL_SRC_COLOR..GL_ONE_MINUS_SRC_ALPHA
+  * (0x0300..0x0303, NovaGL.h). The old code compared against 0x8590/
+  * 0x8598/0x859A — those are the OPERANDn_RGB *pname* constants, not
+  * values — so ONE_MINUS_* silently decoded as plain SRC_COLOR. */
+ switch (gl_op) {
+  case GL_SRC_COLOR: return GPU_TEVOP_RGB_SRC_COLOR; break;
+  case GL_ONE_MINUS_SRC_COLOR: return GPU_TEVOP_RGB_ONE_MINUS_SRC_COLOR; break;
+  case GL_SRC_ALPHA: return GPU_TEVOP_RGB_SRC_ALPHA; break;
+  case GL_ONE_MINUS_SRC_ALPHA: return GPU_TEVOP_RGB_ONE_MINUS_SRC_ALPHA; break;
+  default: return GPU_TEVOP_RGB_SRC_COLOR; break;
+ }
+}
 
 void apply_depth_map(void);
 

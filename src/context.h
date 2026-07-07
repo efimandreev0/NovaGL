@@ -214,6 +214,15 @@ typedef struct {
     GLuint element_buffer;
 } VAOSlot;
 
+typedef struct {
+  uint8_t src_rgb[3]; // GPU_TEVSRC (или 0xFF для маркера GL_PREVIOUS)
+  uint8_t src_a[3];
+  uint32_t op;        // Заранее собранная битовая маска операций (env->op)
+  uint32_t func;      // Заранее собранная битовая маска функций (env->func)
+  uint16_t scale;     // Заранее собранная маска масштаба (env->scale)
+  uint8_t uses_const;
+} FastTevConfig;
+
 #define NOVA_DIRTY_DEPTH_TEST  (1 << 0)
 #define NOVA_DIRTY_EARLY_DEPTH (1 << 1)
 #define NOVA_DIRTY_ALPHA_TEST  (1 << 2)
@@ -367,6 +376,7 @@ extern struct NovaState {
     float light_model_ambient[4];
 
     //Textures stuff
+    FastTevConfig fast_tev[3];
     TexSlot textures[NOVA_MAX_TEXTURES];
     int active_texture_unit;
     GLuint bound_texture[3];
