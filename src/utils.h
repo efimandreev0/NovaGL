@@ -49,6 +49,8 @@ void dl_execute(GLuint list);
 
 GPU_TESTFUNC gl_to_gpu_alpha_testfunc(GLenum func);
 
+GPU_EARLYDEPTHFUNC gl_to_gpu_earlydepthfunc(GLenum func);
+
 GPU_TESTFUNC gl_to_gpu_depth_testfunc(GLenum func);
 
 GPU_TESTFUNC gl_to_gpu_testfunc(GLenum func);

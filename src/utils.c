@@ -49,6 +49,8 @@ static int           s_last_scissor_w          = -1;
 static int           s_last_scissor_h          = -1;
 static int           s_last_scissor_fbo        = -1;
 static C3D_RenderTarget *s_last_scissor_target = NULL;
+static int           s_last_early_depth        = -1;
+static GLenum        s_last_early_depth_func   = 0;
 static GLuint        s_last_tex_bound[3]       = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
 
 /* attr/buf cache used by nova_setup_attr_info / nova_setup_buf_info */
@@ -348,6 +350,16 @@ GPU_TESTFUNC gl_to_gpu_alpha_testfunc(GLenum func) {
         case GL_GEQUAL: return GPU_GEQUAL;
         case GL_ALWAYS:
         default: return GPU_ALWAYS;
+    }
+}
+
+GPU_EARLYDEPTHFUNC gl_to_gpu_earlydepthfunc(GLenum func) {
+    switch (func) {
+    case GL_LESS:    return GPU_EARLYDEPTH_GREATER;
+    case GL_LEQUAL:  return GPU_EARLYDEPTH_GEQUAL;
+    case GL_GREATER: return GPU_EARLYDEPTH_LESS;
+    case GL_GEQUAL:  return GPU_EARLYDEPTH_LEQUAL;
+    default:         return GPU_EARLYDEPTH_GEQUAL;
     }
 }
 
@@ -1328,6 +1340,29 @@ void apply_gpu_state(void) {
         s_last_depth_func = g.depth_func;
     }
 
+    /* --- Hardware Early Z-Culling ----------------------------------------- *
+     * PICA200 supports early depth testing, rejecting occluded fragments
+     * BEFORE texture fetch and TEV execution. This saves massive memory
+     * bandwidth and fillrate, especially on heavily overdrawn scenes (e.g.
+     * Minecraft caves/forests).
+     *
+     * Early-Z is automatically enabled for opaque geometry (depth test ON,
+     * alpha test OFF, blending OFF). If a fragment's visibility can be
+     * altered by alpha-testing, or if it requires blending, Early-Z MUST
+     * be disabled to prevent premature Z-buffer writes from fragments that
+     * might eventually be discarded or blended. */
+    int want_early_z = g.depth_test_enabled && !g.alpha_test_enabled && !g.blend_enabled;
+
+    if (s_last_early_depth != want_early_z || (want_early_z && s_last_early_depth_func != g.depth_func)) {
+
+        /* The 'ref' parameter is only used for specific early-depth functions
+         * (e.g., matching a constant). For standard Z-buffer testing, pass 0. */
+        C3D_EarlyDepthTest(want_early_z, gl_to_gpu_earlydepthfunc(g.depth_func), 0);
+
+        s_last_early_depth = want_early_z;
+        s_last_early_depth_func = g.depth_func;
+    }
+
     u8 alpha_ref8 = (u8)(clampf(g.alpha_ref, 0.0f, 1.0f) * 255.0f + 0.5f);
     if (s_last_alpha_test_enabled != g.alpha_test_enabled ||
         s_last_alpha_func != g.alpha_func ||
@@ -1756,6 +1791,8 @@ void nova_invalidate_state_cache(void) {
     s_last_scissor_h          = -1;
     s_last_scissor_fbo        = -1;
     s_last_scissor_target     = NULL;
+    s_last_early_depth        = -1;
+    s_last_early_depth_func   = 0;
     s_last_tex_bound[0]       = 0xFFFFFFFFu;
     s_last_tex_bound[1]       = 0xFFFFFFFFu;
     s_last_tex_bound[2]       = 0xFFFFFFFFu;
