@@ -55,6 +55,10 @@ GPU_TESTFUNC gl_to_gpu_depth_testfunc(GLenum func);
 
 GPU_TESTFUNC gl_to_gpu_testfunc(GLenum func);
 
+GPU_TESTFUNC stencil_func_to_gpu(GLenum f);
+
+GPU_STENCILOP stencil_op_to_gpu(GLenum op);
+
 GPU_BLENDFACTOR gl_to_gpu_blendfactor(GLenum factor);
 
 GPU_BLENDEQUATION gl_to_gpu_blendeq(GLenum mode);

@@ -391,6 +391,36 @@ GPU_TESTFUNC gl_to_gpu_testfunc(GLenum func) {
     }
 }
 
+GPU_TESTFUNC stencil_func_to_gpu(GLenum f) {
+    switch (f) {
+    case GL_NEVER:    return GPU_NEVER;
+    case GL_LESS:     return GPU_LESS;
+    case GL_LEQUAL:   return GPU_LEQUAL;
+    case GL_GREATER:  return GPU_GREATER;
+    case GL_GEQUAL:   return GPU_GEQUAL;
+    case GL_EQUAL:    return GPU_EQUAL;
+    case GL_NOTEQUAL: return GPU_NOTEQUAL;
+    case GL_ALWAYS:
+    default:          return GPU_ALWAYS;
+    }
+}
+
+GPU_STENCILOP stencil_op_to_gpu(GLenum op) {
+    switch (op) {
+    case GL_ZERO:      return GPU_STENCIL_ZERO;
+    case GL_REPLACE:   return GPU_STENCIL_REPLACE;
+    case GL_INCR:      return GPU_STENCIL_INCR;      /* saturating */
+    case GL_DECR:      return GPU_STENCIL_DECR;      /* saturating */
+        /* PICA HAS distinct wrapping ops — use them so GL_*_WRAP semantics are
+         * exact (wrap at 0/255 instead of saturating). */
+    case GL_INCR_WRAP: return GPU_STENCIL_INCR_WRAP;
+    case GL_DECR_WRAP: return GPU_STENCIL_DECR_WRAP;
+    case GL_INVERT:    return GPU_STENCIL_INVERT;
+    case GL_KEEP:
+    default:           return GPU_STENCIL_KEEP;
+    }
+}
+
 GPU_BLENDFACTOR gl_to_gpu_blendfactor(GLenum factor) {
     switch (factor) {
         case GL_ZERO: return GPU_ZERO;
@@ -1310,7 +1340,7 @@ void apply_gpu_state(void) {
          * near=high/far=low (see apply_depth_map), so GL_LESS runs as
          * GPU_GREATER. The plain gl_to_gpu_testfunc here z-rejected every
          * fragment against the far-plane clear (LESS vs cleared 0). */
-        C3D_DepthTest(g.depth_test_enabled, gl_to_gpu_depth_testfunc(g.depth_func), writemask);
+        C3D_DepthTest(g.depth_test_enabled, g.gpu_depth_func, writemask);
         s_last_writemask = writemask;
         s_last_depth_test_enabled = g.depth_test_enabled;
         s_last_depth_func = g.depth_func;
@@ -1333,7 +1363,7 @@ void apply_gpu_state(void) {
 
         /* The 'ref' parameter is only used for specific early-depth functions
          * (e.g., matching a constant). For standard Z-buffer testing, pass 0. */
-        C3D_EarlyDepthTest(want_early_z, gl_to_gpu_earlydepthfunc(g.depth_func), 0);
+        C3D_EarlyDepthTest(want_early_z, g.gpu_early_depth_func, 0);
 
         s_last_early_depth = want_early_z;
         s_last_early_depth_func = g.depth_func;
@@ -1343,7 +1373,7 @@ void apply_gpu_state(void) {
     if (s_last_alpha_test_enabled != g.alpha_test_enabled ||
         s_last_alpha_func != g.alpha_func ||
         s_last_alpha_ref8 != alpha_ref8) {
-        C3D_AlphaTest(g.alpha_test_enabled, gl_to_gpu_testfunc(g.alpha_func), alpha_ref8);
+        C3D_AlphaTest(g.alpha_test_enabled, g.gpu_alpha_func, alpha_ref8);
         s_last_alpha_test_enabled = g.alpha_test_enabled;
         s_last_alpha_func = g.alpha_func;
         s_last_alpha_ref8 = alpha_ref8;
@@ -1366,12 +1396,12 @@ void apply_gpu_state(void) {
         s_last_logic_op != g.logic_op ||
         s_last_blend_color != blend_col_packed) {
         if (g.color_logic_op_enabled) {
-            C3D_ColorLogicOp(gl_to_gpu_logicop(g.logic_op));
+            C3D_ColorLogicOp(g.gpu_logic_op);
         } else if (g.blend_enabled) {
             C3D_BlendingColor(blend_col_packed);
-            C3D_AlphaBlend(gl_to_gpu_blendeq(g.blend_eq_rgb), gl_to_gpu_blendeq(g.blend_eq_alpha),
-                           gl_to_gpu_blendfactor(g.blend_src), gl_to_gpu_blendfactor(g.blend_dst),
-                           gl_to_gpu_blendfactor(g.blend_src_alpha), gl_to_gpu_blendfactor(g.blend_dst_alpha));
+            C3D_AlphaBlend(g.gpu_blend_eq_rgb, g.gpu_blend_eq_alpha,
+                           g.gpu_blend_src, g.gpu_blend_dst,
+                           g.gpu_blend_src_alpha, g.gpu_blend_dst_alpha);
         } else {
             C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
         }

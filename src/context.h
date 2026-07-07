@@ -379,16 +379,23 @@ extern struct NovaState {
 
     int depth_test_enabled;
     GLenum depth_func;
+    GPU_TESTFUNC gpu_depth_func;
+    GPU_EARLYDEPTHFUNC gpu_early_depth_func;
     GLboolean depth_mask;
+
     int blend_enabled;
     GLenum blend_src, blend_dst;
     /* Separate alpha-channel blend factors (glBlendFuncSeparate). glBlendFunc
      * keeps these equal to the colour factors. PICA's C3D_AlphaBlend takes
      * independent colour/alpha factors, so this is a real HW path. */
     GLenum blend_src_alpha, blend_dst_alpha;
+    GPU_BLENDFACTOR gpu_blend_src, gpu_blend_dst;
+    GPU_BLENDFACTOR gpu_blend_src_alpha, gpu_blend_dst_alpha;
+
     /* Blend equation, per-channel (glBlendEquationSeparate). PICA's GPU_BLENDEQUATION
      * is real HW — GL_FUNC_ADD / SUBTRACT / REVERSE_SUBTRACT / MIN / MAX all map. */
     GLenum blend_eq_rgb, blend_eq_alpha;
+    GPU_BLENDEQUATION gpu_blend_eq_rgb, gpu_blend_eq_alpha;
     /* glBlendColor — the constant fed to GL_CONSTANT_COLOR/ALPHA and their
      * inverse blend factors. Pushed via C3D_BlendingColor when blending is on
      * and a constant factor is in use. */
@@ -398,9 +405,13 @@ extern struct NovaState {
      * emit C3D_ColorLogicOp instead of C3D_AlphaBlend. */
     int color_logic_op_enabled;
     GLenum logic_op;
+    GPU_LOGICOP gpu_logic_op;
+
     int alpha_test_enabled;
     GLenum alpha_func;
+    GPU_TESTFUNC gpu_alpha_func;
     float alpha_ref;
+
     int cull_face_enabled;
     GLenum cull_face_mode;
     GLenum front_face;
@@ -496,12 +507,14 @@ extern struct NovaState {
      * and stubbed glStencil*. State changes get pushed in apply_gpu_state. */
     int stencil_test_enabled;
     GLenum stencil_func;
+    GPU_TESTFUNC gpu_stencil_func;
     GLint  stencil_ref;
     GLuint stencil_mask;       /* read mask  (the "mask" arg to glStencilFunc) */
     GLuint stencil_write_mask; /* write mask (the arg to glStencilMask) */
     GLenum stencil_op_fail;
     GLenum stencil_op_zfail;
     GLenum stencil_op_zpass;
+    GPU_STENCILOP gpu_stencil_op_fail, gpu_stencil_op_zfail, gpu_stencil_op_zpass;
     GLint  clear_stencil;
 
     void *tex_staging;

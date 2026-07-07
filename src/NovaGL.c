@@ -438,6 +438,9 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.depth_test_enabled = 1;
     g.depth_func = GL_LEQUAL;
 #endif
+    g.gpu_depth_func = gl_to_gpu_depth_testfunc(g.depth_func);
+    g.gpu_early_depth_func = gl_to_gpu_earlydepthfunc(g.depth_func);
+
     g.depth_mask = GL_TRUE;
     g.clear_depth = 1.0f;
 
@@ -445,23 +448,39 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
      * glEnable(GL_STENCIL_TEST) pushes sane values to PICA. */
     g.stencil_test_enabled = 0;
     g.stencil_func = GL_ALWAYS;
+    g.gpu_stencil_func = GPU_ALWAYS;
     g.stencil_ref = 0;
     g.stencil_mask = 0xFF;
     g.stencil_write_mask = 0xFF;
+
     g.stencil_op_fail  = GL_KEEP;
     g.stencil_op_zfail = GL_KEEP;
     g.stencil_op_zpass = GL_KEEP;
+    g.gpu_stencil_op_fail = GPU_STENCIL_KEEP;
+    g.gpu_stencil_op_zfail = GPU_STENCIL_KEEP;
+    g.gpu_stencil_op_zpass = GPU_STENCIL_KEEP;
+
     g.clear_stencil = 0;
+
     g.blend_src = GL_ONE;
     g.blend_dst = GL_ZERO;
     g.blend_src_alpha = GL_ONE;
     g.blend_dst_alpha = GL_ZERO;
+    g.gpu_blend_src = GPU_ONE;
+    g.gpu_blend_dst = GPU_ZERO;
+    g.gpu_blend_src_alpha = GPU_ONE;
+    g.gpu_blend_dst_alpha = GPU_ZERO;
+
     g.blend_eq_rgb = GL_FUNC_ADD;
     g.blend_eq_alpha = GL_FUNC_ADD;
+    g.gpu_blend_eq_rgb = GPU_BLEND_ADD;
+    g.gpu_blend_eq_alpha = GPU_BLEND_ADD;
+
     /* glBlendColor default is transparent black; logic op default GL_COPY. */
     g.blend_color[0] = g.blend_color[1] = g.blend_color[2] = g.blend_color[3] = 0.0f;
     g.color_logic_op_enabled = 0;
     g.logic_op = GL_COPY;
+    g.gpu_logic_op = GPU_LOGICOP_COPY;
     /* GL_RGB_SCALE / GL_ALPHA_SCALE default to 1 on every texture unit. */
     for (int u = 0; u < 3; u++) {
         g.tex_env_rgb_scale[u] = 1;
@@ -495,6 +514,7 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.light_model_ambient[0] = g.light_model_ambient[1] = g.light_model_ambient[2] = 0.2f;
     g.light_model_ambient[3] = 1.0f;
     g.alpha_func = GL_ALWAYS;
+    g.gpu_alpha_func = GPU_ALWAYS;
     g.alpha_ref = 0.0f;
     g.cull_face_mode = GL_BACK;
     g.front_face = GL_CCW;

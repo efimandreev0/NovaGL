@@ -79,6 +79,8 @@ void glDepthFunc(GLenum func) {
         return;
     }
     g.depth_func = func;
+    g.gpu_depth_func = gl_to_gpu_depth_testfunc(func);
+    g.gpu_early_depth_func = gl_to_gpu_earlydepthfunc(func);
 }
 
 void glDepthMask(GLboolean flag) { g.depth_mask = flag; }
@@ -100,6 +102,11 @@ void glBlendFunc(GLenum sfactor, GLenum dfactor) {
     /* Non-separate: alpha factors mirror the colour factors. */
     g.blend_src_alpha = sfactor;
     g.blend_dst_alpha = dfactor;
+
+    g.gpu_blend_src = gl_to_gpu_blendfactor(sfactor);
+    g.gpu_blend_dst = gl_to_gpu_blendfactor(dfactor);
+    g.gpu_blend_src_alpha = g.gpu_blend_src;
+    g.gpu_blend_dst_alpha = g.gpu_blend_dst;
 }
 
 /* glBlendFuncSeparate: independent colour/alpha blend factors. PICA supports
@@ -113,6 +120,11 @@ void glBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum d
     }
     g.blend_src = srcRGB;       g.blend_dst = dstRGB;
     g.blend_src_alpha = srcAlpha; g.blend_dst_alpha = dstAlpha;
+
+    g.gpu_blend_src = gl_to_gpu_blendfactor(srcRGB);
+    g.gpu_blend_dst = gl_to_gpu_blendfactor(dstRGB);
+    g.gpu_blend_src_alpha = gl_to_gpu_blendfactor(srcAlpha);
+    g.gpu_blend_dst_alpha = gl_to_gpu_blendfactor(dstAlpha);
 }
 
 /* glBlendColor: the constant for GL_CONSTANT_COLOR/ALPHA factors. Stored as
@@ -135,6 +147,7 @@ void glLogicOp(GLenum opcode) {
         case GL_NOR: case GL_EQUIV: case GL_INVERT: case GL_OR_REVERSE:
         case GL_COPY_INVERTED: case GL_OR_INVERTED: case GL_NAND: case GL_SET:
             g.logic_op = opcode;
+            g.gpu_logic_op = gl_to_gpu_logicop(opcode);
             break;
         default:
             gl_set_error(GL_INVALID_ENUM);
@@ -162,6 +175,9 @@ void glBlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha) {
     }
     g.blend_eq_rgb = modeRGB;
     g.blend_eq_alpha = modeAlpha;
+
+    g.gpu_blend_eq_rgb = gl_to_gpu_blendeq(modeRGB);
+    g.gpu_blend_eq_alpha = gl_to_gpu_blendeq(modeAlpha);
 }
 
 void glBlendEquation(GLenum mode) {
@@ -183,6 +199,7 @@ void glAlphaFunc(GLenum func, GLclampf ref) {
         return;
     }
     g.alpha_func = func;
+    g.gpu_alpha_func = gl_to_gpu_testfunc(func);
     /* Spec: ref is clamped to [0,1] at specification time. */
     g.alpha_ref = clampf(ref, 0.0f, 1.0f);
 }
@@ -255,19 +272,6 @@ void glClipPlane(GLenum plane, const GLdouble *equation) {
     (void) equation;
 }
 
-GPU_TESTFUNC stencil_func_to_gpu(GLenum f) {
-    switch (f) {
-        case GL_NEVER:    return GPU_NEVER;
-        case GL_LESS:     return GPU_LESS;
-        case GL_LEQUAL:   return GPU_LEQUAL;
-        case GL_GREATER:  return GPU_GREATER;
-        case GL_GEQUAL:   return GPU_GEQUAL;
-        case GL_EQUAL:    return GPU_EQUAL;
-        case GL_NOTEQUAL: return GPU_NOTEQUAL;
-        case GL_ALWAYS:
-        default:          return GPU_ALWAYS;
-    }
-}
 
 static int is_valid_stencil_op(GLenum op) {
     switch (op) {
@@ -279,21 +283,6 @@ static int is_valid_stencil_op(GLenum op) {
     }
 }
 
-static GPU_STENCILOP stencil_op_to_gpu(GLenum op) {
-    switch (op) {
-        case GL_ZERO:      return GPU_STENCIL_ZERO;
-        case GL_REPLACE:   return GPU_STENCIL_REPLACE;
-        case GL_INCR:      return GPU_STENCIL_INCR;      /* saturating */
-        case GL_DECR:      return GPU_STENCIL_DECR;      /* saturating */
-        /* PICA HAS distinct wrapping ops — use them so GL_*_WRAP semantics are
-         * exact (wrap at 0/255 instead of saturating). */
-        case GL_INCR_WRAP: return GPU_STENCIL_INCR_WRAP;
-        case GL_DECR_WRAP: return GPU_STENCIL_DECR_WRAP;
-        case GL_INVERT:    return GPU_STENCIL_INVERT;
-        case GL_KEEP:
-        default:           return GPU_STENCIL_KEEP;
-    }
-}
 
 /* The real stencil path was wired up in #14 (Group E). If it turns out the
  * upstream caller (e.g. PD's fast3d port) hits a libctru/citro3d assert
@@ -317,6 +306,7 @@ void glStencilFunc(GLenum func, GLint ref, GLuint mask) {
     /* Spec: bad func is GL_INVALID_ENUM with no state change / no GPU write. */
     if (!is_valid_cmp_func(func)) { gl_set_error(GL_INVALID_ENUM); return; }
     g.stencil_func = func;
+    g.gpu_stencil_func = stencil_func_to_gpu(func);
     g.stencil_ref  = ref;
     g.stencil_mask = mask;
     C3D_StencilTest(g.stencil_test_enabled, stencil_func_to_gpu(func),
@@ -336,6 +326,10 @@ void glStencilOp(GLenum fail, GLenum zfail, GLenum zpass) {
     g.stencil_op_fail  = fail;
     g.stencil_op_zfail = zfail;
     g.stencil_op_zpass = zpass;
+
+    g.gpu_stencil_op_fail = stencil_op_to_gpu(fail);
+    g.gpu_stencil_op_zfail = stencil_op_to_gpu(zfail);
+    g.gpu_stencil_op_zpass = stencil_op_to_gpu(zpass);
     C3D_StencilOp(stencil_op_to_gpu(fail), stencil_op_to_gpu(zfail), stencil_op_to_gpu(zpass));
 }
 #endif
