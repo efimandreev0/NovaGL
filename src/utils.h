@@ -37,6 +37,35 @@ void nova_invalidate_attr_cache(void);
  * after rotating g.frame_slot — mirrors the texture/FBO GC). */
 void nova_ring_gc_collect(void);
 
+/* Deferred VBO-storage free. The GPU may still read a buffer that was deleted
+ * or respecified THIS frame (glDeleteBuffers / glBufferData realloc right
+ * after a draw); linearFree'ing it immediately hands the block to the next
+ * linearAlloc, which then overwrites it under the GPU's feet. Push instead —
+ * the block is freed K frames later by the frame-slot GC (same rotation as
+ * rings/textures). Falls back to an immediate free if the bucket overflows. */
+void nova_vbo_defer_free(void *p);
+void nova_vbo_gc_collect(void);
+void nova_vbo_gc_collect_all(void);
+
+/* Clear the PICA on-chip early-depth buffer (GPUREG_EARLYDEPTH_CLEAR).
+ * citro3d NEVER clears it, so without this every frame tests against stale
+ * early-Z from previous frames — the "black wedges when pitching the camera"
+ * artifact class. The DMP driver clears it as part of glClear whenever early
+ * depth is enabled; we do the same. Emits raw register writes into the
+ * current command list (the clear only latches while early-Z is enabled, and
+ * C3D_EarlyDepthTest defers its writes to the next draw — too late). No-op
+ * when novaSetEarlyZEnabled(0). */
+void nova_clear_early_depth(void);
+
+/* The ONLY sanctioned way to retire in-flight GPU work mid-frame. A raw
+ * gspWaitForP3D NEVER wakes while citro3d's render queue is active (the
+ * queue owns the P3D event callback), so every "split + wait" pattern
+ * outside the post-FrameEnd swap path eventually parks the main thread
+ * forever. This closes and reopens the frame instead — costs a partial
+ * present, returns with the GPU idle. No-op when nothing was submitted
+ * since the last retire. */
+void nova_midframe_drain(void);
+
 float clampf(float x, float lo, float hi);
 
 void dl_record_translate(float x, float y, float z);

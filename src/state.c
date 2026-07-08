@@ -188,19 +188,39 @@ static int cap_known_unimpl(GLenum cap) {
 }
 
 void glEnable(GLenum cap) {
+    /* Every case is a redundant-set filter (the DMP driver's CHECK_ASSIGN
+     * pattern): a glEnable for an already-enabled cap must not dirty anything —
+     * one stray dirty bit makes citro3d re-emit its whole ~14-register effect
+     * block on the next draw, and engines re-Enable the same caps per object. */
     switch (cap) {
-        case GL_DEPTH_TEST: g.depth_test_enabled = 1; g.state_dirty_bits |= (NOVA_DIRTY_DEPTH_TEST | NOVA_DIRTY_EARLY_DEPTH); break;
-        case GL_BLEND: g.blend_enabled = 1; g.state_dirty_bits |= (NOVA_DIRTY_BLEND_STATE | NOVA_DIRTY_EARLY_DEPTH); break;
-        case GL_COLOR_LOGIC_OP: g.color_logic_op_enabled = 1; g.state_dirty_bits |= NOVA_DIRTY_BLEND_STATE; break;
-        case GL_ALPHA_TEST: g.alpha_test_enabled = 1; g.state_dirty_bits |= (NOVA_DIRTY_ALPHA_TEST | NOVA_DIRTY_EARLY_DEPTH); break;
-        case GL_CULL_FACE: g.cull_face_enabled = 1; g.state_dirty_bits |= NOVA_DIRTY_CULLING; break;
+        case GL_DEPTH_TEST:
+            if (!g.depth_test_enabled) { g.depth_test_enabled = 1; g.state_dirty_bits |= (NOVA_DIRTY_DEPTH_TEST | NOVA_DIRTY_EARLY_DEPTH); }
+            break;
+        case GL_BLEND:
+            if (!g.blend_enabled) { g.blend_enabled = 1; g.state_dirty_bits |= (NOVA_DIRTY_BLEND_STATE | NOVA_DIRTY_EARLY_DEPTH); }
+            break;
+        case GL_COLOR_LOGIC_OP:
+            if (!g.color_logic_op_enabled) { g.color_logic_op_enabled = 1; g.state_dirty_bits |= NOVA_DIRTY_BLEND_STATE; }
+            break;
+        case GL_ALPHA_TEST:
+            if (!g.alpha_test_enabled) { g.alpha_test_enabled = 1; g.state_dirty_bits |= (NOVA_DIRTY_ALPHA_TEST | NOVA_DIRTY_EARLY_DEPTH); }
+            break;
+        case GL_CULL_FACE:
+            if (!g.cull_face_enabled) { g.cull_face_enabled = 1; g.state_dirty_bits |= NOVA_DIRTY_CULLING; }
+            break;
         case GL_TEXTURE_2D:
         case GL_TEXTURE_CUBE_MAP: /* shares the per-unit sampler enable */
-            g.texture_2d_enabled_unit[g.active_texture_unit] = 1;
-            g.tev_dirty = 1;
+            if (!g.texture_2d_enabled_unit[g.active_texture_unit]) {
+                g.texture_2d_enabled_unit[g.active_texture_unit] = 1;
+                g.tev_dirty = 1;
+            }
             break;
-        case GL_SCISSOR_TEST: g.scissor_test_enabled = 1; g.state_dirty_bits |= NOVA_DIRTY_SCISSOR; break;
-        case GL_STENCIL_TEST: g.stencil_test_enabled = 1;
+        case GL_SCISSOR_TEST:
+            if (!g.scissor_test_enabled) { g.scissor_test_enabled = 1; g.state_dirty_bits |= NOVA_DIRTY_SCISSOR; }
+            break;
+        case GL_STENCIL_TEST:
+            if (g.stencil_test_enabled) break;
+            g.stencil_test_enabled = 1;
             /* Re-push stencil state with enabled flag flipped. This is an EAGER
              * GPU command, so commit any pending clipspace batch first or the
              * deferred run would draw under the new stencil state. */
@@ -213,6 +233,7 @@ void glEnable(GLenum cap) {
             if (!g.fog_enabled) { g.fog_enabled = 1; g.fog_dirty = 1; }
             break;
         case GL_POLYGON_OFFSET_FILL:
+            if (g.polygon_offset_fill_enabled) break;
             /* apply_depth_map() eagerly re-emits C3D_DepthMap (the polygon-offset
              * bias). PD's r_set_depth_mode toggles this per ZMODE between batched
              * draws — flush first so the open run keeps its old bias. */
@@ -221,10 +242,13 @@ void glEnable(GLenum cap) {
             apply_depth_map();
             break;
         case GL_LINE_SMOOTH: g.line_smooth_enabled = 1; break;
-        case GL_LIGHTING: g.lighting_enabled = 1; g.light_dirty = 1; break;
+        case GL_LIGHTING:
+            if (!g.lighting_enabled) { g.lighting_enabled = 1; g.light_dirty = 1; }
+            break;
         case GL_LIGHT0: case GL_LIGHT1: case GL_LIGHT2: case GL_LIGHT3:
         case GL_LIGHT4: case GL_LIGHT5: case GL_LIGHT6: case GL_LIGHT7:
-            g.lights[cap - GL_LIGHT0].enabled = 1; g.light_dirty = 1; break;
+            if (!g.lights[cap - GL_LIGHT0].enabled) { g.lights[cap - GL_LIGHT0].enabled = 1; g.light_dirty = 1; }
+            break;
         case GL_VERTEX_ARRAY: g.va_vertex.enabled = 1; break;
         case GL_COLOR_ARRAY: g.va_color.enabled = 1; break;
         case GL_TEXTURE_COORD_ARRAY: g.va_texcoord.enabled = 1; break;
@@ -238,19 +262,36 @@ void glEnable(GLenum cap) {
 }
 
 void glDisable(GLenum cap) {
+    /* Same redundant-set filtering as glEnable — see the note there. */
     switch (cap) {
-        case GL_DEPTH_TEST: g.depth_test_enabled = 0; g.state_dirty_bits |= (NOVA_DIRTY_DEPTH_TEST | NOVA_DIRTY_EARLY_DEPTH); break;
-        case GL_BLEND: g.blend_enabled = 0; g.state_dirty_bits |= (NOVA_DIRTY_BLEND_STATE | NOVA_DIRTY_EARLY_DEPTH); break;
-        case GL_COLOR_LOGIC_OP: g.color_logic_op_enabled = 0; g.state_dirty_bits |= NOVA_DIRTY_BLEND_STATE; break;
-        case GL_ALPHA_TEST: g.alpha_test_enabled = 0; g.state_dirty_bits |= (NOVA_DIRTY_ALPHA_TEST | NOVA_DIRTY_EARLY_DEPTH); break;
-        case GL_CULL_FACE: g.cull_face_enabled = 0; g.state_dirty_bits |= NOVA_DIRTY_CULLING; break;
+        case GL_DEPTH_TEST:
+            if (g.depth_test_enabled) { g.depth_test_enabled = 0; g.state_dirty_bits |= (NOVA_DIRTY_DEPTH_TEST | NOVA_DIRTY_EARLY_DEPTH); }
+            break;
+        case GL_BLEND:
+            if (g.blend_enabled) { g.blend_enabled = 0; g.state_dirty_bits |= (NOVA_DIRTY_BLEND_STATE | NOVA_DIRTY_EARLY_DEPTH); }
+            break;
+        case GL_COLOR_LOGIC_OP:
+            if (g.color_logic_op_enabled) { g.color_logic_op_enabled = 0; g.state_dirty_bits |= NOVA_DIRTY_BLEND_STATE; }
+            break;
+        case GL_ALPHA_TEST:
+            if (g.alpha_test_enabled) { g.alpha_test_enabled = 0; g.state_dirty_bits |= (NOVA_DIRTY_ALPHA_TEST | NOVA_DIRTY_EARLY_DEPTH); }
+            break;
+        case GL_CULL_FACE:
+            if (g.cull_face_enabled) { g.cull_face_enabled = 0; g.state_dirty_bits |= NOVA_DIRTY_CULLING; }
+            break;
         case GL_TEXTURE_2D:
         case GL_TEXTURE_CUBE_MAP:
-            g.texture_2d_enabled_unit[g.active_texture_unit] = 0;
-            g.tev_dirty = 1;
+            if (g.texture_2d_enabled_unit[g.active_texture_unit]) {
+                g.texture_2d_enabled_unit[g.active_texture_unit] = 0;
+                g.tev_dirty = 1;
+            }
             break;
-        case GL_SCISSOR_TEST: g.scissor_test_enabled = 0; g.state_dirty_bits |= NOVA_DIRTY_SCISSOR; break;
-        case GL_STENCIL_TEST: g.stencil_test_enabled = 0;
+        case GL_SCISSOR_TEST:
+            if (g.scissor_test_enabled) { g.scissor_test_enabled = 0; g.state_dirty_bits |= NOVA_DIRTY_SCISSOR; }
+            break;
+        case GL_STENCIL_TEST:
+            if (!g.stencil_test_enabled) break;
+            g.stencil_test_enabled = 0;
             nova_batch_flush();   /* eager C3D_StencilTest — see glEnable note */
             C3D_StencilTest(0, GPU_ALWAYS, 0, 0xFF, 0xFF);
             break;
@@ -258,15 +299,19 @@ void glDisable(GLenum cap) {
             if (g.fog_enabled) { g.fog_enabled = 0; g.fog_dirty = 1; }
             break;
         case GL_POLYGON_OFFSET_FILL:
+            if (!g.polygon_offset_fill_enabled) break;
             nova_batch_flush();   /* eager C3D_DepthMap — see glEnable note */
             g.polygon_offset_fill_enabled = 0;
             apply_depth_map();
             break;
         case GL_LINE_SMOOTH: g.line_smooth_enabled = 0; break;
-        case GL_LIGHTING: g.lighting_enabled = 0; g.light_dirty = 1; break;
+        case GL_LIGHTING:
+            if (g.lighting_enabled) { g.lighting_enabled = 0; g.light_dirty = 1; }
+            break;
         case GL_LIGHT0: case GL_LIGHT1: case GL_LIGHT2: case GL_LIGHT3:
         case GL_LIGHT4: case GL_LIGHT5: case GL_LIGHT6: case GL_LIGHT7:
-            g.lights[cap - GL_LIGHT0].enabled = 0; g.light_dirty = 1; break;
+            if (g.lights[cap - GL_LIGHT0].enabled) { g.lights[cap - GL_LIGHT0].enabled = 0; g.light_dirty = 1; }
+            break;
         case GL_VERTEX_ARRAY: g.va_vertex.enabled = 0; break;
         case GL_COLOR_ARRAY: g.va_color.enabled = 0; break;
         case GL_TEXTURE_COORD_ARRAY: g.va_texcoord.enabled = 0; break;

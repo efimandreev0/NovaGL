@@ -31,6 +31,20 @@ static void nova_clear_quad(int clear_color, int clear_depth) {
     if (clear_color) write_mask |= GPU_WRITE_ALL;
     if (clear_depth) write_mask |= GPU_WRITE_DEPTH;
 
+    /* Early-Z handling (DMP fbwiper parity):
+     *  1. A depth clear must also reset the on-chip early-depth buffer —
+     *     citro3d never does, so stale early-Z from before the clear kept
+     *     rejecting fresh geometry ("black wedges" artifacts).
+     *  2. The clear quad itself must run with early-Z DISABLED: with the
+     *     buffer freshly cleared to 0 and e.g. GPU_EARLYDEPTH_GREATER active,
+     *     the quad's own fragments (depth 0 = far) would be early-rejected
+     *     and the clear would silently not happen. C3D_EarlyDepthTest only
+     *     touches the shadow; the C3D_DepthTest below dirties the effect
+     *     block, so the disable lands with this quad's state flush — after
+     *     nova_clear_early_depth's raw writes, in command order. */
+    if (clear_depth) nova_clear_early_depth();
+    C3D_EarlyDepthTest(false, g.gpu_early_depth_func, 0);
+
     C3D_DepthTest(clear_depth, GPU_ALWAYS, write_mask);
     C3D_AlphaTest(false, GPU_ALWAYS, 0);
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
@@ -168,6 +182,9 @@ void glClear(GLbitfield mask) {
             /* Frame start: buffer is empty, so a GX memory fill is stall-free and much faster. */
             C3D_FrameSplit(0);
             C3D_RenderTargetClear(g.current_target, bits, color, depth);
+            /* The memory fill wiped the depth buffer in VRAM but not the
+             * on-chip early-depth buffer — reset it too (see nova_clear_early_depth). */
+            if (bits & C3D_CLEAR_DEPTH) nova_clear_early_depth();
         }
     }
 }

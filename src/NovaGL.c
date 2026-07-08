@@ -328,6 +328,7 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.frame_buffers = K;
     g.frame_slot = 0;
     g.swap_interval = NOVAGL_VSYNC;
+    g.early_z_allowed = 1;
     g.c3d_frame_flag = (K > 1) ? 0 : C3D_FRAME_SYNCDRAW;
 
     /* One vertex + index ring PER frame slot (full per-slot capacity), so the
@@ -805,6 +806,24 @@ void novaSnapshotAppSurface(void) {
  * runs at a sane, hardware-consistent rate. Compile with -DNOVAGL_VSYNC=0 to
  * free-run (e.g. for benchmarking); see the guard near the top of the file. */
 
+void novaSetEarlyZEnabled(int enabled) {
+    g.early_z_allowed = enabled ? 1 : 0;
+    g.state_dirty_bits |= NOVA_DIRTY_EARLY_DEPTH;
+}
+
+/* DMP-style incremental kickoff (their nngxSplitDrawCmdlist model, benched by
+ * the SDK's test_Gles2Split): split the command list every `draws` draw calls
+ * so the GPU executes the frame's head while the CPU builds the tail. Only
+ * meaningful gains in single-buffered mode (novaSetFrameBuffers(1)), where the
+ * GPU otherwise idles until C3D_FrameEnd; with async frame buffering the
+ * overlap already comes from running a whole frame behind. Each split has a
+ * small fixed cost (command-list finalize + GX queue entry), so don't go
+ * below ~16. 0 disables (default). */
+void novaSetAutoSplitDraws(int draws) {
+    g.auto_split_draws = draws < 0 ? 0 : draws;
+    g.draws_since_split = 0;
+}
+
 void novaSetSwapInterval(int interval) {
     g.swap_interval = interval < 0 ? 0 : interval;
 }
@@ -832,12 +851,14 @@ void novaSwapBuffers(void) {
 
     nova_fbo_gc_collect();              /* free this slot's orphaned FBO targets */
 
-    nova_wait_tag("[W] frameBegin>");
+    /* No wait tag here: this is the HEALTHY once-per-frame swap wait — under
+     * a rolling per-frame tag budget it floods the log and drowns the rare
+     * wait sites the tags exist to expose. */
     C3D_FrameBegin(g.c3d_frame_flag);   /* SYNCDRAW (K==1) waits; async (K>1) doesn't */
-    nova_wait_tag("[W] frameBegin<");
 
     nova_tex_gc_collect();              /* free this slot's orphaned textures   */
     nova_ring_gc_collect();             /* free ring buffers orphaned by growth */
+    nova_vbo_gc_collect();              /* free VBO storage orphaned by delete/respec */
     nova_tex_staging_tick();            /* shrink idle texture staging buffer   */
 
     /* Point the active rings at this slot's buffers and reset their offsets —
@@ -851,6 +872,7 @@ void novaSwapBuffers(void) {
     g.index_buf_offset = 0;
     /* New frame: re-arm the once-per-frame linear_alloc_ring mid-frame drain. */
     g.ring_synced_this_frame = 0;
+    g.draws_since_split = 0;   /* auto-split counts per frame */
 
     /* Resume drawing into the app surface (the logical "screen"). */
     if (g.app_target) {
@@ -881,9 +903,10 @@ void nova_fini(void) {
     nova_wait_tag("[W] swap-p3d<");
     g.p3d_pending = 0; /* frame fully retired; next wait needs new work */
 
-    /* GPU is idle now — flush ALL frame slots of orphaned texture/FBO storage. */
+    /* GPU is idle now — flush ALL frame slots of orphaned texture/FBO/VBO storage. */
     nova_tex_gc_collect_all();
     nova_fbo_gc_collect_all();
+    nova_vbo_gc_collect_all();
 
     for (int i = 0; i < g.frame_buffers; i++) {
         if (g.client_array_buf_slots[i]) linearFree(g.client_array_buf_slots[i]);
@@ -1343,7 +1366,6 @@ static int try_draw_multistream(GLenum mode, GPU_Primitive_t prim, GLint first, 
     else
         C3D_DrawArrays(prim, 0, count);
 
-    nova_wait_tag("[Draw] ms");
     return 1;
 }
 
@@ -1523,7 +1545,6 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
         cleanup_vbo_stream();
         return;
     }
-    nova_wait_tag("[Draw] staged");
 
     /* Safe-fallback (change 3): if ANY enabled, VBO-bound attribute array
      * points at a VBO slot that failed to allocate (allocated==0 || data==NULL

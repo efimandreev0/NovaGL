@@ -47,7 +47,10 @@ static float half_bits_to_float(uint16_t value) {
 
 static void free_vbo_storage(VBOSlot *slot) {
     if (slot->allocated && slot->data) {
-        linearFree(slot->data);
+        /* Deferred: this frame's queued draws may still read the block
+         * (glDeleteBuffers right after a draw is common in streaming engines).
+         * Freed by nova_vbo_gc_collect K frames later, like textures/rings. */
+        nova_vbo_defer_free(slot->data);
     }
     slot->data = NULL;
     slot->allocated = 0;
@@ -117,7 +120,7 @@ void vbo_convert_slot_to_raw(VBOSlot *slot) {
     }
 
     vbo_decode_packed_ptc_span(slot, 0, slot->size / NOVA_VBO_PTC_RAW_STRIDE, (uint8_t *) decoded);
-    linearFree(slot->data);
+    nova_vbo_defer_free(slot->data); /* GPU may still read the packed block */
     slot->data = decoded;
     slot->capacity = slot->size;
     slot->storage_kind = NOVA_VBO_STORAGE_RAW;
@@ -329,9 +332,13 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
             return;
         }
 
-        // New alloc succeeded — now it is safe to release the old block.
+        // New alloc succeeded — release the old block DEFERRED: draws issued
+        // earlier this frame may still read it (respecify-after-draw), so it
+        // parks in the frame-slot GC instead of going back to linearAlloc now.
+        // (The retry path above keeps its immediate linearFree on purpose —
+        // it exists to reclaim space RIGHT NOW under linear exhaustion.)
         if (old_buf)
-            linearFree(old_buf);
+            nova_vbo_defer_free(old_buf);
 
         slot->data = new_buf;
         slot->capacity = new_capacity;
@@ -401,10 +408,17 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
     int required = offset + size;
 
     if (!slot->allocated || slot->capacity < required) {
-        int new_capacity = slot->capacity ? slot->capacity : 1;
+        /* Growth must make progress from ANY starting point. The old seed of
+         * 1 with a *3/2 integer step locked up forever: (1*3)/2 == 1, so a
+         * sub-update against a VBO whose glBufferData had failed its
+         * linearAlloc (capacity 0 — exactly the low-linear situation) spun
+         * the render traversal for good. This WAS the floating in-game
+         * renderTrav hang (RSP dump: main thread parked in this loop from
+         * osg::GLBufferObject::compileBuffer). */
+        int new_capacity = slot->capacity > 0 ? slot->capacity : required;
 
         while (new_capacity < required)
-            new_capacity = (new_capacity * 3) / 2;
+            new_capacity += new_capacity / 2 + 1;
 
         void *new_buf = linearAlloc((size_t) new_capacity);
         if (!new_buf) {
@@ -414,7 +428,7 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
 
         if (slot->data && slot->capacity > 0) {
             memcpy(new_buf, slot->data, (size_t) slot->capacity);
-            linearFree(slot->data);
+            nova_vbo_defer_free(slot->data); /* may still be read by this frame's draws */
         }
 
         slot->data = new_buf;

@@ -56,6 +56,41 @@ unsigned int nova_next_pow2(unsigned int v) {
 static void *s_ring_gc[3][NOVA_RING_GC_MAX];
 static int s_ring_gc_count[3];
 
+/* ---- deferred VBO-storage free --------------------------------------------
+ * Same lifetime rule as the ring GC: a linear block that backed a VBO drawn
+ * from THIS frame must survive until the GPU has retired the frame. Reached
+ * from glDeleteBuffers, glBufferData respecification and the glBufferSubData
+ * grow path (all of which used to linearFree immediately — a use-after-free
+ * whenever the app deletes/respecifies right after drawing, and a bigger
+ * window under async frame_buffers>1). */
+#define NOVA_VBO_GC_MAX 64
+static void *s_vbo_gc[3][NOVA_VBO_GC_MAX];
+static int s_vbo_gc_count[3];
+
+void nova_vbo_defer_free(void *p) {
+    if (!p) return;
+    int s = g.frame_slot;
+    if (s_vbo_gc_count[s] < NOVA_VBO_GC_MAX)
+        s_vbo_gc[s][s_vbo_gc_count[s]++] = p;
+    else
+        linearFree(p); /* bucket full — old immediate-free behaviour */
+}
+
+void nova_vbo_gc_collect(void) {
+    int s = g.frame_slot;
+    for (int i = 0; i < s_vbo_gc_count[s]; i++)
+        linearFree(s_vbo_gc[s][i]);
+    s_vbo_gc_count[s] = 0;
+}
+
+void nova_vbo_gc_collect_all(void) {
+    for (int s = 0; s < 3; s++) {
+        for (int i = 0; i < s_vbo_gc_count[s]; i++)
+            linearFree(s_vbo_gc[s][i]);
+        s_vbo_gc_count[s] = 0;
+    }
+}
+
 /* Diagnostic breadcrumbs into the host app's boot log. Weak: resolves to the
  * OpenMW CTR layer when linked into it, null elsewhere. */
 extern void vitaBreadcrumb(const char *msg) __attribute__((weak));
@@ -89,6 +124,19 @@ void nova_ring_gc_collect(void) {
         }
     }
     s_ring_gc_count[s] = 0;
+}
+
+void nova_midframe_drain(void) {
+    if (!g.p3d_pending)
+        return;
+    nova_wait_tag("[W] drain>");
+    C3D_FrameEnd(0);
+    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    if (g.current_target)
+        C3D_FrameDrawOn(g.current_target);
+    g.p3d_pending = 0;
+    g.ring_synced_this_frame = 1;
+    nova_wait_tag("[W] drain<");
 }
 
 static void *ring_grow(void **alias, void **slot_buf, int *slot_cap, int *shared_cap, int *offset, int size) {
@@ -837,6 +885,29 @@ void apply_depth_map(void) {
     C3D_DepthMap(true, scale, offset);
 }
 
+/* Clear the PICA on-chip early-depth buffer. Register map cross-checked
+ * against the DMP GLES2 driver: TI_EARLYZ_CLEAR = 0x63 = libctru
+ * GPUREG_EARLYDEPTH_CLEAR, EZ_Z_CLEAR_VALUE = 0x6A = GPUREG_EARLYDEPTH_DATA.
+ * Two constraints drive the raw writes:
+ *  - the clear only latches while early-Z is ENABLED (DMP: "to clear early
+ *    depth buffer, need to enable early depth in advance"), and
+ *  - C3D_EarlyDepthTest only mutates citro3d's shadow struct; the registers
+ *    land at the NEXT draw's effect flush — after our clear, i.e. too late.
+ * So enable + clear are written directly into the command list here, and
+ * NOVA_DIRTY_EARLY_DEPTH makes the next draw re-emit the proper enable state
+ * (citro3d re-emits its whole effect block from the shadow, which we never
+ * touched). Clear value 0 = far plane in NovaGL's inverted-Z convention, so
+ * the buffer starts "everything passes" — matching a fresh depth clear. */
+void nova_clear_early_depth(void) {
+    if (!g.early_z_allowed)
+        return;
+    GPUCMD_AddMaskedWrite(GPUREG_EARLYDEPTH_TEST1, 0x1, 1);
+    GPUCMD_AddWrite(GPUREG_EARLYDEPTH_TEST2, 1);
+    GPUCMD_AddMaskedWrite(GPUREG_EARLYDEPTH_DATA, 0x7, 0);
+    GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
+    g.state_dirty_bits |= NOVA_DIRTY_EARLY_DEPTH;
+}
+
 static GPU_TEVSRC get_tev_src(GLint gl_src, GPU_TEVSRC tex_src, GPU_TEVSRC prev_src) {
     if (gl_src == GL_TEXTURE) return tex_src;
     if (gl_src == GL_PREVIOUS) return prev_src;
@@ -1035,6 +1106,18 @@ void novaClearExplicitTevStages(void) {
  *  - Hardware Early-Z Culling (boosting fillrate).
  * ========================================================================= */
 void apply_gpu_state(void) {
+    /* --- 0. Incremental command-list kickoff (opt-in) ----------------------
+     * DMP's driver hands the GPU finished command ranges mid-frame
+     * (nngxSplitDrawCmdlist) so it executes the frame's head while the CPU
+     * builds the tail. C3D_FrameSplit(0) is the citro3d equivalent — async,
+     * no wait. Splitting BEFORE the next draw flushes everything queued so
+     * far, which is equivalent to splitting after the previous one. */
+    if (g.auto_split_draws > 0 && ++g.draws_since_split >= g.auto_split_draws) {
+        g.draws_since_split = 0;
+        if (g.p3d_pending)
+            C3D_FrameSplit(0);
+    }
+
     /* --- 1. Shader Selector -----------------------------------------------
      * Pick the cheapest shader that satisfies the current state:
      *   clipspace : explicit (set by novaBeginClipSpace2D)
@@ -1190,9 +1273,21 @@ void apply_gpu_state(void) {
     }
 
     /* Hardware Early Z-Culling: Rejects occluded fragments before TMU sampling,
-     * saving massive fillrate. Must be disabled if alpha test or blending modifies visibility. */
+     * saving massive fillrate. Must be disabled if alpha test or blending modifies visibility.
+     * novaSetEarlyZEnabled(0) kills it globally — diagnostic switch for the
+     * "geometry shows through / black wedges when pitching the camera"
+     * class of bugs (stale early-depth state is a prime suspect). */
     if (g.state_dirty_bits & NOVA_DIRTY_EARLY_DEPTH) {
-        int want_early_z = g.depth_test_enabled && !g.alpha_test_enabled && !g.blend_enabled;
+        /* Early-Z can only express the four ORDERING comparisons — the DMP
+         * driver's glEarlyDepthFuncDMP accepts exactly LESS/LEQUAL/GREATER/
+         * GEQUAL and nothing else. For EQUAL/NOTEQUAL/ALWAYS/NEVER an early
+         * pass both rejects fragments the real test would accept (GL_ALWAYS
+         * skybox/fullscreen passes!) and poisons the on-chip early buffer
+         * with depths the late test then discards. Keep early-Z off there. */
+        int func_ok = (g.depth_func == GL_LESS || g.depth_func == GL_LEQUAL ||
+                       g.depth_func == GL_GREATER || g.depth_func == GL_GEQUAL);
+        int want_early_z = g.early_z_allowed && g.depth_test_enabled && func_ok &&
+                           !g.alpha_test_enabled && !g.blend_enabled;
         C3D_EarlyDepthTest(want_early_z, g.gpu_early_depth_func, 0);
     }
 
@@ -1524,6 +1619,7 @@ void nova_invalidate_tex_bind(GLuint tex_id) {
 
 void nova_invalidate_state_cache(void) {
     g.state_dirty_bits = NOVA_DIRTY_ALL;
+    g.vp_applied_valid = 0; /* force the next glViewport through the dedupe */
     s_last_tex_bound[0]       = 0xFFFFFFFFu;
     s_last_tex_bound[1]       = 0xFFFFFFFFu;
     s_last_tex_bound[2]       = 0xFFFFFFFFu;

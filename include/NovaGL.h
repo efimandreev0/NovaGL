@@ -64,14 +64,16 @@ typedef GLDEBUGPROC GLDEBUGPROCKHR;
 typedef void *(*GLADloadproc)(const char *name);
 //nova_constants
 /* These fixed-size tables live in .bss (real RAM on the 3DS target). The old
- * 2048/32768 caps reserved far more than any observed workload uses — the
- * prison-ship interior high-water marks sit well under a quarter of these — so
- * they were shrunk to reclaim ~1MB of zero-init .bss. The glGenBuffers/
+ * 2048/32768 caps reserved far more than any observed workload uses, so they
+ * were shrunk to reclaim ~1MB of zero-init .bss. The glGenBuffers/
  * glGenTextures overflow branches degrade gracefully (GL_OUT_OF_MEMORY, id 0),
  * and both emit a one-time breadcrumb when the live-id high-water mark passes
  * 75% of the cap, so if a heavier scene ever approaches the limit we notice
- * before it starts failing allocations. */
-#define NOVA_MAX_TEXTURES     1024
+ * before it starts failing allocations.
+ * TEXTURES 1024→1536: Morrowind EXTERIORS (Seyda Neen) hit a 769 high-water
+ * within a minute of walking — interiors sit near ~300, but the open world
+ * churns terrain/flora textures much harder. */
+#define NOVA_MAX_TEXTURES     1536
 #define NOVA_MAX_VBOS         8192
 #define NOVA_MATRIX_STACK     32
 #define NOVA_DISPLAY_LISTS    512
@@ -642,6 +644,20 @@ void nova_wait_tag_arm(int budget);
 /* 0 = free-run (no VBlank wait at swap), N>0 = wait N VBlanks per swap. */
 void novaSetSwapInterval(int interval);
 
+/* Global early-depth master switch (default on). Turning it off trades some
+ * fillrate for correctness — diagnostic for stale early-depth artifacts
+ * (geometry bleeding through / black wedges at steep camera pitches). */
+void novaSetEarlyZEnabled(int enabled);
+
+/* Incremental command-list kickoff (the DMP driver's nngxSplitDrawCmdlist
+ * model): split the C3D command list every `draws` draw calls so the GPU
+ * starts executing the frame's head while the CPU still builds its tail.
+ * Mainly helps single-buffered mode (novaSetFrameBuffers(1)); with async
+ * frame buffering the overlap already comes from running a frame behind.
+ * Each split has a small fixed cost — values below ~16 usually cost more
+ * than they save. 0 disables (default). Safe to change at any time. */
+void novaSetAutoSplitDraws(int draws);
+
 void nova_fini(void);
 
 void nova_set_render_target(int target_mode); // 0 = Top Left, 1 = Top Right, 2 = Bottom
@@ -728,6 +744,11 @@ int nova_texture_cache_has(uint32_t hash);
 // and writes the texture's *original* (pre-downscale) width/height to the out-params
 // so the caller can compute UVs correctly. Returns 0 on miss or malformed entry.
 int nova_texture_cache_load(uint32_t hash, int *out_orig_w, int *out_orig_h);
+
+/* Read only the .nsw header: logical (tgt) and original dimensions. Returns
+ * 0 when the entry is missing or has a foreign version. Cheap (36-byte
+ * read) — hosts use it to size image placeholders before the real load. */
+int nova_texture_cache_peek(uint32_t hash, int *out_tgt_w, int *out_tgt_h, int *out_orig_w, int *out_orig_h);
 
 // Save the currently-bound texture (its swizzled C3D_Tex->data plus the metadata
 // needed to restore it) under the given hash. No-op if caching isn't enabled.
@@ -1726,7 +1747,7 @@ void novaGetProfileStats(NovaProfileStats *out_stats);
  * Avoids the slow VFPv2 hardware division and square root. */
 static inline float nova_fast_rsqrt(float number) {
     float y;
-    constexpr float threehalfs = 1.5f;
+    float threehalfs = 1.5f;
 
     const float x2 = number * 0.5f;
     y  = number;

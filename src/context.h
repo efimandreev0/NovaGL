@@ -459,6 +459,27 @@ extern struct NovaState {
     GLint vp_x, vp_y;
     GLsizei vp_w, vp_h;
 
+    /* glViewport dedupe shadow — the values LAST APPLIED via C3D_SetViewport,
+     * keyed on the screen/FBO orientation swap (the C3D call differs for
+     * bound_fbo==0). Engines re-send the same viewport every frame (OSG does it
+     * per camera); skipping the redundant apply also skips a batch flush.
+     * vp_applied_valid=0 forces the next glViewport through — reset by
+     * nova_invalidate_state_cache and by every path that programs the GPU
+     * viewport directly (present/snapshot/copy quads). DMP's driver does the
+     * same class of redundant-set filtering in every state setter. */
+    GLint vp_applied_x, vp_applied_y;
+    GLsizei vp_applied_w, vp_applied_h;
+    int vp_applied_fbo0;
+    int vp_applied_valid;
+
+    /* DMP-style incremental command-list kickoff (nngxSplitDrawCmdlist model):
+     * novaSetAutoSplitDraws(N) splits the C3D command list every N draws so the
+     * GPU starts executing the frame's head while the CPU still builds its
+     * tail. Mainly helps single-buffered mode (frame_buffers==1), where the GPU
+     * otherwise idles until C3D_FrameEnd. 0 = off (default). */
+    int auto_split_draws;
+    int draws_since_split;
+
     /* Heap-allocated on first glNewList — sizeof(DisplayList) * 512 ≈ 786KB
      * was sitting in .bss for every NovaGL app, even those that never call
      * glGenLists. Now we pay only when a recording actually happens. */
@@ -480,6 +501,9 @@ extern struct NovaState {
     int swap_interval;        /* novaSetSwapInterval: 0 = free-run (no VBlank wait
                                * at swap), N>0 = wait N VBlanks. Default comes from
                                * the NOVAGL_VSYNC compile flag. */
+    int early_z_allowed;      /* novaSetEarlyZEnabled: global early-depth master
+                               * switch (default 1). Diagnostic for stale
+                               * early-depth artifacts. */
     int ring_synced_this_frame; /* per-frame guard for the linear_alloc_ring
                                * mid-frame drain (C3D_FrameEnd(0)+FrameBegin
                                * SYNCDRAW). The drain is the ONLY sanctioned

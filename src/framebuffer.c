@@ -36,17 +36,11 @@ static void nova_queue_render_target_delete(C3D_RenderTarget *target) {
     if (!target) return;
     int s = g.frame_slot;
     if (s_fbo_gc_count[s] >= NOVA_FBO_GC_TARGETS) {
-        /* Slot full (512 orphans in K frames — extreme). Sync the GPU so this
-         * slot's targets are safe to delete now, then reuse it. No submitted
-         * work since the last wait -> GPU already idle, skip the split (an
-         * empty split raises no P3D interrupt and the wait would hang). */
-        if (g.p3d_pending) {
-            nova_wait_tag("[W] fbo-gc>");
-            C3D_FrameSplit(0);
-            gspWaitForP3D();
-            nova_wait_tag("[W] fbo-gc<");
-            g.p3d_pending = 0;
-        }
+        /* Slot full (512 orphans in K frames — extreme). Retire the in-flight
+         * work so this slot's targets are safe to delete now, then reuse it.
+         * Raw split+gspWaitForP3D parks forever under citro3d's render queue
+         * — use the sanctioned mid-frame drain instead. */
+        nova_midframe_drain();
         fbo_gc_free_slot(s);
     }
     s_fbo_gc_targets[s][s_fbo_gc_count[s]++] = target;
@@ -232,6 +226,13 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
     } else {
         C3D_SetViewport(g.vp_x, g.vp_y, g.vp_w, g.vp_h);
     }
+    /* Keep the glViewport dedupe shadow in sync with what we just applied. */
+    g.vp_applied_x = g.vp_x;
+    g.vp_applied_y = g.vp_y;
+    g.vp_applied_w = g.vp_w;
+    g.vp_applied_h = g.vp_h;
+    g.vp_applied_fbo0 = (g.bound_fbo == 0);
+    g.vp_applied_valid = 1;
 
     /* OPT-IN WORKAROUND (-DNOVAGL_FBO_RESET_SCISSOR=1, default OFF): reset the
      * scissor to the FULL FBO when binding an offscreen target.
@@ -394,9 +395,9 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
     }
 #endif
 
-    /* Soft fallback: untile + axis-swap pixel-by-pixel. */
-    C3D_FrameSplit(0);
-    gspWaitForP3D();
+    /* Soft fallback: untile + axis-swap pixel-by-pixel. CPU reads need the
+     * queued draws retired — raw split+wait parks forever mid-frame. */
+    nova_midframe_drain();
 
     uint8_t *dst = (uint8_t *) pixels;
 
@@ -825,6 +826,7 @@ static int nova_gpu_blit_quad(C3D_Tex *src_tex, const float uv[4][2],
 
     /* --- Viewport over the dst write window ----------------------------- */
     C3D_SetViewport((u32) vp_x, (u32) vp_y, (u32) vp_w, (u32) vp_h);
+    g.vp_applied_valid = 0; /* GPU viewport diverged from GL state — force re-apply */
 
     /* 10 float'ов на вершину: pos4 + uv2 + color4 (см. историю: лэйаут должен
      * совпадать с лоадерами, иначе цвет читается из соседней вершины). */

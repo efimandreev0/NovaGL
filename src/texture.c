@@ -36,8 +36,12 @@ static void apply_slot_params_to_tex(C3D_Tex *tex, const TexSlot *slot);
  * path was scrambling RGBA byte order — those cache files contain
  * channel-swapped texel data ("red instead of blue" forever, even after the
  * upload path was fixed, because the poisoned conversion was re-served from
- * disk). */
-#define NOVA_TEXCACHE_VERSION  2u
+ * disk).
+ * v3: adds mip_levels — payloads may carry a full pre-swizzled mip chain
+ * (levels stored back-to-back in citro3d's contiguous layout, each halving
+ * down to no smaller than 8px). Offline preprocessors generate these so the
+ * console never decodes, downscales, mips or swizzles anything at load. */
+#define NOVA_TEXCACHE_VERSION  3u
 
 typedef struct {
     uint32_t magic;
@@ -49,8 +53,22 @@ typedef struct {
     uint32_t tgt_h;
     uint32_t orig_w;
     uint32_t orig_h;
-    uint32_t data_size;
+    uint32_t data_size; // total payload bytes across ALL mip levels
+    uint32_t mip_levels; // >= 1
 } NovaTexCacheHeader;
+
+/* Total bytes of a pot_w x pot_h texture with `mips` levels (each level
+ * halves, preprocessors keep every level >= 8px so the chain is valid). */
+static size_t nova_texcache_total_size(int pot_w, int pot_h, GPU_TEXCOLOR fmt, uint32_t mips) {
+    size_t total = 0;
+    int w = pot_w, h = pot_h;
+    for (uint32_t l = 0; l < mips; l++) {
+        total += (size_t) w * (size_t) h * (size_t) gpu_texfmt_bpp(fmt);
+        w >>= 1;
+        h >>= 1;
+    }
+    return total;
+}
 
 static char g_tex_cache_dir[256] = {0};
 static int g_tex_cache_dir_ready = 0;
@@ -164,28 +182,58 @@ int nova_texture_cache_load(uint32_t hash, int *out_orig_w, int *out_orig_h) {
         fclose(f);
         return 0;
     }
+    if (hdr.mip_levels < 1 || hdr.mip_levels > 8) {
+        fclose(f);
+        return 0;
+    }
+    /* Every level must stay >= 8px for the PICA. */
+    if (((int) hdr.pot_w >> (hdr.mip_levels - 1)) < 8 || ((int) hdr.pot_h >> (hdr.mip_levels - 1)) < 8) {
+        fclose(f);
+        return 0;
+    }
 
     GPU_TEXCOLOR fmt = (GPU_TEXCOLOR) hdr.fmt;
-    size_t expected = (size_t) hdr.pot_w * (size_t) hdr.pot_h * (size_t) gpu_texfmt_bpp(fmt);
+    size_t expected = nova_texcache_total_size((int) hdr.pot_w, (int) hdr.pot_h, fmt, hdr.mip_levels);
     if (hdr.data_size != expected) {
         fclose(f);
         return 0;
     }
 
     if (slot->allocated) {
-        if (slot->fmt != fmt || slot->pot_w != (int) hdr.pot_w || slot->pot_h != (int) hdr.pot_h) {
-            /* Deferred delete — queued draws may still sample the old image. */
-            nova_tex_gc_push(&slot->tex);
-            nova_invalidate_tex_bind((GLuint) (slot - g.textures));
-            slot->allocated = 0;
-        }
+        /* Mip pyramid depth is baked into the allocation — always re-create. */
+        nova_tex_gc_push(&slot->tex);
+        nova_invalidate_tex_bind((GLuint) (slot - g.textures));
+        slot->allocated = 0;
     }
-    if (!slot->allocated) {
-        if (!C3D_TexInit(&slot->tex, hdr.pot_w, hdr.pot_h, fmt)) {
-            fclose(f);
-            gl_set_error(GL_OUT_OF_MEMORY);
-            return 0;
+    int on_vram = 0;
+    {
+        C3D_TexInitParams params;
+        memset(&params, 0, sizeof(params));
+        params.width = (u16) hdr.pot_w;
+        params.height = (u16) hdr.pot_h;
+        params.maxLevel = (u8) (hdr.mip_levels - 1);
+        params.format = fmt;
+        params.type = GPU_TEX_2D;
+        /* VRAM first: PICA samples it at full speed and every byte here is a
+         * byte of linear RAM handed back to vertex buffers (the open world
+         * was running linear down to a few hundred bytes on geometry alone).
+         * Keep a reserve for render targets and FBO RTT (local map). */
+        params.onVram = vramSpaceFree() > expected + (size_t) (1536 * 1024);
+        if (!C3D_TexInitWithParams(&slot->tex, NULL, params)) {
+            if (params.onVram) {
+                params.onVram = false;
+                if (!C3D_TexInitWithParams(&slot->tex, NULL, params)) {
+                    fclose(f);
+                    gl_set_error(GL_OUT_OF_MEMORY);
+                    return 0;
+                }
+            } else {
+                fclose(f);
+                gl_set_error(GL_OUT_OF_MEMORY);
+                return 0;
+            }
         }
+        on_vram = params.onVram;
         slot->allocated = 1;
     }
 
@@ -196,18 +244,52 @@ int nova_texture_cache_load(uint32_t hash, int *out_orig_w, int *out_orig_h) {
     slot->height = (int) hdr.tgt_h;
     slot->orig_width = (int) hdr.orig_w;
     slot->orig_height = (int) hdr.orig_h;
+    slot->has_mipmap = hdr.mip_levels > 1;
     slot->is_solid_optimized = (slot->pot_w == 8 && slot->pot_h == 8 && (
                                     slot->orig_width > 8 || slot->orig_height > 8));
 
-    size_t got = fread(slot->tex.data, 1, hdr.data_size, f);
-    fclose(f);
-    if (got != hdr.data_size) return 0;
+    /* citro3d stores mip levels contiguously — one read fills the pyramid. */
+    if (on_vram) {
+        /* Plain CPU write into VRAM — deliberately NO GX transfer here. The
+         * first attempt staged through linear + C3D_SyncTextureCopy, but
+         * cache loads run MID-FRAME (OSG texture apply inside the render
+         * traversal) and a synchronous GX transfer races citro3d's render
+         * queue for the GX command slot: sometimes fine, sometimes the queue
+         * corrupts (garbage DisplayTransfer addresses, then a PANIC assert).
+         * Uncached VRAM stores are slower per byte, but NSW textures are
+         * <=~700KB and this only runs at load time. No cache flush needed —
+         * VRAM is uncached for the CPU. */
+        size_t got = fread(slot->tex.data, 1, hdr.data_size, f);
+        fclose(f);
+        if (got != hdr.data_size) return 0;
+        apply_slot_params_to_tex(&slot->tex, slot);
+    } else {
+        size_t got = fread(slot->tex.data, 1, hdr.data_size, f);
+        fclose(f);
+        if (got != hdr.data_size) return 0;
 
-    apply_slot_params_to_tex(&slot->tex, slot);
-    C3D_TexFlush(&slot->tex);
+        apply_slot_params_to_tex(&slot->tex, slot);
+        C3D_TexFlush(&slot->tex);
+    }
 
     if (out_orig_w) *out_orig_w = slot->orig_width;
     if (out_orig_h) *out_orig_h = slot->orig_height;
+    return 1;
+}
+
+int nova_texture_cache_peek(uint32_t hash, int *out_tgt_w, int *out_tgt_h, int *out_orig_w, int *out_orig_h) {
+    char path[320];
+    if (!nova_tex_cache_path(path, sizeof(path), hash)) return 0;
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) return 0;
+    NovaTexCacheHeader hdr;
+    size_t got = fread(&hdr, sizeof(hdr), 1, f);
+    fclose(f);
+    if (got != 1 || hdr.magic != NOVA_TEXCACHE_MAGIC || hdr.version != NOVA_TEXCACHE_VERSION) return 0;
+    if (out_tgt_w) *out_tgt_w = (int) hdr.tgt_w;
+    if (out_tgt_h) *out_tgt_h = (int) hdr.tgt_h;
+    if (out_orig_w) *out_orig_w = (int) hdr.orig_w;
+    if (out_orig_h) *out_orig_h = (int) hdr.orig_h;
     return 1;
 }
 
@@ -247,6 +329,7 @@ void nova_texture_cache_save(uint32_t hash) {
         .orig_w = (uint32_t) slot->orig_width,
         .orig_h = (uint32_t) slot->orig_height,
         .data_size = (uint32_t) data_size,
+        .mip_levels = 1, // runtime saves never carry a pyramid
     };
     fwrite(&hdr, sizeof(hdr), 1, f);
     fwrite(slot->tex.data, 1, data_size, f);
@@ -373,17 +456,14 @@ void nova_tex_gc_collect_all(void) {
 void nova_tex_gc_push(C3D_Tex *tex) {
     int s = g.frame_slot;
     if (s_tex_gc_count[s] >= NOVA_TEX_GC_SLOTS) {
-        /* Slot full mid-frame (128 orphans in one frame — extreme). Flush the
-         * pending draws and wait so this slot's entries become reclaimable.
-         * Skip when nothing was submitted since the last wait — an empty
-         * split raises no P3D interrupt and the wait would hang. */
-        if (g.p3d_pending) {
-            nova_wait_tag("[W] tex-gc>");
-            C3D_FrameSplit(0);
-            gspWaitForP3D();
-            nova_wait_tag("[W] tex-gc<");
-            g.p3d_pending = 0;
-        }
+        /* Slot full mid-frame (128 orphans in one frame — mass eviction, e.g.
+         * a GUI scene swapping atlases while the resource cache flushes).
+         * Retire the in-flight draws so this slot's entries become
+         * reclaimable. Was a raw split+gspWaitForP3D — with citro3d's render
+         * queue active that wait NEVER wakes (queue owns the P3D callback);
+         * observed as the renderTrav park the moment the main menu opened
+         * in-world. */
+        nova_midframe_drain();
         tex_gc_free_slot(s);
     }
     s_tex_gc[s][s_tex_gc_count[s]++] = *tex;
@@ -1148,6 +1228,27 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     GLuint bound = active_bound_texture();
     if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return;
     TexSlot *slot = &g.textures[bound];
+
+    /* Pre-swizzled cache stub: hosts that can't reach the bind point (e.g.
+     * OSG's texture apply owns the upload) pass a 64-byte pixel buffer that
+     * starts with "NVSWSTUB" + u32 cache hash instead of real texels. Load
+     * the .nsw straight into the bound slot — no decode, no swizzle. 8-byte
+     * magic makes an accidental match in real pixel data implausible. */
+    if (level == 0 && pixels != NULL && width >= 4 && height >= 4) {
+        const unsigned char *p = (const unsigned char *) pixels;
+        if (memcmp(p, "NVSWSTUB", 8) == 0) {
+            uint32_t hash;
+            memcpy(&hash, p + 8, 4);
+            if (!nova_texture_cache_load(hash, NULL, NULL)) {
+                static int warned = 0;
+                if (!warned) {
+                    printf("[NOVA] NVSWSTUB %08x: cache load FAILED\n", (unsigned) hash);
+                    warned = 1;
+                }
+            }
+            return;
+        }
+    }
 
     /* Spec: border must be 0 in GL ES (and effectively in modern GL).
      * GL_INVALID_VALUE, no state change. */
@@ -2255,8 +2356,9 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
     }
 #endif
 
-    C3D_FrameSplit(0);
-    gspWaitForP3D();
+    /* CPU readback needs the queued draws retired first. See
+     * nova_midframe_drain: a raw split+wait would park forever here. */
+    nova_midframe_drain();
 
     for (int cy = 0; cy < height; cy++) {
         for (int cx = 0; cx < width; cx++) {

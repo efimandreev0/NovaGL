@@ -16,6 +16,16 @@ void glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
         gl_set_error(GL_INVALID_VALUE);
         return;
     }
+    /* Redundant-set filter (DMP does this in every state setter): engines
+     * re-send the same viewport every frame/camera. Skipping the re-apply also
+     * skips a nova_batch_flush — a batched PD run survives a no-op glViewport. */
+    int fbo0 = (g.bound_fbo == 0);
+    if (g.vp_applied_valid && g.vp_applied_fbo0 == fbo0 &&
+        g.vp_applied_x == x && g.vp_applied_y == y &&
+        g.vp_applied_w == width && g.vp_applied_h == height) {
+        g.vp_x = x; g.vp_y = y; g.vp_w = width; g.vp_h = height;
+        return;
+    }
     /* C3D_SetViewport below records an immediate viewport command; a pending
      * batch must be drawn under the OLD viewport first. */
     nova_batch_flush();
@@ -29,6 +39,12 @@ void glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
     } else {
         C3D_SetViewport(x, y, width, height);
     }
+    g.vp_applied_x = x;
+    g.vp_applied_y = y;
+    g.vp_applied_w = width;
+    g.vp_applied_h = height;
+    g.vp_applied_fbo0 = fbo0;
+    g.vp_applied_valid = 1;
 }
 
 void glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
@@ -36,6 +52,9 @@ void glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
         gl_set_error(GL_INVALID_VALUE);
         return;
     }
+    if (g.scissor_x == x && g.scissor_y == y &&
+        g.scissor_w == width && g.scissor_h == height)
+        return;
     g.scissor_x = x;
     g.scissor_y = y;
     g.scissor_w = width;
@@ -79,6 +98,7 @@ void glDepthFunc(GLenum func) {
         gl_set_error(GL_INVALID_ENUM);
         return;
     }
+    if (g.depth_func == func) return;
     g.depth_func = func;
     g.gpu_depth_func = gl_to_gpu_depth_testfunc(func);
     g.gpu_early_depth_func = gl_to_gpu_earlydepthfunc(func);
@@ -86,14 +106,19 @@ void glDepthFunc(GLenum func) {
 }
 
 void glDepthMask(GLboolean flag) {
-    g.depth_mask = flag;
+    GLboolean f = flag ? GL_TRUE : GL_FALSE;
+    if (g.depth_mask == f) return;
+    g.depth_mask = f;
     g.state_dirty_bits |= NOVA_DIRTY_DEPTH_TEST;
 }
 
 void glDepthRangef(GLclampf near_val, GLclampf far_val) {
+    GLfloat n = clampf(near_val, 0.0f, 1.0f);
+    GLfloat f = clampf(far_val, 0.0f, 1.0f);
+    if (g.depth_near == n && g.depth_far == f) return; /* skip flush + re-emit */
     nova_batch_flush();   /* apply_depth_map changes depth state for later draws */
-    g.depth_near = clampf(near_val, 0.0f, 1.0f);
-    g.depth_far = clampf(far_val, 0.0f, 1.0f);
+    g.depth_near = n;
+    g.depth_far = f;
     apply_depth_map();
 }
 
@@ -102,6 +127,9 @@ void glBlendFunc(GLenum sfactor, GLenum dfactor) {
         gl_set_error(GL_INVALID_ENUM);
         return;
     }
+    if (g.blend_src == sfactor && g.blend_dst == dfactor &&
+        g.blend_src_alpha == sfactor && g.blend_dst_alpha == dfactor)
+        return;
     g.blend_src = sfactor;
     g.blend_dst = dfactor;
     /* Non-separate: alpha factors mirror the colour factors. */
@@ -124,6 +152,9 @@ void glBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum d
         gl_set_error(GL_INVALID_ENUM);
         return;
     }
+    if (g.blend_src == srcRGB && g.blend_dst == dstRGB &&
+        g.blend_src_alpha == srcAlpha && g.blend_dst_alpha == dstAlpha)
+        return;
     g.blend_src = srcRGB;       g.blend_dst = dstRGB;
     g.blend_src_alpha = srcAlpha; g.blend_dst_alpha = dstAlpha;
 
@@ -138,17 +169,22 @@ void glBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum d
  * 0..1 floats (clamped per spec); apply_gpu_state packs to PICA 0xAABBGGRR and
  * pushes via C3D_BlendingColor. */
 void glBlendColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha) {
-    g.blend_color[0] = clampf(red, 0.0f, 1.0f);
-    g.blend_color[1] = clampf(green, 0.0f, 1.0f);
-    g.blend_color[2] = clampf(blue, 0.0f, 1.0f);
-    g.blend_color[3] = clampf(alpha, 0.0f, 1.0f);
+    GLclampf r = clampf(red, 0.0f, 1.0f), gr = clampf(green, 0.0f, 1.0f);
+    GLclampf b = clampf(blue, 0.0f, 1.0f), a = clampf(alpha, 0.0f, 1.0f);
+    if (g.blend_color[0] == r && g.blend_color[1] == gr &&
+        g.blend_color[2] == b && g.blend_color[3] == a)
+        return;
+    g.blend_color[0] = r;
+    g.blend_color[1] = gr;
+    g.blend_color[2] = b;
+    g.blend_color[3] = a;
 
-    // (Format 0xAABBGGRR)
-    uint32_t r = (uint32_t)(g.blend_color[0] * 255.0f + 0.5f);
-    uint32_t gc = (uint32_t)(g.blend_color[1] * 255.0f + 0.5f);
-    uint32_t b = (uint32_t)(g.blend_color[2] * 255.0f + 0.5f);
-    uint32_t a = (uint32_t)(g.blend_color[3] * 255.0f + 0.5f);
-    g.blend_color_packed = r | (gc << 8) | (b << 16) | (a << 24);
+    // (Format 0xAABBGGRR) — packed names must not shadow the floats above.
+    uint32_t pr = (uint32_t)(g.blend_color[0] * 255.0f + 0.5f);
+    uint32_t pg = (uint32_t)(g.blend_color[1] * 255.0f + 0.5f);
+    uint32_t pb = (uint32_t)(g.blend_color[2] * 255.0f + 0.5f);
+    uint32_t pa = (uint32_t)(g.blend_color[3] * 255.0f + 0.5f);
+    g.blend_color_packed = pr | (pg << 8) | (pb << 16) | (pa << 24);
 
     g.state_dirty_bits |= NOVA_DIRTY_BLEND_STATE;
 }
@@ -162,6 +198,7 @@ void glLogicOp(GLenum opcode) {
         case GL_AND_INVERTED: case GL_NOOP: case GL_XOR: case GL_OR:
         case GL_NOR: case GL_EQUIV: case GL_INVERT: case GL_OR_REVERSE:
         case GL_COPY_INVERTED: case GL_OR_INVERTED: case GL_NAND: case GL_SET:
+            if (g.logic_op == opcode) break;
             g.logic_op = opcode;
             g.gpu_logic_op = gl_to_gpu_logicop(opcode);
             g.state_dirty_bits |= NOVA_DIRTY_BLEND_STATE;
@@ -190,6 +227,7 @@ void glBlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha) {
         gl_set_error(GL_INVALID_ENUM);
         return;
     }
+    if (g.blend_eq_rgb == modeRGB && g.blend_eq_alpha == modeAlpha) return;
     g.blend_eq_rgb = modeRGB;
     g.blend_eq_alpha = modeAlpha;
 
@@ -216,10 +254,12 @@ void glAlphaFunc(GLenum func, GLclampf ref) {
         gl_set_error(GL_INVALID_ENUM);
         return;
     }
+    /* Spec: ref is clamped to [0,1] at specification time. */
+    GLclampf cref = clampf(ref, 0.0f, 1.0f);
+    if (g.alpha_func == func && g.alpha_ref == cref) return;
     g.alpha_func = func;
     g.gpu_alpha_func = gl_to_gpu_testfunc(func);
-    /* Spec: ref is clamped to [0,1] at specification time. */
-    g.alpha_ref = clampf(ref, 0.0f, 1.0f);
+    g.alpha_ref = cref;
     g.alpha_ref8 = (uint8_t)(g.alpha_ref * 255.0f + 0.5f);
 
     g.state_dirty_bits |= (NOVA_DIRTY_ALPHA_TEST | NOVA_DIRTY_EARLY_DEPTH);
@@ -230,6 +270,7 @@ void glCullFace(GLenum mode) {
         gl_set_error(GL_INVALID_ENUM);
         return;
     }
+    if (g.cull_face_mode == mode) return;
     g.cull_face_mode = mode;
     g.state_dirty_bits |= NOVA_DIRTY_CULLING;
 }
@@ -239,15 +280,21 @@ void glFrontFace(GLenum mode) {
         gl_set_error(GL_INVALID_ENUM);
         return;
     }
+    if (g.front_face == mode) return;
     g.front_face = mode;
     g.state_dirty_bits |= NOVA_DIRTY_CULLING;
 }
 
 void glColorMask(GLboolean r, GLboolean g_, GLboolean b, GLboolean a) {
-    g.color_mask_r = r;
-    g.color_mask_g = g_;
-    g.color_mask_b = b;
-    g.color_mask_a = a;
+    GLboolean nr = r ? GL_TRUE : GL_FALSE, ng = g_ ? GL_TRUE : GL_FALSE;
+    GLboolean nb = b ? GL_TRUE : GL_FALSE, na = a ? GL_TRUE : GL_FALSE;
+    if (g.color_mask_r == nr && g.color_mask_g == ng &&
+        g.color_mask_b == nb && g.color_mask_a == na)
+        return;
+    g.color_mask_r = nr;
+    g.color_mask_g = ng;
+    g.color_mask_b = nb;
+    g.color_mask_a = na;
     g.state_dirty_bits |= NOVA_DIRTY_DEPTH_TEST;
 }
 
@@ -259,6 +306,11 @@ void glShadeModel(GLenum mode) {
 }
 
 void glPolygonOffset(GLfloat factor, GLfloat units) {
+    /* Redundant-set filter: PD's r_set_depth_mode re-sends the same offset per
+     * ZMODE between batched draws — the unconditional flush here used to break
+     * every clipspace batch run for a no-op re-emit. */
+    if (g.polygon_offset_factor == factor && g.polygon_offset_units == units)
+        return;
     nova_batch_flush();   /* apply_depth_map changes the depth bias for later draws */
     g.polygon_offset_factor = factor;
     g.polygon_offset_units = units;
@@ -285,10 +337,7 @@ void glPolygonMode(GLenum face, GLenum mode) {
 
 
 void glDepthRange(GLclampd near_val, GLclampd far_val) {
-    nova_batch_flush();   /* apply_depth_map changes depth state for later draws */
-    g.depth_near = clampf((GLfloat) near_val, 0.0f, 1.0f);
-    g.depth_far = clampf((GLfloat) far_val, 0.0f, 1.0f);
-    apply_depth_map();
+    glDepthRangef((GLclampf) near_val, (GLclampf) far_val);
 }
 
 void glClipPlane(GLenum plane, const GLdouble *equation) {
@@ -329,6 +378,8 @@ void glStencilOp(GLenum fail, GLenum zfail, GLenum zpass) {
 void glStencilFunc(GLenum func, GLint ref, GLuint mask) {
     /* Spec: bad func is GL_INVALID_ENUM with no state change / no GPU write. */
     if (!is_valid_cmp_func(func)) { gl_set_error(GL_INVALID_ENUM); return; }
+    if (g.stencil_func == func && g.stencil_ref == ref && g.stencil_mask == mask)
+        return; /* skip the eager GPU write */
     g.stencil_func = func;
     g.gpu_stencil_func = stencil_func_to_gpu(func);
     g.stencil_ref  = ref;
@@ -338,6 +389,7 @@ void glStencilFunc(GLenum func, GLint ref, GLuint mask) {
 }
 
 void glStencilMask(GLuint mask) {
+    if (g.stencil_write_mask == mask) return;
     g.stencil_write_mask = mask;
     C3D_StencilTest(g.stencil_test_enabled, stencil_func_to_gpu(g.stencil_func),
                     g.stencil_ref, (u8)g.stencil_mask, (u8)mask);
@@ -347,6 +399,9 @@ void glStencilOp(GLenum fail, GLenum zfail, GLenum zpass) {
     if (!is_valid_stencil_op(fail) || !is_valid_stencil_op(zfail) || !is_valid_stencil_op(zpass)) {
         gl_set_error(GL_INVALID_ENUM); return;
     }
+    if (g.stencil_op_fail == fail && g.stencil_op_zfail == zfail &&
+        g.stencil_op_zpass == zpass)
+        return;
     g.stencil_op_fail  = fail;
     g.stencil_op_zfail = zfail;
     g.stencil_op_zpass = zpass;
