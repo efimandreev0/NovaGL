@@ -877,9 +877,29 @@ void apply_depth_map(void) {
 
     /* Polygon-offset: positive `units` in GL means "push polygons toward
      * the FAR plane". In PICA's inverted-depth buffer, far = small value,
-     * so we SUBTRACT (was += before, pushing the wrong direction). */
+     * so we SUBTRACT (was += before, pushing the wrong direction).
+     *
+     * Magnitude follows the DMP GLES2 driver exactly: one `unit` = one LSB
+     * of the bound depth buffer (units/16777215 for D24, units/65535 for
+     * D16 — their statevalidator's IF_GL_TRI_OFFSET block). `factor`
+     * (slope scale) has no PICA equivalent; DMP stores and ignores it, we
+     * do the same. The old 0.0001f-per-unit guess was ~1700 D24 LSBs per
+     * unit — glPolygonOffset(-4,-4)-style decal calls pulled geometry
+     * whole percents of the depth range forward (through walls / punched
+     * holes). Ports that tuned against the old behaviour can restore a
+     * multiplier with -DNOVAGL_POLYGON_OFFSET_UNITS_SCALE=<float>. */
     if (g.polygon_offset_fill_enabled) {
-        offset -= (g.polygon_offset_units * 0.0001f);
+#ifndef NOVAGL_POLYGON_OFFSET_UNITS_SCALE
+#define NOVAGL_POLYGON_OFFSET_UNITS_SCALE 1.0f
+#endif
+#ifdef NOVAGL_FBO_DEPTH24_STENCIL8
+        const float depth_lsb = 1.0f / 16777215.0f; /* all targets D24(+S8) */
+#else
+        /* Screen targets are D24S8; NovaGL FBOs default to DEPTH16. */
+        const float depth_lsb = (g.bound_fbo != 0) ? (1.0f / 65535.0f)
+                                                   : (1.0f / 16777215.0f);
+#endif
+        offset -= g.polygon_offset_units * depth_lsb * NOVAGL_POLYGON_OFFSET_UNITS_SCALE;
     }
 
     C3D_DepthMap(true, scale, offset);
@@ -1310,11 +1330,25 @@ void apply_gpu_state(void) {
 
     if (g.state_dirty_bits & NOVA_DIRTY_CULLING) {
         if (g.cull_face_enabled) {
+            /* GL→PICA mapping verified against the DMP GLES2 driver:
+             * their register value = ((cullFace==GL_FRONT) ^ (frontFace==GL_CCW)) ? 2 : 1
+             * with 1 = GPU_CULL_FRONT_CCW, 2 = GPU_CULL_BACK_CCW — identical
+             * to this table for all combinations. */
+            int ccw = (g.front_face == GL_CCW);
+#ifdef NOVAGL_FBO_FLIP_CULL
+            /* Diagnostic (default off): invert the winding sense for FBO
+             * passes. If FBO-rendered content turns out y-mirrored relative
+             * to GL (see the blit/copy orientation conventions), screen-space
+             * winding mirrors with it and culling inverts in FBO passes only.
+             * Build with -DNOVAGL_FBO_FLIP_CULL=1 to test that hypothesis on
+             * hardware (e.g. OpenMW water reflection culling). */
+            if (g.bound_fbo != 0) ccw = !ccw;
+#endif
             GPU_CULLMODE cull;
             if (g.cull_face_mode == GL_FRONT || g.cull_face_mode == GL_FRONT_AND_BACK)
-                cull = (g.front_face == GL_CCW) ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW;
+                cull = ccw ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW;
             else
-                cull = (g.front_face == GL_CCW) ? GPU_CULL_BACK_CCW : GPU_CULL_FRONT_CCW;
+                cull = ccw ? GPU_CULL_BACK_CCW : GPU_CULL_FRONT_CCW;
             C3D_CullFace(cull);
         } else {
             C3D_CullFace(GPU_CULL_NONE);
@@ -1357,6 +1391,14 @@ void apply_gpu_state(void) {
             }
         }
 
+        if (g.gas_shading_active) {
+            /* GAS shading pass (src/gas.c): the fog/gas unit reads the
+             * accumulated density and shades it through the gas colour LUT.
+             * Overrides GL fog while active — they share the hardware unit. */
+            C3D_FogGasMode(GPU_GAS,
+                           g.gas_density_src ? GPU_DEPTH_DENSITY : GPU_PLAIN_DENSITY,
+                           false);
+        } else
 #ifdef NOVAGL_DISABLE_FOG_LUT
         if (0) {
 #else
@@ -1552,6 +1594,29 @@ tev_done:;
             }
         } else {
             s_last_tex_bound[unit] = 0xFFFFFFFFu;
+        }
+    }
+
+    /* --- 7. RAW-hazard bookkeeping for FBO rendering -----------------------
+     * Every draw about to be issued lands in the CURRENT target. If that's an
+     * FBO, its colour texture must be flagged so a later draw that SAMPLES it
+     * gets the C3D_FrameSplit above (PICA's texture unit has no coherence
+     * with colour-buffer writes queued in the same command list — sampling
+     * without the split reads stale VRAM). This used to be set only in the
+     * PTC zero-copy fast path; every other route into an FBO (the clipspace
+     * batcher = PD's ImageRectangle blur blits!, multistream, the generic
+     * gather path, immediate mode) never flagged it — the menu-blur backdrop
+     * sampled un-resolved memory and came back black/garbage. apply_gpu_state
+     * runs exactly once per draw/batch-run, so this covers every path. */
+    {
+        /* Screen draws (bound_fbo==0) write the app surface, which is
+         * sampleable through its alias slot (app_screen_tex_id — PD's
+         * screen-as-texture scope/distortion path). It needs the same flag. */
+        GLuint ctex = (g.bound_fbo != 0 && g.bound_fbo < NOVA_MAX_FBOS)
+                          ? g.fbos[g.bound_fbo].color_tex_id
+                          : g.app_screen_tex_id;
+        if (ctex > 0 && ctex < NOVA_MAX_TEXTURES) {
+            g.textures[ctex].written_pending_split = 1;
         }
     }
 }

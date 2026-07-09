@@ -119,6 +119,16 @@ typedef struct {
     int generate_mipmap;   // GL_GENERATE_MIPMAP was set
     int max_level;         // GL_TEXTURE_MAX_LEVEL, -1 = not set
     int has_mipmap;        // real C3D_Tex have mips or no
+    /* Which pyramid levels hold REAL data (bit N = level N uploaded/generated).
+     * Manual glTexImage2D(level>0) chains fill this incrementally; LOD is
+     * clamped to the highest CONTIGUOUS defined level so PICA never samples an
+     * uninitialised level (the DMP driver's numLevels, as a mask). 0 = legacy
+     * paths that didn't track it — treated as "trust tex->maxLevel". */
+    uint16_t mip_uploaded_mask;
+    /* GL_TEXTURE_LOD_BIAS (EXT_texture_lod_bias). The DMP driver exposes this
+     * per-texture (fixed 5.8 in the LOD_BIAS register); ours feeds
+     * C3D_TexSetLodBias. Negative sharpens (later mip switch). */
+    float lod_bias;
 
     /* Cube-map support (GL_TEXTURE_CUBE_MAP). When is_cube is set, `tex` was
      * created with C3D_TexInitCube and its 6 face buffers live in `cube`
@@ -128,6 +138,14 @@ typedef struct {
     int is_cube;
     C3D_TexCube cube;
     int face_loaded[6];
+
+    /* Runtime content-addressed .nsw store (texture.c "[ Runtime texture
+     * cache ]"). rt_last_hash remembers the content hash of the previous
+     * real-pixel glTexImage2D on this slot; a re-definition with different
+     * bytes marks the slot volatile (video/stream) so it is never hashed or
+     * stored again. Both reset with the slot memset in glGenTextures. */
+    uint32_t rt_last_hash;
+    uint8_t rt_volatile;
 } TexSlot;
 
 typedef struct {
@@ -450,6 +468,16 @@ extern struct NovaState {
     float fog_color[4];
     C3D_FogLut fog_lut;
     int fog_dirty;
+
+    /* PICA hardware GAS (volumetric smoke) — see src/gas.c. gas_shading_active
+     * makes apply_gpu_state's fog block program the fog/gas unit in GAS mode
+     * (fog and gas share the unit, mutually exclusive). gas_lut lives here
+     * because C3D_GasLutBind keeps the pointer until the next draw flush. */
+    int gas_acc_active;
+    int gas_shading_active;
+    int gas_density_src;      /* 0 = GPU_PLAIN_DENSITY, 1 = GPU_DEPTH_DENSITY */
+    float gas_delta_z;
+    C3D_GasLut gas_lut;
 
     float clear_r, clear_g, clear_b, clear_a;
     float clear_depth;

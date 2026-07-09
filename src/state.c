@@ -544,8 +544,15 @@ const GLubyte *glGetString(GLenum name) {
     if (name == GL_EXTENSIONS)
         /* GL_ARB_vertex_buffer_object: OSG gates its VBO path on the ARB
          * name specifically — without it every osg::Geometry draws through
-         * client arrays (tens of MB per frame through the vertex rings). */
-        return (const GLubyte *) "GL_ARB_vertex_buffer_object GL_OES_vertex_buffer_object GL_OES_matrix_palette";
+         * client arrays (tens of MB per frame through the vertex rings).
+         * GL_SGIS_generate_mipmap: OSG's hardware-mipmap gate — with it, images
+         * without precomputed mips get GL_GENERATE_MIPMAP (which NovaGL
+         * implements) instead of no mips at all. Manual per-level uploads are
+         * ALSO accepted now (tex_image_manual_mip), covering images that ship
+         * their own chains. GL_EXT_texture_lod_bias: GL_TEXTURE_LOD_BIAS is a
+         * real per-texture PICA register (see apply_slot_params_to_tex). */
+        return (const GLubyte *) "GL_ARB_vertex_buffer_object GL_OES_vertex_buffer_object "
+                                 "GL_OES_matrix_palette GL_SGIS_generate_mipmap GL_EXT_texture_lod_bias";
     /* Spec: an unaccepted name is GL_INVALID_ENUM and the return value is NULL
      * (not an empty string — callers strlen/strstr the result). */
     gl_set_error(GL_INVALID_ENUM);

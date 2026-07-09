@@ -186,6 +186,13 @@ void glClear(GLbitfield mask) {
              * on-chip early-depth buffer — reset it too (see nova_clear_early_depth). */
             if (bits & C3D_CLEAR_DEPTH) nova_clear_early_depth();
         }
+        /* Clearing an FBO writes its colour texture — flag the RAW hazard so
+         * a later sample of it splits first (same rule as draws, utils.c §7). */
+        if ((bits & C3D_CLEAR_COLOR) && g.bound_fbo != 0 && g.bound_fbo < NOVA_MAX_FBOS) {
+            GLuint ctex = g.fbos[g.bound_fbo].color_tex_id;
+            if (ctex > 0 && ctex < NOVA_MAX_TEXTURES)
+                g.textures[ctex].written_pending_split = 1;
+        }
     }
 }
 

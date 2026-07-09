@@ -37,6 +37,7 @@ add_library(NovaGL STATIC
         current.c
         draw.c
         fog.c
+        gas.c
         framebuffer.c
         display_list.c
         utils.c
@@ -82,6 +83,18 @@ endif ()
 option(NOVAGL_DRAW_SPEEDHACK "Tighter vertex-ring alignment + trust caller pointers" OFF)
 if (NOVAGL_DRAW_SPEEDHACK)
     target_compile_definitions(NovaGL PRIVATE NOVAGL_DRAW_SPEEDHACK=1)
+endif ()
+
+# GL-spec light spaces: transform glLight(GL_POSITION / GL_SPOT_DIRECTION) by
+# the CURRENT modelview into eye space at call time. The lighting vertex
+# shader outputs eye-space normals, so the HW fragment-lighting unit needs
+# eye-space light vectors too — without this, hosts that rely on the spec
+# behaviour (OSG/OpenMW set lights with the view matrix loaded) get a sun
+# that rotates with the camera and point lights in the wrong place. Default
+# OFF for the legacy raw-storage behaviour older ports were tuned against.
+option(NOVAGL_GL_LIGHT_EYE_SPACE "Spec-correct modelview transform of GL light positions" OFF)
+if (NOVAGL_GL_LIGHT_EYE_SPACE)
+    target_compile_definitions(NovaGL PRIVATE NOVAGL_GL_LIGHT_EYE_SPACE=1)
 endif ()
 
 # Non-blocking frame submission. Now an alias for double-buffering

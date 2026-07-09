@@ -658,6 +658,31 @@ void novaSetEarlyZEnabled(int enabled);
  * than they save. 0 disables (default). Safe to change at any time. */
 void novaSetAutoSplitDraws(int draws);
 
+/* ------------------------------------------------------------------------
+ * PICA200 hardware GAS — volumetric smoke (GL_DMP_gas port, src/gas.c)
+ * ------------------------------------------------------------------------
+ * Two-pass hardware smoke. Pass 1: render smoke geometry into an RGBA8 FBO
+ * between novaGasBeginAccumulation()/novaGasEndAccumulation() — the GPU
+ * accumulates per-pixel density instead of colour. Pass 2: bind that FBO's
+ * texture (GL_REPLACE), call novaGasShading(1, ...), draw a fullscreen quad
+ * with blending — the fog/gas unit converts density to colour through the
+ * 9-point LUT. See the worked example at the top of src/gas.c.
+ *
+ * REAL HARDWARE ONLY: no emulator implements the PICA gas unit (Citra
+ * renders nothing for fog mode 7). Gas shading overrides GL_FOG while
+ * active (they share the hardware unit); disabling restores fog state. */
+void novaGasBeginAccumulation(void);
+void novaGasEndAccumulation(void);
+void novaGasDeltaZ(float dz);                  /* depth attenuation slope (default 1.0) */
+void novaGasAccMax(float max_density);         /* manual density normalisation */
+void novaGasAttenuation(float attn);
+void novaGasLightPlanar(float min, float max, float attn);
+void novaGasLightView(float min, float max, float attn);
+void novaGasLightDirection(float dotp);
+void novaGasLutInput(int use_light_factor);    /* 0 = density, 1 = light factor */
+void novaGasColorLut(const unsigned int rgb[9]); /* 9 packed 0x00BBGGRR stops */
+void novaGasShading(int enabled, int depth_density); /* fog unit -> GAS mode */
+
 void nova_fini(void);
 
 void nova_set_render_target(int target_mode); // 0 = Top Left, 1 = Top Right, 2 = Bottom

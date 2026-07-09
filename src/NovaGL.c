@@ -530,6 +530,12 @@ void nova_init_ex(int cmd_buf_size, int client_array_buf_size, int index_buf_siz
     g.fog_start = 0.0f;
     g.fog_end = 1.0f;
     g.fog_density = 1.0f;
+    /* GAS defaults (src/gas.c). Delta-Z 1.0 matches the DMP driver's
+     * GAS_DELTAZ_DEPTH power-on value (0x100 in 16.8 fixed point). */
+    g.gas_acc_active = 0;
+    g.gas_shading_active = 0;
+    g.gas_density_src = 0;
+    g.gas_delta_z = 1.0f;
     g.fog_color[0] = g.fog_color[1] = g.fog_color[2] = 0.0f;
     g.fog_color[3] = 1.0f;
     g.fog_dirty = 1;

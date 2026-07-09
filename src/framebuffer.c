@@ -234,6 +234,11 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
     g.vp_applied_fbo0 = (g.bound_fbo == 0);
     g.vp_applied_valid = 1;
 
+    /* The polygon-offset LSB depends on the bound target's depth format
+     * (screen = D24S8, default FBOs = D16) — re-emit the depth map so the
+     * bias stays one-LSB-exact on whichever buffer we now draw into. */
+    apply_depth_map();
+
     /* OPT-IN WORKAROUND (-DNOVAGL_FBO_RESET_SCISSOR=1, default OFF): reset the
      * scissor to the FULL FBO when binding an offscreen target.
      *
@@ -260,6 +265,10 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
     // Форсируем обновление матриц, чтобы снялась/оделась матрица 'tilt'
     g.matrices_dirty = 1;
     g.state_dirty_bits |= NOVA_DIRTY_SCISSOR;
+#ifdef NOVAGL_FBO_FLIP_CULL
+    /* The winding sense depends on the bound target under this diagnostic. */
+    g.state_dirty_bits |= NOVA_DIRTY_CULLING;
+#endif
 }
 
 GLuint novaGetScreenTextureId(void) { return g.app_screen_tex_id; }
@@ -1170,11 +1179,30 @@ int novaBlitTargetToFBO(GLuint src_fbo_id, GLuint dst_fbo_id)
         { 0.0f, 0.0f },
     };
     if (src_is_screen && !dst_is_screen) {
-        /* corner (x,y) → uv: u=(y+1)/2·su, v=(1−x)/2·sv (transpose). */
+        /* Transpose (sideways screen → landscape FBO), calibrated EMPIRICALLY
+         * against PD's bondview/menu-blur overlays on Citra (2026-07-09).
+         * Full calibration table — all four sign combinations were observed
+         * or derived, they form a consistent flip group:
+         *   u=(1+y)/2·su, v=(1−x)/2·sv  → vertical mirror   (original; was
+         *                                  reported as "180°")
+         *   u=(1−y)/2·su, v=(1+x)/2·sv  → horizontal mirror (attempt 1;
+         *                                  "flipped about Y")
+         *   u=(1+y)/2·su, v=(1+x)/2·sv  → true 180° rotation (attempt 2;
+         *                                  upside-down face overlay)
+         *   u=(1−y)/2·su, v=(1−x)/2·sv  → CORRECT (current)
+         * Do not re-derive from theory — trust this table. The original
+         * mapping stays available via -DNOVAGL_BLIT_CAPTURE_NO_ROT180=1. */
+#ifdef NOVAGL_BLIT_CAPTURE_NO_ROT180
         uv[0][0] = 0.0f; uv[0][1] = sv;
         uv[1][0] = 0.0f; uv[1][1] = 0.0f;
         uv[2][0] = su;   uv[2][1] = 0.0f;
         uv[3][0] = su;   uv[3][1] = sv;
+#else
+        uv[0][0] = su;   uv[0][1] = sv;
+        uv[1][0] = su;   uv[1][1] = 0.0f;
+        uv[2][0] = 0.0f; uv[2][1] = 0.0f;
+        uv[3][0] = 0.0f; uv[3][1] = sv;
+#endif
     }
 
     int ok = nova_gpu_blit_quad(bind_tex, uv, dst_tgt,

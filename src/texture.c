@@ -18,6 +18,8 @@ static inline GLuint active_bound_texture(void);
 
 static void apply_slot_params_to_tex(C3D_Tex *tex, const TexSlot *slot);
 
+static int row_stride_bytes(int width, int bytes_per_pixel, int alignment);
+
 // ===[ Persistent texture cache (see NovaGL.h for API contract) ]===
 //
 // Cache file layout (little-endian):
@@ -40,8 +42,20 @@ static void apply_slot_params_to_tex(C3D_Tex *tex, const TexSlot *slot);
  * v3: adds mip_levels — payloads may carry a full pre-swizzled mip chain
  * (levels stored back-to-back in citro3d's contiguous layout, each halving
  * down to no smaller than 8px). Offline preprocessors generate these so the
- * console never decodes, downscales, mips or swizzles anything at load. */
-#define NOVA_TEXCACHE_VERSION  3u
+ * console never decodes, downscales, mips or swizzles anything at load.
+ * v4: two breaking fixes at once.
+ *   - Orientation: v3 payloads were baked bottom-up; OpenMW's world path
+ *     (OSG dds_flip) + NovaGL's flipping CPU swizzler cancel out, so correct
+ *     PICA memory is TOP-DOWN (row 0 = top row). Every v3 file rendered
+ *     upside down and must be rejected.
+ *   - Adds the PICA's native compressed formats: GPU_ETC1 (4bpp) and
+ *     GPU_ETC1A4 (8bpp) — 4-8x smaller than the RGBA8 bake, which is what
+ *     lets the whole working set live in VRAM + a small linear slice.
+ *     Layout: 8x8 tiles row-major, 4x4 blocks Morton-ordered inside a tile,
+ *     each 64-bit ETC1 word little-endian; ETC1A4 carries an 8-byte alpha
+ *     word (nibble = x*4+y) before each color word. Uncompressed fmts stay
+ *     legal in v4 — the runtime store writes those. */
+#define NOVA_TEXCACHE_VERSION  4u
 
 typedef struct {
     uint32_t magic;
@@ -57,13 +71,22 @@ typedef struct {
     uint32_t mip_levels; // >= 1
 } NovaTexCacheHeader;
 
+/* Bytes of one w x h mip level. ETC1 packs 4 bits per texel, ETC1A4 packs 8;
+ * everything else is gpu_texfmt_bpp() whole bytes. */
+static size_t nova_texcache_level_size(int w, int h, GPU_TEXCOLOR fmt) {
+    size_t texels = (size_t) w * (size_t) h;
+    if (fmt == GPU_ETC1) return texels / 2;
+    if (fmt == GPU_ETC1A4) return texels;
+    return texels * (size_t) gpu_texfmt_bpp(fmt);
+}
+
 /* Total bytes of a pot_w x pot_h texture with `mips` levels (each level
  * halves, preprocessors keep every level >= 8px so the chain is valid). */
 static size_t nova_texcache_total_size(int pot_w, int pot_h, GPU_TEXCOLOR fmt, uint32_t mips) {
     size_t total = 0;
     int w = pot_w, h = pot_h;
     for (uint32_t l = 0; l < mips; l++) {
-        total += (size_t) w * (size_t) h * (size_t) gpu_texfmt_bpp(fmt);
+        total += nova_texcache_level_size(w, h, fmt);
         w >>= 1;
         h >>= 1;
     }
@@ -153,10 +176,10 @@ int nova_texture_cache_has(uint32_t hash) {
     return hmgeti(g_cache_index, hash) >= 0;
 }
 
-int nova_texture_cache_load(uint32_t hash, int *out_orig_w, int *out_orig_h) {
-    char path[320];
-    if (!nova_tex_cache_path(path, sizeof(path), hash)) return 0;
-
+/* Stream one .nsw file into the currently-bound slot. Shared by the offline
+ * path-hash cache (nova_texture_cache_load) and the runtime content-hash
+ * store (nova_rt_try_load). */
+static int nova_texcache_load_path(const char *path, int *out_orig_w, int *out_orig_h) {
     GLuint bound = active_bound_texture();
     if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return 0;
     TexSlot *slot = &g.textures[bound];
@@ -192,6 +215,10 @@ int nova_texture_cache_load(uint32_t hash, int *out_orig_w, int *out_orig_h) {
         return 0;
     }
 
+    if (hdr.fmt > (uint32_t) GPU_ETC1A4 || hdr.fmt == (uint32_t) GPU_HILO8) {
+        fclose(f);
+        return 0;
+    }
     GPU_TEXCOLOR fmt = (GPU_TEXCOLOR) hdr.fmt;
     size_t expected = nova_texcache_total_size((int) hdr.pot_w, (int) hdr.pot_h, fmt, hdr.mip_levels);
     if (hdr.data_size != expected) {
@@ -245,6 +272,7 @@ int nova_texture_cache_load(uint32_t hash, int *out_orig_w, int *out_orig_h) {
     slot->orig_width = (int) hdr.orig_w;
     slot->orig_height = (int) hdr.orig_h;
     slot->has_mipmap = hdr.mip_levels > 1;
+    slot->mip_uploaded_mask = (uint16_t) ((1u << hdr.mip_levels) - 1u);
     slot->is_solid_optimized = (slot->pot_w == 8 && slot->pot_h == 8 && (
                                     slot->orig_width > 8 || slot->orig_height > 8));
 
@@ -277,6 +305,12 @@ int nova_texture_cache_load(uint32_t hash, int *out_orig_w, int *out_orig_h) {
     return 1;
 }
 
+int nova_texture_cache_load(uint32_t hash, int *out_orig_w, int *out_orig_h) {
+    char path[320];
+    if (!nova_tex_cache_path(path, sizeof(path), hash)) return 0;
+    return nova_texcache_load_path(path, out_orig_w, out_orig_h);
+}
+
 int nova_texture_cache_peek(uint32_t hash, int *out_tgt_w, int *out_tgt_h, int *out_orig_w, int *out_orig_h) {
     char path[320];
     if (!nova_tex_cache_path(path, sizeof(path), hash)) return 0;
@@ -306,7 +340,7 @@ void nova_texture_cache_save(uint32_t hash) {
     char path[320];
     if (!nova_tex_cache_path(path, sizeof(path), hash)) return;
 
-    size_t data_size = (size_t) slot->pot_w * (size_t) slot->pot_h * (size_t) gpu_texfmt_bpp(slot->fmt);
+    size_t data_size = nova_texcache_level_size(slot->pot_w, slot->pot_h, slot->fmt);
 
     FILE *f = fopen(path, "wb");
     if (f == NULL) {
@@ -337,6 +371,246 @@ void nova_texture_cache_save(uint32_t hash) {
 
     build_cache_index();
     hmput(g_cache_index, hash, 1);
+}
+
+// ===[ Runtime content-addressed texture cache ]===
+//
+// Textures that reach glTexImage2D with real pixels (font atlases, images the
+// offline bake missed, mod content) are hashed by CONTENT (dims + format +
+// bytes) and served from / stored to <cache>/rt/<hash>.nsw. Serving skips the
+// decode-solid-scan-swizzle-mipgen pipeline AND gets the VRAM-first placement
+// of the .nsw loader. Stores are serialized on a low-priority worker thread
+// (core 2 on N3DS, falling back to core 1 / same-core) so SD write latency
+// never stalls the render thread; the blob is memcpy'd at enqueue time so the
+// slot can be freed or re-specified while the write is still queued.
+//
+// The offline path-hash namespace and this content-hash namespace are both
+// 32-bit FNV-1a — they live in SEPARATE directories so a cross-collision
+// can't serve the wrong file.
+
+#define NOVA_RT_QUEUE_CAP 8
+#define NOVA_RT_MAX_INFLIGHT_BYTES (2u * 1024u * 1024u)
+#define NOVA_RT_MAX_STORE_BYTES (2u * 1024u * 1024u)
+
+typedef struct {
+    char path[320];
+    void *blob;
+    uint32_t size;
+} NovaRtJob;
+
+static struct {
+    uint32_t key;
+    char value;
+} *g_rt_index = NULL;
+
+static int g_rt_index_built = 0;
+static LightLock g_rt_lock; /* guards g_rt_index, queue, bytes_inflight */
+static int g_rt_sync_ready = 0;
+static LightEvent g_rt_wake;
+static NovaRtJob g_rt_queue[NOVA_RT_QUEUE_CAP];
+static int g_rt_q_head = 0;
+static int g_rt_q_count = 0;
+static uint32_t g_rt_bytes_inflight = 0;
+static Thread g_rt_thread = NULL;
+static int g_rt_thread_tried = 0;
+
+static void nova_rt_sync_init(void) {
+    if (g_rt_sync_ready) return;
+    LightLock_Init(&g_rt_lock);
+    LightEvent_Init(&g_rt_wake, RESET_ONESHOT);
+    g_rt_sync_ready = 1;
+}
+
+static int nova_rt_path(char *buf, size_t bufSize, uint32_t hash) {
+    if (g_tex_cache_dir[0] == 0) return 0;
+    int n = snprintf(buf, bufSize, "%s/rt/%08x.nsw", g_tex_cache_dir, hash);
+    return (n > 0 && (size_t) n < bufSize);
+}
+
+/* Call with g_rt_lock held. */
+static void nova_rt_build_index(void) {
+    if (g_rt_index_built) return;
+    g_rt_index_built = 1;
+    if (g_tex_cache_dir[0] == 0) return;
+    char dir[300];
+    snprintf(dir, sizeof(dir), "%s/rt", g_tex_cache_dir);
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        uint32_t h;
+        if (strstr(ent->d_name, ".nsw") && sscanf(ent->d_name, "%08x.nsw", &h) == 1)
+            hmput(g_rt_index, h, 1);
+    }
+    closedir(d);
+}
+
+/* FNV-1a over the upload's identity: dimensions, format, unpack alignment,
+ * the mip request AND every source byte. Word-at-a-time keeps it ~4x faster
+ * than the byte loop on the sizes that matter (font atlases, 512x512 mods)
+ * while staying deterministic. */
+static uint32_t nova_rt_content_hash(int w, int h, GLenum format, GLenum type,
+                                     int alignment, int gen_mips, const void *pixels) {
+    uint32_t hsh = 2166136261u;
+#define NOVA_RT_MIX(v)                                                                                                 \
+    do {                                                                                                               \
+        hsh ^= (uint32_t) (v);                                                                                         \
+        hsh *= 16777619u;                                                                                              \
+    } while (0)
+    NOVA_RT_MIX(w);
+    NOVA_RT_MIX(h);
+    NOVA_RT_MIX(format);
+    NOVA_RT_MIX(type);
+    NOVA_RT_MIX(alignment);
+    NOVA_RT_MIX(gen_mips);
+
+    int bpp = 4;
+    if (type == GL_UNSIGNED_SHORT_4_4_4_4 || type == GL_UNSIGNED_SHORT_5_5_5_1 || type == GL_UNSIGNED_SHORT_5_6_5)
+        bpp = 2;
+    else if (format == GL_LUMINANCE_ALPHA && type == GL_UNSIGNED_BYTE) bpp = 2;
+    else if (format == GL_LUMINANCE || format == GL_ALPHA || format == GL_LUMINANCE_ALPHA4_NOVA) bpp = 1;
+    else if ((format == GL_RGB || format == GL_BGR) && type == GL_UNSIGNED_BYTE) bpp = 3;
+    size_t total = (size_t) row_stride_bytes(w, bpp, alignment) * (size_t) h;
+
+    const uint8_t *p = (const uint8_t *) pixels;
+    size_t i = 0;
+    if (((uintptr_t) p & 3u) == 0) {
+        const uint32_t *p32 = (const uint32_t *) p;
+        size_t n32 = total >> 2;
+        for (size_t k = 0; k < n32; k++) NOVA_RT_MIX(p32[k]);
+        i = n32 << 2;
+    }
+    for (; i < total; i++) NOVA_RT_MIX(p[i]);
+#undef NOVA_RT_MIX
+    return hsh;
+}
+
+static int nova_rt_try_load(uint32_t hash) {
+    if (g_tex_cache_dir[0] == 0) return 0;
+    nova_rt_sync_init();
+    LightLock_Lock(&g_rt_lock);
+    nova_rt_build_index();
+    int present = hmgeti(g_rt_index, hash) >= 0;
+    LightLock_Unlock(&g_rt_lock);
+    if (!present) return 0;
+    char path[336];
+    if (!nova_rt_path(path, sizeof(path), hash)) return 0;
+    if (nova_texcache_load_path(path, NULL, NULL)) return 1;
+    /* Corrupt/truncated entry: delete it and forget it so the normal upload
+     * path below re-converts and re-stores a good copy. */
+    remove(path);
+    LightLock_Lock(&g_rt_lock);
+    (void) hmdel(g_rt_index, hash);
+    LightLock_Unlock(&g_rt_lock);
+    return 0;
+}
+
+static void nova_rt_worker(void *arg) {
+    (void) arg;
+    for (;;) {
+        LightEvent_Wait(&g_rt_wake);
+        for (;;) {
+            LightLock_Lock(&g_rt_lock);
+            if (g_rt_q_count == 0) {
+                LightLock_Unlock(&g_rt_lock);
+                break;
+            }
+            NovaRtJob job = g_rt_queue[g_rt_q_head];
+            g_rt_q_head = (g_rt_q_head + 1) % NOVA_RT_QUEUE_CAP;
+            g_rt_q_count--;
+            LightLock_Unlock(&g_rt_lock);
+
+            FILE *f = fopen(job.path, "wb");
+            if (f) {
+                setvbuf(f, NULL, _IOFBF, 64 * 1024);
+                size_t wrote = fwrite(job.blob, 1, job.size, f);
+                fclose(f);
+                if (wrote != job.size) remove(job.path); /* no truncated cache entries */
+            }
+            free(job.blob);
+
+            LightLock_Lock(&g_rt_lock);
+            g_rt_bytes_inflight -= job.size;
+            LightLock_Unlock(&g_rt_lock);
+        }
+    }
+}
+
+static void nova_rt_ensure_worker(void) {
+    if (g_rt_thread_tried) return;
+    g_rt_thread_tried = 1;
+    char dir[300];
+    snprintf(dir, sizeof(dir), "%s/rt", g_tex_cache_dir);
+    nova_mkdir_p(dir);
+    /* Core 2 exists on New3DS only (and needs the exheader flag). Core 1 is
+     * deliberately NOT in the cascade: the syscore admits a single app
+     * thread and the host reserves it for the audio mixer. Fallback is
+     * "same core as GL, low priority". */
+    static const int cores[] = { 2, -2 };
+    for (size_t i = 0; i < sizeof(cores) / sizeof(cores[0]) && g_rt_thread == NULL; i++)
+        g_rt_thread = threadCreate(nova_rt_worker, NULL, 16 * 1024, 0x38, cores[i], true);
+    if (g_rt_thread == NULL)
+        printf("[NOVA] rt-cache: worker thread creation failed on every core\n");
+}
+
+static void nova_rt_enqueue_store(TexSlot *slot, uint32_t hash) {
+    if (g_tex_cache_dir[0] == 0 || !slot->allocated || slot->tex.data == NULL) return;
+    if (slot->is_cube || slot->is_vram) return;
+
+    uint32_t mips = slot->has_mipmap ? (uint32_t) slot->tex.maxLevel + 1u : 1u;
+    if (mips > 8) return;
+    size_t total = nova_texcache_total_size(slot->pot_w, slot->pot_h, slot->fmt, mips);
+    if (total == 0 || total > NOVA_RT_MAX_STORE_BYTES) return;
+
+    nova_rt_sync_init();
+    LightLock_Lock(&g_rt_lock);
+    nova_rt_build_index();
+    int give_up = hmgeti(g_rt_index, hash) >= 0 /* already stored (maybe by another slot) */
+                  || g_rt_q_count >= NOVA_RT_QUEUE_CAP
+                  || g_rt_bytes_inflight + (uint32_t) total > NOVA_RT_MAX_INFLIGHT_BYTES;
+    LightLock_Unlock(&g_rt_lock);
+    if (give_up) return;
+
+    size_t blob_size = sizeof(NovaTexCacheHeader) + total;
+    uint8_t *blob = (uint8_t *) malloc(blob_size);
+    if (!blob) return;
+
+    NovaTexCacheHeader hdr = {
+        .magic = NOVA_TEXCACHE_MAGIC,
+        .version = NOVA_TEXCACHE_VERSION,
+        .fmt = (uint32_t) slot->fmt,
+        .pot_w = (uint32_t) slot->pot_w,
+        .pot_h = (uint32_t) slot->pot_h,
+        .tgt_w = (uint32_t) slot->width,
+        .tgt_h = (uint32_t) slot->height,
+        .orig_w = (uint32_t) slot->orig_width,
+        .orig_h = (uint32_t) slot->orig_height,
+        .data_size = (uint32_t) total,
+        .mip_levels = mips,
+    };
+    memcpy(blob, &hdr, sizeof(hdr));
+    memcpy(blob + sizeof(hdr), slot->tex.data, total);
+
+    NovaRtJob job;
+    if (!nova_rt_path(job.path, sizeof(job.path), hash)) {
+        free(blob);
+        return;
+    }
+    job.blob = blob;
+    job.size = (uint32_t) blob_size;
+
+    LightLock_Lock(&g_rt_lock);
+    int tail = (g_rt_q_head + g_rt_q_count) % NOVA_RT_QUEUE_CAP;
+    g_rt_queue[tail] = job;
+    g_rt_q_count++;
+    g_rt_bytes_inflight += job.size;
+    /* Mark present immediately: suppresses duplicate stores of the same
+     * content from other slots while the write is still in the queue. */
+    hmput(g_rt_index, hash, 1);
+    LightLock_Unlock(&g_rt_lock);
+
+    nova_rt_ensure_worker();
+    LightEvent_Signal(&g_rt_wake);
 }
 
 static inline GLuint active_bound_texture(void) {
@@ -399,9 +673,18 @@ static void apply_slot_params_to_tex(C3D_Tex *tex, const TexSlot *slot) {
     int max_lod = real_max;
     if (slot->has_mipmap && slot->max_level >= 0 && slot->max_level < max_lod)
         max_lod = slot->max_level;
+    /* Manual mip chains (glTexImage2D level>0) may still be mid-upload: clamp
+     * to the highest CONTIGUOUS defined level so an un-uploaded level is never
+     * sampled (same rule as the DMP driver's numLevels-1). mask==0 = legacy
+     * path that didn't track uploads — trust the physical pyramid as before. */
+    if (slot->has_mipmap && slot->mip_uploaded_mask) {
+        int defined = 0;
+        while (slot->mip_uploaded_mask & (1u << (defined + 1))) defined++;
+        if (defined < max_lod) max_lod = defined;
+    }
     if (max_lod < 0) max_lod = 0;
     if (max_lod > 7) max_lod = 7;
-    C3D_TexSetLodBias(tex, 0.0f);
+    C3D_TexSetLodBias(tex, slot->lod_bias);
     // tex->lodParam: bits  0..7 = bias, 16..19 = maxLevel, 24..27 = minLevel.
     // citro3d has no public setter for max/min level on a non-mipmap-init'd
     // texture, so patch the field directly.
@@ -545,6 +828,7 @@ int nova_texture_make_vram_target(GLuint texture) {
             slot->tex = newtex;
         }
         slot->has_mipmap = 0;
+        slot->mip_uploaded_mask = 1;
         /* is_vram doubles as "storage is render-target-capable — never re-home
          * it again"; set it for the linear fallback too so repeat attaches
          * don't re-zero the texture every call. */
@@ -560,6 +844,7 @@ int nova_texture_make_vram_target(GLuint texture) {
     slot->tex = newtex;
     slot->is_vram = 1;
     slot->has_mipmap = 0; // VRAM render targets are single-level
+    slot->mip_uploaded_mask = 1;
     apply_slot_params_to_tex(&slot->tex, slot);
 
     if (slot->tex.data && slot->tex.size > 0) {
@@ -577,6 +862,8 @@ static void init_texture_defaults(TexSlot *slot) {
     slot->generate_mipmap = 0;
     slot->max_level = -1; // -1 = unset (no cap)
     slot->has_mipmap = 0;
+    slot->mip_uploaded_mask = 0;
+    slot->lod_bias = 0.0f;
 }
 
 /* Used only by the opt-in NOVAGL_SOLID_TEX_OPT path; tagged unused so the
@@ -1213,6 +1500,77 @@ static int tex_check_format_type(GLenum format, GLenum type) {
 #endif
 }
 
+/* ── Manual mip-chain uploads (glTexImage2D with level > 0) ────────────────
+ * The DMP GLES2 driver accepts per-level uploads and tracks numLevels; that's
+ * how OSG/OpenMW, gluBuild2DMipmaps and most desktop ports provide mipmaps
+ * (they generate them on the CPU and upload every level). NovaGL used to
+ * accept-and-ignore these, so such ports silently lost mipmapping entirely
+ * (LOD pinned to 0 → shimmer/aliasing at distance).
+ *
+ * Strategy: level 0 allocates flat as before (we can't know a chain is
+ * coming). The FIRST accepted level>0 upload promotes the storage to a full
+ * C3D mip pyramid, carrying level 0 over; each level is converted/swizzled
+ * with the normal upload machinery into its pyramid slice. LOD stays clamped
+ * to the highest contiguous uploaded level (see apply_slot_params_to_tex), so
+ * a partial chain never samples uninitialised memory. */
+static void tex_image_manual_mip(GLuint bound, TexSlot *slot, GLint level, GLsizei width, GLsizei height,
+                                 GLenum format, GLenum type, const GLvoid *pixels) {
+    if (!slot->allocated || slot->is_cube || slot->is_solid_optimized || slot->is_vram) return;
+    if (level > 7 || !pixels) return;
+    if (!tex_check_format_type(format, type)) return;
+    if (gl_to_gpu_texfmt(format, type) != slot->fmt) return; /* per-level format switch: unsupported */
+    if (slot->fmt == GPU_ETC1 || slot->fmt == GPU_ETC1A4) return; /* compressed chains: other path */
+
+    /* The chain must line up with the POT pyramid NovaGL actually allocated.
+     * When level 0 was NPOT-padded or >1024-downscaled the app's level dims
+     * won't match — keep base-only rather than corrupt the pyramid. */
+    int ew = slot->pot_w >> level;
+    int eh = slot->pot_h >> level;
+    if (ew < 8 || eh < 8) return;              /* PICA's 8px level floor */
+    if (width != ew || height != eh) return;
+
+    if (!slot->has_mipmap) {
+        /* Promote flat storage to a mip pyramid, preserving level 0. */
+        C3D_Tex newtex;
+        memset(&newtex, 0, sizeof(newtex));
+        if (!C3D_TexInitMipmap(&newtex, (u16) slot->pot_w, (u16) slot->pot_h, slot->fmt)) {
+            gl_set_error(GL_OUT_OF_MEMORY);
+            return;
+        }
+        size_t l0_bytes = (size_t) slot->pot_w * (size_t) slot->pot_h * (size_t) gpu_texfmt_bpp(slot->fmt);
+        memcpy(newtex.data, slot->tex.data, l0_bytes);
+        GSPGPU_FlushDataCache(newtex.data, (u32) l0_bytes);
+        /* Old flat storage may still be referenced by this frame's queued
+         * draws — orphan it (nova_tex_gc_push copies the struct and zeroes
+         * slot->tex), then install the pyramid. */
+        nova_tex_gc_push(&slot->tex);
+        slot->tex = newtex;
+        slot->has_mipmap = 1;
+        if (slot->mip_uploaded_mask == 0) slot->mip_uploaded_mask = 1; /* level 0 is live */
+        /* The C3D_Tex data pointer changed under the same id — drop the
+         * per-unit bind skip-cache or the GPU keeps sampling the orphan. */
+        nova_invalidate_tex_bind(bound);
+    }
+
+    /* Convert+swizzle this level into its pyramid slice. upload_texture_pixels
+     * only touches tex->data / tex->size, so a shim C3D_Tex windowed onto the
+     * level region reuses the whole machinery (incl. the C3D_TexFlush range). */
+    u32 lsize = 0;
+    void *lptr = C3D_TexGetImagePtr(&slot->tex, slot->tex.data, level, &lsize);
+    if (!lptr) return;
+    C3D_Tex shim = slot->tex;
+    shim.data = lptr;
+    shim.size = lsize;
+    shim.width = (u16) ew;
+    shim.height = (u16) eh;
+    upload_texture_pixels(&shim, slot->fmt, ew, eh, pixels, width, height,
+                          0, 0, width, height, format, type, g.unpack_alignment);
+
+    slot->mip_uploaded_mask |= (uint16_t) (1u << level);
+    /* Extend the LOD window to cover the newly-contiguous levels. */
+    apply_slot_params_to_tex(&slot->tex, slot);
+}
+
 void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border,
                   GLenum format, GLenum type, const GLvoid *pixels) {
     /* Cube-map face targets route to the dedicated cube path. */
@@ -1260,13 +1618,13 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
         gl_set_error(GL_INVALID_VALUE);
         return;
     }
-    /* Manual mip uploads (level > 0): NovaGL stores only level 0 (mips are
-     * auto-generated via GL_GENERATE_MIPMAP / C3D_TexGenerateMipmap). Before
-     * this guard, a game uploading levels 1..N would repeatedly destroy and
-     * re-create level 0 with each smaller image. Accept-and-ignore is
-     * spec-tolerable here: LOD is clamped to 0 when no real mip chain exists
-     * (see apply_slot_params_to_tex), so sampling stays correct. */
+    /* Manual mip uploads (level > 0): route into the pyramid (DMP-driver
+     * parity — OSG/OpenMW and gluBuild2DMipmaps provide mips exactly this
+     * way). Falls back to accept-and-ignore when the chain can't line up
+     * with the allocated POT pyramid; LOD clamping keeps sampling correct
+     * either way. */
     if (level > 0) {
+        tex_image_manual_mip(bound, slot, level, width, height, format, type, pixels);
         return;
     }
     /* ES 1.1: internalformat must equal format (GL_INVALID_OPERATION
@@ -1291,6 +1649,29 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     if (width > 1024 || height > 1024) {
         gl_set_error(GL_INVALID_VALUE);
         return;
+    }
+#endif
+
+    /* Runtime content-addressed cache: hash the incoming pixels and serve a
+     * previously-converted .nsw if one exists — skips the solid scan, the
+     * Morton swizzle and mip generation, and places the texture VRAM-first.
+     * A slot whose content CHANGES between definitions (video frames,
+     * streaming atlases) is marked volatile after the first mismatch and
+     * never hashed again — one wasted hash+store, then zero overhead. */
+    uint32_t rt_hash = 0;
+#ifndef NOVAGL_NO_RT_TEXCACHE
+    if (pixels != NULL && !slot->rt_volatile && g_tex_cache_dir[0] != 0) {
+        rt_hash = nova_rt_content_hash(width, height, format, type, g.unpack_alignment,
+                                       slot->generate_mipmap, pixels);
+        if (slot->rt_last_hash != 0 && slot->rt_last_hash != rt_hash) {
+            slot->rt_volatile = 1;
+            slot->rt_last_hash = 0;
+            rt_hash = 0;
+        } else {
+            slot->rt_last_hash = rt_hash;
+        }
+        if (rt_hash != 0 && nova_rt_try_load(rt_hash))
+            return; /* logical/orig dims restored from the stored header */
     }
 #endif
 
@@ -1394,6 +1775,8 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
         slot->allocated = 1;
         slot->has_mipmap = want_mips;
     }
+    slot->mip_uploaded_mask = 1; /* base level defined below; grows via
+                                  * generation or manual level uploads */
 
     slot->pot_w = pot_w;
     slot->pot_h = pot_h;
@@ -1440,9 +1823,17 @@ void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei widt
     // Auto-generate mip levels 1..N for the freshly-uploaded level 0.
     if (slot->has_mipmap && !is_solid) {
         C3D_TexGenerateMipmap(&slot->tex, GPU_TEXFACE_2D);
+        slot->mip_uploaded_mask = (uint16_t) ((1u << (slot->tex.maxLevel + 1)) - 1u);
         // Re-apply filter/LOD: max_level may need to reflect the actual pyramid depth now.
         apply_slot_params_to_tex(&slot->tex, slot);
     }
+
+#ifndef NOVAGL_NO_RT_TEXCACHE
+    /* The converted texel data (level 0 + any generated mips) is final —
+     * persist it so the next boot skips this entire path. Async: memcpy'd
+     * blob, low-priority worker does the SD write. */
+    if (rt_hash != 0) nova_rt_enqueue_store(slot, rt_hash);
+#endif
 
     if (diag_idx >= 0) {
         printf("[NovaDiag] tex#%d settled: slot->{width=%d height=%d orig=%dx%d pot=%dx%d fmt=%d "
@@ -1768,6 +2159,11 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) {
             if (param < -1) { gl_set_error(GL_INVALID_VALUE); return; }
             slot->max_level = param;
             break;
+        case 0x8501: /* GL_TEXTURE_LOD_BIAS (EXT_texture_lod_bias) — integer path;
+                      * fractional biases come through glTexParameterf below. */
+            if (slot->lod_bias == (float) param) return;
+            slot->lod_bias = (float) param;
+            break;
         default:
             gl_set_error(GL_INVALID_ENUM);
             return;
@@ -1777,10 +2173,27 @@ void glTexParameteri(GLenum target, GLenum pname, GLint param) {
     apply_slot_params_to_tex(&slot->tex, slot);
 }
 
-void glTexParameterf(GLenum target, GLenum pname, GLfloat param) { glTexParameteri(target, pname, (GLint) param); }
+void glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
+    /* LOD bias is the one genuinely-float texture parameter — keep the
+     * fraction (PICA's register is fixed-point with 8 fractional bits). */
+    if (pname == 0x8501 /* GL_TEXTURE_LOD_BIAS */) {
+        if (target != GL_TEXTURE_2D && target != GL_TEXTURE_CUBE_MAP) {
+            gl_set_error(GL_INVALID_ENUM);
+            return;
+        }
+        GLuint bound = active_bound_texture();
+        if (bound == 0 || bound >= NOVA_MAX_TEXTURES) return;
+        TexSlot *slot = &g.textures[bound];
+        if (slot->lod_bias == param) return;
+        slot->lod_bias = param;
+        if (slot->allocated) apply_slot_params_to_tex(&slot->tex, slot);
+        return;
+    }
+    glTexParameteri(target, pname, (GLint) param);
+}
 
 void glTexParameterfv(GLenum target, GLenum pname, const GLfloat *params) {
-    if (params) glTexParameteri(target, pname, (GLint) params[0]);
+    if (params) glTexParameterf(target, pname, params[0]);
 }
 
 void glTexParameteriv(GLenum target, GLenum pname, const GLint *params) {
@@ -1798,6 +2211,7 @@ static GLint get_tex_param(const TexSlot *slot, GLenum pname) {
         case GL_TEXTURE_WRAP_T:     return slot->wrap_t;
         case GL_GENERATE_MIPMAP:    return slot->generate_mipmap;
         case GL_TEXTURE_MAX_LEVEL:  return slot->max_level < 0 ? 0 : slot->max_level;
+        case 0x8501 /*GL_TEXTURE_LOD_BIAS*/: return (GLint) slot->lod_bias;
         default:                    return 0;
     }
 }
