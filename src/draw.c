@@ -350,6 +350,22 @@ void novaIndexPointerFast(GLuint vbo, GLenum type) {
     g.fast_idx_type = type;
 }
 
+/* Resolve a fast-path VBO span to a GPU-fetchable base pointer. Heap-backed
+ * fallback storage (linear exhaustion, see vbo.c) can't be fetched by PICA —
+ * stage the span through the client ring instead. Returns NULL = skip draw. */
+static uint8_t *fast_vbo_gpu_base(VBOSlot *vbo, GLuint offset, int bytes) {
+    uint8_t *base = (uint8_t *) vbo->data + offset;
+    if (vbo_gpu_readable(vbo)) return base;
+    if (bytes <= 0 || bytes > g.client_array_buf_size) return NULL;
+    uint8_t *staged = (uint8_t *) linear_alloc_ring(g.client_array_buf,
+                                                    &g.client_array_buf_offset,
+                                                    bytes, g.client_array_buf_size);
+    if (!staged) return NULL;
+    memcpy(staged, base, (size_t) bytes);
+    GSPGPU_FlushDataCache(staged, (u32) bytes);
+    return staged;
+}
+
 void novaDrawObjects(GLenum mode, GLsizei count) {
     if (count <= 0) return;
     if (g.fast_vbo_id == 0 || g.fast_vbo_id >= NOVA_MAX_VBOS) return;
@@ -358,10 +374,13 @@ void novaDrawObjects(GLenum mode, GLsizei count) {
     if (!vbo->allocated || !vbo->data) return;
     if (vbo_is_packed_ptc(vbo)) return; /* fast path assumes raw 24-byte layout */
 
+    uint8_t *base = fast_vbo_gpu_base(vbo, g.fast_vbo_offset, count * 24);
+    if (!base) return;
+
     apply_gpu_state();
     /* novaDrawObjects PTC contract = 3-float position */
     nova_setup_attr_info(3);
-    nova_setup_buf_info((uint8_t *)vbo->data + g.fast_vbo_offset, 24);
+    nova_setup_buf_info(base, 24);
 
     if (mode == GL_QUADS) {
         draw_emulated_quads(count);
@@ -378,23 +397,41 @@ void novaDrawObjectsIndexed(GLenum mode, GLsizei count, const GLvoid *indices) {
     if (!vbo->allocated || !vbo->data) return;
     if (vbo_is_packed_ptc(vbo)) return;
 
+    GLenum t = g.fast_idx_type ? g.fast_idx_type : GL_UNSIGNED_SHORT;
+    int c3d_type = (t == GL_UNSIGNED_BYTE) ? C3D_UNSIGNED_BYTE : C3D_UNSIGNED_SHORT;
+    int esz = (t == GL_UNSIGNED_BYTE) ? 1 : 2;
+
     const void *gpu_indices = NULL;
     if (g.fast_idx_vbo_id > 0 && g.fast_idx_vbo_id < NOVA_MAX_VBOS) {
         VBOSlot *ivbo = &g.vbos[g.fast_idx_vbo_id];
         if (!ivbo->allocated || !ivbo->data) return;
         gpu_indices = (const uint8_t *)ivbo->data + (uintptr_t)indices;
+        if (!vbo_gpu_readable(ivbo)) {
+            /* Heap-backed index store — stage through the index ring. */
+            int ibytes = count * esz;
+            if (ibytes > g.index_buf_size) return;
+            uint8_t *staged = (uint8_t *) linear_alloc_ring(g.index_buf, &g.index_buf_offset,
+                                                            ibytes, g.index_buf_size);
+            if (!staged) return;
+            memcpy(staged, gpu_indices, (size_t) ibytes);
+            GSPGPU_FlushDataCache(staged, (u32) ibytes);
+            gpu_indices = staged;
+        }
     } else {
         gpu_indices = indices;
     }
     if (!gpu_indices) return;
 
-    GLenum t = g.fast_idx_type ? g.fast_idx_type : GL_UNSIGNED_SHORT;
-    int c3d_type = (t == GL_UNSIGNED_BYTE) ? C3D_UNSIGNED_BYTE : C3D_UNSIGNED_SHORT;
+    /* Indexed draw can reference any vertex up to the VBO's end — stage the
+     * whole remaining span when the store isn't GPU-fetchable. */
+    uint8_t *base = fast_vbo_gpu_base(vbo, g.fast_vbo_offset,
+                                      vbo->size - (int) g.fast_vbo_offset);
+    if (!base) return;
 
     apply_gpu_state();
     /* novaDrawObjectsIndexed PTC contract = 3-float position */
     nova_setup_attr_info(3);
-    nova_setup_buf_info((uint8_t *)vbo->data + g.fast_vbo_offset, 24);
+    nova_setup_buf_info(base, 24);
     C3D_DrawElements(gl_to_gpu_primitive(mode), count, c3d_type, gpu_indices);
 }
 

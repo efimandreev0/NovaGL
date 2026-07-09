@@ -879,6 +879,7 @@ void novaSwapBuffers(void) {
     /* New frame: re-arm the once-per-frame linear_alloc_ring mid-frame drain. */
     g.ring_synced_this_frame = 0;
     g.draws_since_split = 0;   /* auto-split counts per frame */
+    g.frame_index++;           /* throttles 1-per-60-frames diagnostics */
 
     /* Resume drawing into the app surface (the logical "screen"). */
     if (g.app_target) {
@@ -930,7 +931,10 @@ void nova_fini(void) {
         if (g.textures[i].allocated) C3D_TexDelete(&g.textures[i].tex);
     }
     for (int i = 0; i < NOVA_MAX_VBOS; i++) {
-        if (g.vbos[i].allocated && g.vbos[i].data) linearFree(g.vbos[i].data);
+        if (g.vbos[i].allocated && g.vbos[i].data) {
+            if (g.vbos[i].mem_kind == NOVA_VBO_MEM_HEAP) free(g.vbos[i].data);
+            else linearFree(g.vbos[i].data);
+        }
     }
 
     if (g.static_quad_indices) {
@@ -1255,7 +1259,8 @@ static int ms_resolve_attr(const NovaVertArray *va, int minComps, int maxComps, 
     if (va->vbo_id <= 0 || va->vbo_id >= NOVA_MAX_VBOS)
         return -1;
     VBOSlot *slot = &g.vbos[va->vbo_id];
-    if (!slot->allocated || !slot->data || vbo_is_packed_ptc(slot))
+    if (!slot->allocated || !slot->data || vbo_is_packed_ptc(slot) ||
+        !vbo_gpu_readable(slot)) /* heap fallback: PICA can't fetch it */
         return -1;
 
     GPU_FORMATS fmt;
@@ -1310,9 +1315,11 @@ static int try_draw_multistream(GLenum mode, GPU_Primitive_t prim, GLint first, 
     if (is_elements) {
         const int esz = (type == GL_UNSIGNED_SHORT) ? 2 : 1;
         c3dType = (type == GL_UNSIGNED_SHORT) ? C3D_UNSIGNED_SHORT : C3D_UNSIGNED_BYTE;
-        if (g.bound_element_array_buffer > 0 && g.bound_element_array_buffer < NOVA_MAX_VBOS) {
+        if (g.bound_element_array_buffer > 0 && g.bound_element_array_buffer < NOVA_MAX_VBOS &&
+            vbo_gpu_readable(&g.vbos[g.bound_element_array_buffer])) {
             gpuIdx = idx_src; /* EBO storage: linear + flushed on upload */
         } else {
+            /* Client indices or heap-backed EBO — stage through the ring. */
             const int ibytes = count * esz;
             if (ibytes > g.index_buf_size)
                 return 0;
@@ -1449,6 +1456,7 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
     if (!is_elements && !g.lighting_active &&
         g.va_vertex.enabled && g.va_vertex.vbo_id > 0 &&
         g.va_vertex.vbo_id < NOVA_MAX_VBOS && g.vbos[g.va_vertex.vbo_id].allocated &&
+        vbo_gpu_readable(&g.vbos[g.va_vertex.vbo_id]) && /* heap-backed VBO -> CPU-gather path */
         g.va_vertex.size == 3 && g.va_vertex.type == GL_FLOAT && g.va_vertex.stride == 24 && (uintptr_t) g.va_vertex.
         pointer == 0 &&
         g.va_texcoord.enabled && g.va_texcoord.vbo_id == g.va_vertex.vbo_id && g.va_texcoord.size == 2 && g.va_texcoord.
@@ -1505,6 +1513,7 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
         g.shade_model != GL_FLAT &&
         g.va_vertex.enabled && g.va_vertex.vbo_id > 0 && g.va_vertex.vbo_id < NOVA_MAX_VBOS &&
         g.vbos[g.va_vertex.vbo_id].allocated && !vbo_is_packed_ptc(&g.vbos[g.va_vertex.vbo_id]) &&
+        vbo_gpu_readable(&g.vbos[g.va_vertex.vbo_id]) && /* heap-backed VBO -> CPU-gather path */
         g.va_vertex.size == 3 && g.va_vertex.type == GL_FLOAT && g.va_vertex.stride == 24 &&
         g.va_texcoord.enabled && g.va_texcoord.vbo_id == g.va_vertex.vbo_id &&
         g.va_texcoord.size == 2 && g.va_texcoord.type == GL_FLOAT && g.va_texcoord.stride == 24 &&
@@ -1517,9 +1526,12 @@ void nova_draw_internal(GLenum mode, GLint first, GLsizei count, int is_elements
         int elem_size = (type == GL_UNSIGNED_SHORT) ? 2 : 1;
         const void *gpu_indices = NULL;
 
-        if (g.bound_element_array_buffer > 0 && g.bound_element_array_buffer < NOVA_MAX_VBOS) {
+        if (g.bound_element_array_buffer > 0 && g.bound_element_array_buffer < NOVA_MAX_VBOS &&
+            vbo_gpu_readable(&g.vbos[g.bound_element_array_buffer])) {
             gpu_indices = idx_src;
         } else {
+            /* Client indices OR a heap-backed EBO (idx_src already points at
+             * its store) — stage through the GPU-visible index ring. */
             int ibytes = count * elem_size;
             if (ibytes <= g.index_buf_size) {
                 void *staged = linear_alloc_ring(g.index_buf, &g.index_buf_offset,

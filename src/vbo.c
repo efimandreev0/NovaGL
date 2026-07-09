@@ -3,6 +3,7 @@
 //
 
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "NovaGL.h"
 #include "utils.h"
@@ -50,7 +51,7 @@ static void free_vbo_storage(VBOSlot *slot) {
         /* Deferred: this frame's queued draws may still read the block
          * (glDeleteBuffers right after a draw is common in streaming engines).
          * Freed by nova_vbo_gc_collect K frames later, like textures/rings. */
-        nova_vbo_defer_free(slot->data);
+        nova_vbo_defer_free(slot->data, slot->mem_kind);
     }
     slot->data = NULL;
     slot->allocated = 0;
@@ -58,6 +59,64 @@ static void free_vbo_storage(VBOSlot *slot) {
     slot->size = 0;
     slot->storage_kind = NOVA_VBO_STORAGE_RAW;
     slot->storage_stride = 0;
+    slot->mem_kind = NOVA_VBO_MEM_LINEAR;
+}
+
+/* Throttled memory-pressure diagnostics: aggregate and print AT MOST once per
+ * 60 frames, and only in debug builds (NOVAGL_NO_DEBUG strips them — the
+ * printf itself is measurable, and the old unthrottled FAILED spam could eat
+ * more frame time than the allocation). */
+#if !(defined(NOVAGL_NO_DEBUG) && NOVAGL_NO_DEBUG)
+static void vbo_log_heap_fallback(int bytes, int hard_fail) {
+    static int s_last_frame = -1000000;
+    static int s_falls, s_fails;
+    static long long s_bytes;
+    if (hard_fail) s_fails++;
+    else { s_falls++; s_bytes += bytes; }
+    if (g.frame_index - s_last_frame >= 60) {
+        printf("[NOVA] linear exhausted: %d VBO alloc(s) (%lld KB) -> heap fallback (CPU-gather), %d hard OOM. linearFree=%u\n",
+               s_falls, s_bytes / 1024, s_fails, (unsigned) linearSpaceFree());
+        s_last_frame = g.frame_index;
+        s_falls = s_fails = 0;
+        s_bytes = 0;
+    }
+}
+#else
+#define vbo_log_heap_fallback(bytes, hard_fail) ((void) 0)
+#endif
+
+/* VBO storage allocation chain:
+ *   1. linearAlloc — GPU-fetchable, zero-copy draw paths available.
+ *   2. On failure: nova_emergency_reclaim() (retire GPU, collect ALL deferred
+ *      frees — returns bytes and defragments), retry linearAlloc.
+ *   3. Still failing: regular heap. PICA cannot fetch from it, so
+ *      vbo_gpu_readable() gates every zero-copy path and such VBOs draw
+ *      through the CPU-gather ring — slower, but nothing disappears.
+ * The DMP driver's equivalent knob is GL_COPY_FCRAM_DMP vs NO_COPY: they too
+ * treat "where the buffer lives" as a per-buffer property, not a global. */
+static void vbo_storage_release_now(void *p, uint8_t kind) {
+    if (kind == NOVA_VBO_MEM_HEAP) free(p);
+    else linearFree(p);
+}
+
+static void *vbo_alloc_storage(int size, uint8_t *out_kind) {
+    void *p = linearAlloc((size_t) size);
+    if (!p) {
+        nova_emergency_reclaim();
+        p = linearAlloc((size_t) size);
+    }
+    if (p) {
+        *out_kind = NOVA_VBO_MEM_LINEAR;
+        return p;
+    }
+    p = malloc((size_t) size);
+    if (p) {
+        *out_kind = NOVA_VBO_MEM_HEAP;
+        vbo_log_heap_fallback(size, 0);
+    } else {
+        vbo_log_heap_fallback(size, 1);
+    }
+    return p;
 }
 
 // half-float PTC packing never got turned on (this always return 0). pack code
@@ -113,20 +172,23 @@ void vbo_convert_slot_to_raw(VBOSlot *slot) {
         return;
     }
 
-    void *decoded = linearAlloc((size_t) slot->size);
+    uint8_t new_kind = NOVA_VBO_MEM_LINEAR;
+    void *decoded = vbo_alloc_storage(slot->size, &new_kind);
     if (!decoded) {
         gl_set_error(GL_OUT_OF_MEMORY);
         return;
     }
 
     vbo_decode_packed_ptc_span(slot, 0, slot->size / NOVA_VBO_PTC_RAW_STRIDE, (uint8_t *) decoded);
-    nova_vbo_defer_free(slot->data); /* GPU may still read the packed block */
+    nova_vbo_defer_free(slot->data, slot->mem_kind); /* GPU may still read the packed block */
     slot->data = decoded;
     slot->capacity = slot->size;
     slot->storage_kind = NOVA_VBO_STORAGE_RAW;
     slot->storage_stride = 0;
     slot->allocated = 1;
-    GSPGPU_FlushDataCache(slot->data, (u32) slot->size);
+    slot->mem_kind = new_kind;
+    if (vbo_gpu_readable(slot))
+        GSPGPU_FlushDataCache(slot->data, (u32) slot->size);
 }
 
 void glGenBuffers(GLsizei n, GLuint *buffers) {
@@ -272,77 +334,67 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
                          (is_stream || slot->capacity <= desired_bytes * 4);
 
     if (!reuse_existing) {
-        /* Round capacity up to the next power of two for ALL usages (not just
-         * streaming). The infinite-world chunk renderer re-tessellates a sliding
-         * window of static VBOs constantly, each time at a slightly different
-         * exact size; allocating those exact sizes shreds the linear heap into
-         * unusable fragments until linearAlloc fails with plenty of free bytes
-         * left. Quantizing to powers of two makes nearby sizes land on the same
-         * capacity, so the reuse path above takes over and we stop reallocating.
-         * The non-stream reuse check still shrinks a buffer that becomes >4x
-         * oversized, so this does not ratchet unbounded. */
-        int new_capacity = desired_bytes;
-        {
-            int p = 256;
-            while (p < new_capacity) p <<= 1;
+        /* Capacity quantization, two regimes:
+         *  - >= 4KB: next power of two. The infinite-world chunk renderer
+         *    re-tessellates a sliding window of static VBOs constantly, each
+         *    time at a slightly different size; exact-size allocs shred the
+         *    linear heap into unusable fragments. Pow2 makes nearby sizes land
+         *    on the same capacity so the reuse path above takes over.
+         *  - < 4KB: 64-byte granularity. OSG-style engines create THOUSANDS of
+         *    tiny VBOs (the id counter passes 2000 in OpenMW); pow2-rounding
+         *    those wasted up to ~2x per buffer (1025->2048), megabytes across
+         *    the fleet, for no anti-churn benefit (small re-tessellations are
+         *    cheap anyway). */
+        int new_capacity;
+        if (desired_bytes >= 4096) {
+            int p = 4096;
+            while (p < desired_bytes) p <<= 1;
             new_capacity = p;
+        } else {
+            new_capacity = (desired_bytes + 63) & ~63;
+            if (new_capacity < 64) new_capacity = 64;
         }
 
-        // Alloc-before-free (safe-fallback rework): a mid-frame linear
-        // exhaustion must NOT leave the slot empty — an empty VBO wedges the
-        // draw path (all its geometry gets routed through the client-array
-        // gather ring, which then can't grow under the same exhaustion and
-        // hangs). So keep old_buf alive across the new linearAlloc:
-        //   1. Try linearAlloc(new_capacity) while old_buf is still held.
-        //   2. If that fails AND we have an old_buf, free old_buf and retry
-        //      ONCE — this restores the original anti-fragmentation behaviour
-        //      (releasing the old block can defragment enough linear space for
-        //      the new one) as a fallback only.
-        //   3. If it STILL fails: DO NOT zero the slot. Leave the previous
-        //      valid data/capacity/allocated/size intact so the VBO keeps its
-        //      last (stale but drawable) geometry, set GL_OUT_OF_MEMORY, return.
-        // A fresh VBO (no old_buf) that fails stays data=NULL/allocated=0 — the
-        // draw path skips it (see nova_draw_internal / ms_resolve_attr guards).
+        // Alloc-before-free: a mid-frame exhaustion must NOT leave the slot
+        // empty (an empty VBO wedges the draw path). vbo_alloc_storage already
+        // chains linear -> emergency reclaim -> linear -> HEAP, so a NULL here
+        // means even the heap is gone:
+        //   1. Try the chain while old_buf is still held.
+        //   2. On total failure with an old_buf: release it immediately and
+        //      retry the chain once (the freed block may be exactly what the
+        //      allocator needs).
+        //   3. Still failing: keep the previous (stale but drawable) contents,
+        //      set GL_OUT_OF_MEMORY, return.
         void *old_buf = slot->data;
+        uint8_t old_kind = slot->mem_kind;
+        uint8_t new_kind = NOVA_VBO_MEM_LINEAR;
 
-        void *new_buf = linearAlloc((size_t) new_capacity);
+        void *new_buf = vbo_alloc_storage(new_capacity, &new_kind);
         if (!new_buf && old_buf) {
-            // Retry once after releasing the old block (anti-fragmentation
-            // fallback). From here old_buf is gone; a second failure leaves the
-            // slot EMPTY (data=NULL/allocated=0) — but that only happens when we
-            // just freed a block big enough that the retry should normally
-            // succeed. The draw-path guards still cover the empty case.
-            linearFree(old_buf);
+            vbo_storage_release_now(old_buf, old_kind);
             old_buf = NULL;
             slot->data = NULL;
             slot->allocated = 0;
             slot->capacity = 0;
-            new_buf = linearAlloc((size_t) new_capacity);
+            new_buf = vbo_alloc_storage(new_capacity, &new_kind);
         }
         if (!new_buf) {
-            printf("[NOVA] glBufferData: linearAlloc(%d) FAILED (linearSpaceFree=%u). "
-                   "VBO id=%u keeps %s.\n",
-                   new_capacity, (unsigned) linearSpaceFree(), (unsigned) id,
-                   old_buf ? "STALE geometry" : "empty (fresh VBO)");
             gl_set_error(GL_OUT_OF_MEMORY);
-            // old_buf != NULL here means we never freed it: slot->data /
-            // capacity / allocated / size are all still the previous valid
-            // values, so the VBO stays drawable with stale contents. Return
-            // WITHOUT touching slot->size below.
+            // old_buf != NULL here means we never freed it: the VBO stays
+            // drawable with stale contents. Return WITHOUT touching size.
             return;
         }
 
         // New alloc succeeded — release the old block DEFERRED: draws issued
         // earlier this frame may still read it (respecify-after-draw), so it
-        // parks in the frame-slot GC instead of going back to linearAlloc now.
-        // (The retry path above keeps its immediate linearFree on purpose —
-        // it exists to reclaim space RIGHT NOW under linear exhaustion.)
+        // parks in the frame-slot GC instead of going back to the allocator now.
         if (old_buf)
-            nova_vbo_defer_free(old_buf);
+            nova_vbo_defer_free(old_buf, old_kind);
 
         slot->data = new_buf;
         slot->capacity = new_capacity;
         slot->allocated = 1;
+        slot->mem_kind = new_kind;
     }
 
     slot->size = size;
@@ -354,8 +406,10 @@ void glBufferData(GLenum target, GLsizeiptr size, const GLvoid *data, GLenum usa
     if (data && slot->data) {
         memcpy(slot->data, data, size);
         // flush only size, not the rounded-up capacity, else we pay double for
-        // big stream VBO for no reason
-        GSPGPU_FlushDataCache(slot->data, (u32) size);
+        // big stream VBO for no reason. Heap-backed stores are never read by
+        // the GPU (CPU-gather only) — no flush needed at all.
+        if (vbo_gpu_readable(slot))
+            GSPGPU_FlushDataCache(slot->data, (u32) size);
     }
 }
 
@@ -420,7 +474,8 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
         while (new_capacity < required)
             new_capacity += new_capacity / 2 + 1;
 
-        void *new_buf = linearAlloc((size_t) new_capacity);
+        uint8_t new_kind = NOVA_VBO_MEM_LINEAR;
+        void *new_buf = vbo_alloc_storage(new_capacity, &new_kind);
         if (!new_buf) {
             gl_set_error(GL_OUT_OF_MEMORY);
             return;
@@ -428,12 +483,13 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
 
         if (slot->data && slot->capacity > 0) {
             memcpy(new_buf, slot->data, (size_t) slot->capacity);
-            nova_vbo_defer_free(slot->data); /* may still be read by this frame's draws */
+            nova_vbo_defer_free(slot->data, slot->mem_kind); /* may still be read by this frame's draws */
         }
 
         slot->data = new_buf;
         slot->capacity = new_capacity;
         slot->allocated = 1;
+        slot->mem_kind = new_kind;
     }
 
     memcpy((uint8_t *) slot->data + offset, data, size);
@@ -442,12 +498,15 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const GLvo
         slot->size = required;
 
     // flush only the range we wrote. ARM11 cache line is 32 byte so round to it.
-    // streaming app call this many times a frame, full flush kill cpu on big VBO
-    uintptr_t start = (uintptr_t) slot->data + (uintptr_t) offset;
-    uintptr_t end = start + (uintptr_t) size;
-    start &= ~(uintptr_t) 31;
-    end = (end + 31) & ~(uintptr_t) 31;
-    GSPGPU_FlushDataCache((const void *) start, (u32) (end - start));
+    // streaming app call this many times a frame, full flush kill cpu on big VBO.
+    // heap-backed stores skip it entirely (GPU never fetches them).
+    if (vbo_gpu_readable(slot)) {
+        uintptr_t start = (uintptr_t) slot->data + (uintptr_t) offset;
+        uintptr_t end = start + (uintptr_t) size;
+        start &= ~(uintptr_t) 31;
+        end = (end + 31) & ~(uintptr_t) 31;
+        GSPGPU_FlushDataCache((const void *) start, (u32) (end - start));
+    }
 }
 
 void glReadBuffer(GLenum mode) {
@@ -522,6 +581,8 @@ GLboolean glUnmapBuffer(GLenum target) {
     if (!slot->mapped) { gl_set_error(GL_INVALID_OPERATION); return GL_FALSE; } /* not mapped */
     slot->mapped = 0;
     // just flush the whole buffer, we dont track the mapped range. cheap enough.
-    GSPGPU_FlushDataCache(slot->data, (u32) slot->size);
+    // heap-backed stores are CPU-gathered — no flush needed.
+    if (vbo_gpu_readable(slot))
+        GSPGPU_FlushDataCache(slot->data, (u32) slot->size);
     return GL_TRUE;
 }

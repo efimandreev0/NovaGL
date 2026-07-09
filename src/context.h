@@ -148,6 +148,14 @@ typedef struct {
     uint8_t rt_volatile;
 } TexSlot;
 
+/* Where a VBO's data store physically lives. LINEAR is GPU-fetchable (the
+ * zero-copy draw paths may point PICA straight at it); HEAP is the linear-
+ * exhaustion fallback — PICA cannot fetch from the regular heap, so draws
+ * from such a VBO are forced through the CPU-gather path (which reads the
+ * data with the CPU and stages interleaved verts into the linear ring). */
+#define NOVA_VBO_MEM_LINEAR 0
+#define NOVA_VBO_MEM_HEAP   1
+
 typedef struct {
     //struct data
     void *data;
@@ -159,9 +167,14 @@ typedef struct {
     int is_stream;
     uint8_t storage_kind;
     uint8_t storage_stride;
+    uint8_t mem_kind;       /* NOVA_VBO_MEM_* */
     GLenum usage;
     uint8_t mapped;
 } VBOSlot;
+
+static inline int vbo_gpu_readable(const VBOSlot *s) {
+    return s->mem_kind == NOVA_VBO_MEM_LINEAR;
+}
 
 #define NOVA_MAX_FBOS 64
 
@@ -525,6 +538,8 @@ extern struct NovaState {
      * gone. See novaSetFrameBuffers(). */
     int frame_buffers;        /* K = 1/2/3 */
     int frame_slot;           /* current ring/GC slot, 0..K-1 */
+    int frame_index;          /* monotonic frame counter (novaSwapBuffers) —
+                               * used to throttle diagnostic logs to 1/60 frames */
     int c3d_frame_flag;       /* C3D_FrameBegin flag: SYNCDRAW (K==1) or 0 (async) */
     int swap_interval;        /* novaSetSwapInterval: 0 = free-run (no VBlank wait
                                * at swap), N>0 = wait N VBlanks. Default comes from

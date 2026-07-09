@@ -65,29 +65,61 @@ static int s_ring_gc_count[3];
  * window under async frame_buffers>1). */
 #define NOVA_VBO_GC_MAX 64
 static void *s_vbo_gc[3][NOVA_VBO_GC_MAX];
+static uint8_t s_vbo_gc_kind[3][NOVA_VBO_GC_MAX];
 static int s_vbo_gc_count[3];
 
-void nova_vbo_defer_free(void *p) {
+static void vbo_storage_free_now(void *p, int mem_kind) {
+    if (mem_kind == NOVA_VBO_MEM_HEAP)
+        free(p);
+    else
+        linearFree(p);
+}
+
+void nova_vbo_defer_free(void *p, int mem_kind) {
     if (!p) return;
     int s = g.frame_slot;
-    if (s_vbo_gc_count[s] < NOVA_VBO_GC_MAX)
+    if (s_vbo_gc_count[s] < NOVA_VBO_GC_MAX) {
+        s_vbo_gc_kind[s][s_vbo_gc_count[s]] = (uint8_t) mem_kind;
         s_vbo_gc[s][s_vbo_gc_count[s]++] = p;
-    else
-        linearFree(p); /* bucket full — old immediate-free behaviour */
+    } else {
+        vbo_storage_free_now(p, mem_kind); /* bucket full — old immediate-free behaviour */
+    }
 }
 
 void nova_vbo_gc_collect(void) {
     int s = g.frame_slot;
     for (int i = 0; i < s_vbo_gc_count[s]; i++)
-        linearFree(s_vbo_gc[s][i]);
+        vbo_storage_free_now(s_vbo_gc[s][i], s_vbo_gc_kind[s][i]);
     s_vbo_gc_count[s] = 0;
 }
 
 void nova_vbo_gc_collect_all(void) {
     for (int s = 0; s < 3; s++) {
         for (int i = 0; i < s_vbo_gc_count[s]; i++)
-            linearFree(s_vbo_gc[s][i]);
+            vbo_storage_free_now(s_vbo_gc[s][i], s_vbo_gc_kind[s][i]);
         s_vbo_gc_count[s] = 0;
+    }
+}
+
+/* On-allocation-failure reclaim (see utils.h). The drain retires every queued
+ * command list — including previous async frames (C3D_FrameBegin SYNCDRAW
+ * waits for the whole queue) — after which every deferred-free bucket of
+ * every frame slot is provably safe to collect. This both returns bytes AND
+ * defragments the linear heap (freed VBO/tex/ring blocks coalesce). */
+void nova_emergency_reclaim(void) {
+    nova_batch_flush();
+    nova_midframe_drain();
+    nova_tex_gc_collect_all();
+    nova_fbo_gc_collect_all();
+    nova_vbo_gc_collect_all();
+    for (int s = 0; s < 3; s++) {
+        for (int i = 0; i < s_ring_gc_count[s]; i++) {
+            if (s_ring_gc[s][i]) {
+                linearFree(s_ring_gc[s][i]);
+                s_ring_gc[s][i] = NULL;
+            }
+        }
+        s_ring_gc_count[s] = 0;
     }
 }
 

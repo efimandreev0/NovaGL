@@ -42,10 +42,18 @@ void nova_ring_gc_collect(void);
  * after a draw); linearFree'ing it immediately hands the block to the next
  * linearAlloc, which then overwrites it under the GPU's feet. Push instead —
  * the block is freed K frames later by the frame-slot GC (same rotation as
- * rings/textures). Falls back to an immediate free if the bucket overflows. */
-void nova_vbo_defer_free(void *p);
+ * rings/textures). Falls back to an immediate free if the bucket overflows.
+ * mem_kind (NOVA_VBO_MEM_*) selects linearFree vs free on collection. */
+void nova_vbo_defer_free(void *p, int mem_kind);
 void nova_vbo_gc_collect(void);
 void nova_vbo_gc_collect_all(void);
+
+/* Last-ditch memory reclaim on allocation failure: flush the batch, retire
+ * ALL in-flight GPU work (mid-frame drain — costs a partial present), then
+ * collect every deferred-free bucket of every frame slot (safe: GPU idle).
+ * Frees both linear bytes and fragmentation. Call ONLY on an alloc failure
+ * path — it stalls. */
+void nova_emergency_reclaim(void);
 
 /* Clear the PICA on-chip early-depth buffer (GPUREG_EARLYDEPTH_CLEAR).
  * citro3d NEVER clears it, so without this every frame tests against stale
